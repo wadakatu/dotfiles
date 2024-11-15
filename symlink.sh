@@ -1,17 +1,28 @@
 #!/bin/bash
 
-THIS_DIR=$(cd "$(dirname $0)" || exit; pwd)
+THIS_DIR=$(cd "$(dirname "$0")" || exit; pwd)
 
 ZSH_DIR="$THIS_DIR/zsh"
-CONFIG_ZSH_DIR="$HOME/.config/zsh"
-GIT_DIR=$THIS_DIR/git
-CONFIG_GIT_DIR="$HOME/.config/git"
-VIM_DIR=$THIS_DIR/vim
+GIT_DIR="$THIS_DIR/git"
+VIM_DIR="$THIS_DIR/vim"
+
+# 特別なファイルのリンク先を管理
+get_special_dest() {
+    local filename=$1
+    case "$filename" in
+        ".zshenv") echo "$HOME/.zshenv" ;;
+        ".zshrc") echo "$HOME/.zshrc" ;;
+        ".gitconfig") echo "$HOME/.gitconfig" ;;
+        ".gitignore_global") echo "$HOME/.config/git/ignore" ;;
+        ".vimrc") echo "$HOME/.vimrc" ;;
+        *) echo "" ;;  # 特別な指定がない場合は空
+    esac
+}
 
 # シンボリックリンクを貼るための関数
 create_symlink() {
-    src=$1
-    dest=$2
+    local src=$1
+    local dest=$2
 
     # 既存のファイル/リンクがある場合はバックアップ
     if [ -e "$dest" ] || [ -L "$dest" ]; then
@@ -24,45 +35,23 @@ create_symlink() {
     echo "シンボリックリンクを作成しました: $src -> $dest"
 }
 
-# ~/.config/zsh ディレクトリが存在しない場合は作成
-mkdir -p "$CONFIG_ZSH_DIR"
-mkdir -p "$CONFIG_GIT_DIR"
+# 指定されたディレクトリでシンボリックリンクを作成
+process_directory() {
+    local src_dir=$1
+    local default_dest_dir=$2
+    mkdir -p "$default_dest_dir"
 
-# dotglobを有効にして隠しファイルも取得
-shopt -s dotglob
+    find "$src_dir" -mindepth 1 -maxdepth 1 -type f | while read -r file; do
+        local filename=$(basename "$file")
+        local dest=$(get_special_dest "$filename")
 
-# zshディレクトリ内の各ファイルをループ
-for file in "$ZSH_DIR"/*; do
-    filename=$(basename "$file")
+        # 特別なリンク先がなければデフォルトのディレクトリを使用
+        [ -z "$dest" ] && dest="$default_dest_dir/$filename"
+        create_symlink "$file" "$dest"
+    done
+}
 
-    if [ "$filename" = ".zshenv" ] || [ "$filename" = ".zshrc" ]; then
-        create_symlink "$file" "$HOME/$filename"
-    else
-        create_symlink "$file" "$CONFIG_ZSH_DIR/$filename"
-    fi
-done
-
-# gitディレクトリ内の各ファイルをループ
-for file in "$GIT_DIR"/*; do
-    filename=$(basename "$file")
-
-    if [ "$filename" = ".gitconfig" ]; then
-        create_symlink "$file" "$HOME/$filename"
-    fi
-
-    if [ "$filename" = ".gitignore_global" ]; then
-        create_symlink "$file" "$CONFIG_GIT_DIR/ignore"
-    fi
-done
-
-# vimディレクトリ内の各ファイルをループ
-for file in "$GIT_DIR"/*; do
-    filename=$(basename "$file")
-
-    if [ "$filename" = ".vimrc" ]; then
-        create_symlink "$file" "$HOME/$filename"
-    fi
-done
-
-# dotglobの設定を元に戻す
-shopt -u dotglob
+# 実行
+process_directory "$ZSH_DIR" "$HOME/.config/zsh"
+process_directory "$GIT_DIR" "$HOME/.config/git"
+process_directory "$VIM_DIR" "$HOME"
