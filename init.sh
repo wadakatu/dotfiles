@@ -1,7 +1,7 @@
 #!/bin/bash
 THIS_DIR=$(cd "$(dirname "$0")" || exit; pwd)
 
-echo "Dotfiles installation started."
+echoo "Dotfiles installation started."
 
 # Rosetta
 if ! sudo softwareupdate --install-rosetta --agree-to-license; then
