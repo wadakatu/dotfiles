@@ -5,7 +5,7 @@
 [alias]
         st = status
         c  = commit
-
+	    pushff = push --force-with-lease --force-if-includes
 [init]
 	    defaultBranch = main
 
