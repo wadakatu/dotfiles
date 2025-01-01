@@ -11,9 +11,6 @@ if ! type "brew" >/dev/null 2>&1; then
     fi
 fi
 
-echo "run brew doctor ..."
-brew doctor || { echo "brew doctor failed" >&2; exit 1; }
-
 echo "run brew update ..."
 brew update || { echo "brew update failed" >&2; exit 1; }
 
@@ -25,3 +22,6 @@ brew bundle --file="${THIS_DIR}/Brewfile" || { echo "brew bundle failed" >&2; ex
 
 echo "run brew cleanup ..."
 brew cleanup || { echo "brew cleanup failed" >&2; exit 1; }
+
+echo "run brew doctor ..."
+brew doctor || { echo "brew doctor failed" >&2; exit 1; }
