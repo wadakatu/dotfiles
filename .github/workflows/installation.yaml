@@ -10,11 +10,8 @@ permissions:
   contents: read
 
 jobs:
-  make:
+  installation:
     runs-on: macos-latest
-    defaults:
-      run:
-        shell: bash
     steps:
       - uses: actions/checkout@v4
       - name: Setup Dotfiles
