@@ -10,10 +10,10 @@ if ! sudo softwareupdate --install-rosetta --agree-to-license; then
 fi
 
 # Dotfiles
-sh "${THIS_DIR}/symlink.sh"
+sh "${THIS_DIR}/symlink.sh" || exit 1
 
 # Homebrew
-sh "${THIS_DIR}/brew.sh"
+sh "${THIS_DIR}/brew.sh" || exit 1
 
 # zshを使用している場合のみ再読み込み
 if [ "$SHELL" = "/bin/zsh" ] || [ "$SHELL" = "/usr/bin/zsh" ]; then
