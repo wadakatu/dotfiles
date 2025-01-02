@@ -24,4 +24,6 @@ echo "run brew cleanup ..."
 brew cleanup || { echo "brew cleanup failed" >&2; exit 1; }
 
 echo "run brew doctor ..."
+brew untap homebrew/cask
+brew untap homebrew/core
 brew doctor || { echo "brew doctor failed" >&2; exit 1; }
