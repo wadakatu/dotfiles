@@ -18,7 +18,7 @@ echo "run brew upgrade ..."
 brew upgrade || { echo "brew upgrade failed" >&2; exit 1; }
 
 echo "run brew bundle ..."
-brew bundle --file="${THIS_DIR}/Brewfile" || { echo "brew bundle failed" >&2; exit 1; }
+brew bundle --file="${THIS_DIR}" || { echo "brew bundle failed" >&2; exit 1; }
 
 echo "run brew cleanup ..."
 brew cleanup || { echo "brew cleanup failed" >&2; exit 1; }
