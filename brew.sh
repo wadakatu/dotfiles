@@ -25,5 +25,5 @@ brew cleanup || { echo "brew cleanup failed" >&2; exit 1; }
 
 echo "run brew doctor ..."
 brew untap homebrew/cask homebrew/core
-brew uninsall --ignore-dependencies ruby openssl
+brew uninstall --ignore-dependencies ruby openssl
 brew doctor || { echo "brew doctor failed" >&2; exit 1; }
