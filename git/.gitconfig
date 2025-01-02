@@ -1,30 +1,32 @@
 [user]
-            name = wadakatu
-            email = wadakatukoyo330@gmail.com
+    name = wadakatu
+    email = wadakatukoyo330@gmail.com
 
 [alias]
-            st = status
-            c  = commit
-	    pushff = push --force-with-lease --force-if-includes
+    st = status
+    c  = commit
+    pushff = push --force-with-lease --force-if-includes
 [init]
-	    defaultBranch = main
+    defaultBranch = main
 
 [core]
-            editor = vim
-            ignorecase = false
-            quotepath = false
+    editor = vim
+    ignorecase = false
+    quotepath = false
 
 [color]
-            ui = auto
+    ui = auto
 
 [push]
-	    default = simple
+    default = simple
 
 [credential]
-            helper = osxkeychain
+    helper = osxkeychain
 
 [filter "lfs"]
-            clean = git-lfs clean -- %f
-            smudge = git-lfs smudge -- %f
-            process = git-lfs filter-process
-            required = true
+    clean = git-lfs clean -- %f
+    smudge = git-lfs smudge -- %f
+    process = git-lfs filter-process
+    required = true
+[pull]
+    rebase = true
