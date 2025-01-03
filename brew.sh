@@ -20,5 +20,8 @@ brew bundle --file="${THIS_DIR}" || { echo "brew bundle failed" >&2; exit 1; }
 echo "run brew cleanup ..."
 brew cleanup || { echo "brew cleanup failed" >&2; exit 1; }
 
+echo "run brew autoremove ..."
+brew autoremove || { echo "brew autoremove failed" >&2; exit 1; }
+
 echo "run brew doctor ..."
-brew doctor
+brew doctor || { echo "brew doctor failed" >&2; exit 1; }
