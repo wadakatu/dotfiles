@@ -1,15 +1,12 @@
-if ! type "brew" >/dev/null 2>&1; then
-    echo "installing Homebrew ..."
-    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/master/install.sh)"
-    if [[ -x /opt/homebrew/bin/brew ]]; then
-        eval "$(/opt/homebrew/bin/brew shellenv)"
-    elif [[ -x /usr/local/bin/brew ]]; then
-        eval "$(/usr/local/bin/brew shellenv)"
-    else
-        echo "Error: Homebrew installation failed." >&2
-        exit 1
-    fi
+#!/bin/bash
+
+if [ "$(uname)" != "Darwin" ] ; then
+	echo "Not macOS!"
+	exit 1
 fi
+
+echo "run installing Homebrew ..."
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" || { echo "installing Homebrew failed" >&2; exit 1; }
 
 echo "run brew update ..."
 brew update || { echo "brew update failed" >&2; exit 1; }
