@@ -5,8 +5,11 @@ if [ "$(uname)" != "Darwin" ] ; then
 	exit 1
 fi
 
-echo "run installing Homebrew ..."
+echo "run install Homebrew ..."
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" || { echo "installing Homebrew failed" >&2; exit 1; }
+
+echo "run remove homebrew/core, homebrew/cask"
+brew untap homebrew/core homebrew/cask
 
 echo "run brew update ..."
 brew update || { echo "brew update failed" >&2; exit 1; }
