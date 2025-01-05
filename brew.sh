@@ -27,4 +27,6 @@ echo "run brew autoremove ..."
 brew autoremove || { echo "brew autoremove failed" >&2; exit 1; }
 
 echo "run brew doctor ..."
+brew uses --installed openssl@1.1
+brew uses --installed ruby@3.0
 brew doctor || { echo "brew doctor failed" >&2; exit 1; }
