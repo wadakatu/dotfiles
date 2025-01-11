@@ -42,8 +42,11 @@ process_directory() {
     mkdir -p "$default_dest_dir"
 
     find "$src_dir" -mindepth 1 -maxdepth 1 -type f | while read -r file; do
-        local filename=$(basename "$file")
-        local dest=$(get_special_dest "$filename")
+        local filename
+        local dest
+
+        filename=$(basename "$file")
+        dest=$(get_special_dest "$filename")
 
         # 特別なリンク先がなければデフォルトのディレクトリを使用
         [ -z "$dest" ] && dest="$default_dest_dir/$filename"
