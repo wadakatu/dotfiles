@@ -20,7 +20,7 @@ This repository contains configuration files (dotfiles) to quickly set up a macO
 1. **Clone the repository**
 
    ```bash
-   git clone https://github.com/yourusername/dotfiles.git
+   git clone https://github.com/wadakatu/dotfiles.git
    cd dotfiles
    ```
 
