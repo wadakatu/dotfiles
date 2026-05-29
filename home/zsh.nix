@@ -38,6 +38,7 @@
     "$HOME/Library/Application Support/Herd/bin"
     "$HOME/.volta/bin"
     "$HOME/.cargo/bin"
+    "$HOME/.local/bin"
   ];
 
   # 旧 .fzf.zsh 全部を置き換え。シェル統合と key-bindings/completion を有効化。
