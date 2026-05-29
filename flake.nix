@@ -53,8 +53,13 @@
           home = "/Users/koyoisono";
         };
 
+        # nix-darwin は system activation を root で実行する方式へ移行した。
+        # homebrew.* など「実行ユーザーに紐づく」オプションは、root ではなく
+        # この primaryUser に適用される。homebrew.enable を使うには宣言必須。
+        system.primaryUser = "koyoisono";
+
         # システムにインストールされるパッケージ。動作確認用に vim を1つだけ。
-        # Phase 3 で CLI ツール群をここに移行する。
+        # ユーザー領域の CLI ツールは home/packages.nix (home.packages) 側で管理する。
         environment.systemPackages = [ pkgs.vim ];
 
         # darwin-version コマンドが返す revision に git commit hash を埋め込む。
@@ -77,6 +82,7 @@
           determinate.darwinModules.default
           home-manager.darwinModules.home-manager
           configuration
+          ./modules/homebrew.nix
           {
             # useGlobalPkgs: home-manager に独自の nixpkgs を持たせず、
             # nix-darwin と同じ nixpkgs を共有。ストア肥大化を防ぐ。
