@@ -1,0 +1,37 @@
+# nix-darwin の flake が壊れていないかを PR / main push で自動検証する CI。
+# 旧 installation.yaml / shell_check.yml (レガシースクリプト用) の後継。
+name: nix
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# determinate-nix-action が FlakeHub Cache を OIDC で利用するために必要。
+# contents:read は checkout 用の最小権限。
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  darwin:
+    # GitHub の macOS ランナーは arm64。flake の
+    # nixpkgs.hostPlatform = "aarch64-darwin" と一致させ、実機と同じ条件でビルドする。
+    # (Linux ランナーだと aarch64-darwin をビルドできず、flake check も
+    #  全 system を評価しにいくため darwin 構成が巻き込まれる: NixOS/nix#6806)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      # Determinate Nix をインストール。flakes / nix-command はデフォルト有効。
+      # determinate-nix-action は FlakeHub Cache 連携版 (inputs が flakehub.com URL のため)。
+      - uses: DeterminateSystems/determinate-nix-action@v3
+
+      # flake の構造とすべての output が評価できることを検証する。
+      - name: nix flake check
+        run: nix flake check --show-trace
+
+      # darwin-system を実際にビルドして、switch が通る状態かを確かめる。
+      # --no-link: 結果のシンボリックリンク (result) を作らない。CI では不要。
+      - name: build darwin system
+        run: nix build .#darwinConfigurations.mymac.system --no-link --show-trace
