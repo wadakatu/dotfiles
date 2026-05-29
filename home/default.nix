@@ -5,6 +5,7 @@
     ./zsh.nix
     ./git.nix
     ./vim.nix
+    ./packages.nix
   ];
 
   # ユーザー識別。/Users/koyoisono が home-manager の管理対象。
