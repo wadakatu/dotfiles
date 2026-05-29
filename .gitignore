@@ -1,0 +1,6 @@
+# nix-darwin / home-manager build artifacts
+result
+result-*
+
+# Claude Code per-project local settings
+.claude/settings.local.json
