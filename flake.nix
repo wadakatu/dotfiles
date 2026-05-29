@@ -83,6 +83,7 @@
           home-manager.darwinModules.home-manager
           configuration
           ./modules/homebrew.nix
+          ./system/defaults.nix
           {
             # useGlobalPkgs: home-manager に独自の nixpkgs を持たせず、
             # nix-darwin と同じ nixpkgs を共有。ストア肥大化を防ぐ。
