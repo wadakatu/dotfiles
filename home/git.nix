@@ -11,6 +11,7 @@
       ".AppleDouble"
       ".LSOverride"
       ".idea"
+      "**/.claude/settings.local.json"
     ];
 
     # 旧 [filter "lfs"] セクション。enable = true だけで filter 4行を自動生成。
