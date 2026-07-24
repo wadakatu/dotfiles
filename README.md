@@ -64,11 +64,35 @@ git clone https://github.com/wadakatu/dotfiles.git ~/www/dotfiles
 cd ~/www/dotfiles
 
 # 評価とビルド。ユーザー環境にはまだ適用しない
-nix flake check --show-trace
-nix build .#darwinConfigurations.mymac.system --no-link --show-trace
+nix flake check --no-update-lock-file path:. --show-trace
+nix build path:.#darwinConfigurations.mymac.system --no-link --show-trace
+```
 
-# 初回だけ nix run で darwin-rebuild を起動する
-sudo nix run nix-darwin/master#darwin-rebuild -- \
+Determinate NixのmacOSパッケージは、インストール時に
+`/etc/nix/nix.custom.conf`を通常ファイルとして作成する。一方、この構成は
+`determinateNix.customSettings`で同じファイルをnix-darwinの管理対象にするため、
+初回activationの前に既存設定を確認して管理を引き継ぐ。
+
+次のコマンドはコメントと空行を除いた設定キーだけを表示し、値は表示しない。
+
+```bash
+sudo awk -F= '/^[[:space:]]*($|#)/{next}{key=$1;gsub(/^[[:space:]]+|[[:space:]]+$/,"",key);print key}' /etc/nix/nix.custom.conf
+```
+
+何も表示されなければ、既存ファイルを削除せずバックアップ名へ退避する。
+
+```bash
+sudo mv /etc/nix/nix.custom.conf /etc/nix/nix.custom.conf.before-nix-darwin
+```
+
+設定キーが表示された場合は退避前に止まり、必要な設定を
+`determinateNix.customSettings`へ移植する。トークン等の値はGitへコミットしない。
+
+初回だけ`nix run`で`darwin-rebuild`を起動する。`sudo -H`でrootの`HOME`を
+`/var/root`にし、ユーザーHOMEの所有権警告を避ける。
+
+```bash
+sudo -H /nix/var/nix/profiles/default/bin/nix run nix-darwin/master#darwin-rebuild -- \
   switch --flake .#mymac
 ```
 
