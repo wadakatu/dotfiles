@@ -42,8 +42,9 @@
         # Determinate にインストールされた Nix を使う宣言。
         # これを true にすることで nix-darwin 側の nix.* 系オプションは無効化される。
         # customSettings = {} は /etc/nix/nix.custom.conf (Determinate が作成するファイル) の
-        # 所有権を nix-darwin に渡す宣言。これを書かないと "Unexpected files in /etc" で
-        # activation が中断する (https://github.com/LnL7/nix-darwin/issues/1298)。
+        # 所有権を nix-darwin に渡す宣言。Determinate導入直後の通常ファイルは初回activation前に
+        # 内容を確認して .before-nix-darwin へ退避する (README参照)。この宣言がない場合も
+        # "Unexpected files in /etc" でactivationが中断する。
         determinateNix = {
           enable = true;
           customSettings = { };
