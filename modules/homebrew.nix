@@ -18,26 +18,36 @@
       upgrade = false;
     };
 
+    # tenvはterraform/tofu/terragrunt等のフロントエンドをまとめて提供するため、
+    # Homebrew formulaとして管理して現在のバージョン切り替え方法を維持する。
+    brews = [
+      "tenv"
+    ];
+
     # 旧 Brewfile の cask 群。token はそのまま流用。
     # 旧 tap "homebrew/bundle" / "homebrew/services" は upstream 廃止 + nix-darwin が
     # Brewfile を自前生成するため不要。意図的に持ち込まない。
     casks = [
+      "1password"
+      # macOS の公式導入手順に合わせ、デスクトップアプリ連携を使う CLI も
+      # Homebrew cask で管理する。認証情報と ~/.config/op は管理対象外。
+      "1password-cli"
+      "chatgpt"
+      "claude"
+      # OpenAIのGitHub Releaseにあるstandalone binaryをcask経由で導入し、
+      # Node.jsランタイムとは独立させつつdotfilesから再現可能にする。
+      "codex"
       "discord"
       # 旧 Brewfile は "docker" だったが、現在の Homebrew では正式 token が
       # "docker-desktop" にリネームされている (旧名は deprecated エイリアス)。
       "docker-desktop"
+      "elgato-wave-link"
       "herd"
-      "google-chrome"
+      "ghostty"
       "logi-options+"
       "notion"
-      "phpstorm"
-      "iterm2"
-      "zoom"
-      "tableplus"
-      "postman"
       "slack"
-      "chatwork"
-      "visual-studio-code"
+      "zen"
     ];
   };
 }

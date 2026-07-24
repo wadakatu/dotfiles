@@ -2,5 +2,8 @@
 result
 result-*
 
+# Local IDE project files
+.idea/
+
 # Claude Code per-project local settings
 .claude/settings.local.json

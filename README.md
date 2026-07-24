@@ -1,78 +1,113 @@
 # dotfiles
 
-macOS の開発環境を **[nix-darwin](https://github.com/nix-darwin/nix-darwin) + [home-manager](https://github.com/nix-community/home-manager) + [Nix flakes](https://nix.dev/concepts/flakes.html)** で宣言的に管理する dotfiles。
+macOS の開発環境を nix-darwin、Home Manager、Nix flakes で宣言管理する。
 
-新しい Mac でもコマンド一発で、CLI ツール・GUI アプリ・シェル設定・macOS システム設定を同じ状態に再現できる。バージョンは `flake.lock` で固定されるため、時間が経っても同じ環境を立ち上げられる。
+Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew cask、アプリ自身の
+自動更新、macOS、認証情報、ユーザーデータは固定対象外のため、完全なディスク複製ではなく
+「必要な開発環境を短時間で再構築できる状態」を目標とする。
 
-## 構成
+移行中の棚卸し状況は [Mac migration audit](./docs/migration-audit.md) を参照。
 
-```
-.
-├── flake.nix            # エントリポイント。inputs (nixpkgs / nix-darwin / home-manager / determinate) と
-│                        #   darwinConfigurations."mymac" を定義
-├── flake.lock           # 全 input のバージョン固定
-├── home/                # home-manager (ユーザー領域 ~/)
-│   ├── default.nix      #   エントリ。子モジュールを import
-│   ├── zsh.nix          #   programs.zsh / fzf / starship
-│   ├── git.nix          #   programs.git
-│   ├── vim.nix          #   programs.vim
-│   └── packages.nix     #   CLI ツール (home.packages)
-├── modules/
-│   └── homebrew.nix     # nix-darwin の homebrew.casks (GUI アプリは brew 管理のまま)
-├── system/
-│   └── defaults.nix     # macOS システム設定 (system.defaults.*)
-└── iterm/wadakatu.json  # iTerm2 プロファイル (手動 import。Nix 管理外)
-```
+## 管理範囲
 
 | 領域 | 管理方法 |
 |---|---|
-| シェル (zsh/fzf/starship)・git・vim | home-manager の `programs.*`（設定はインライン宣言） |
-| CLI ツール (`gcc`, `libwebp` など) | nixpkgs → `home.packages` |
-| GUI アプリ (`phpstorm`, `chrome`, `slack` など) | `homebrew.casks` 経由で Homebrew が管理（自動更新・Spotlight 連携のため） |
-| macOS システム設定 (Dock/Finder/キーボード/スクショ) | `system.defaults.*` |
+| zsh / Git / GitHub CLI / fzf / Starship | Home Manager `programs.*` |
+| mise とグローバルランタイム | Home Manager `programs.mise` |
+| Neovim と設定 | Home Manager + `home/config/nvim` |
+| Ghostty と設定 | Homebrew cask + Home Manager |
+| CLI パッケージ | nixpkgs `home.packages` |
+| GUI アプリ | nix-darwin `homebrew.casks` |
+| Dock / Finder / キーボード / スクリーンショット | nix-darwin `system.defaults` |
+| シークレット、アプリデータ、ブラウザデータ | Keychain / 1Password / バックアップ |
+
+## 構成
+
+```text
+.
+├── flake.nix
+├── flake.lock
+├── home/
+│   ├── default.nix
+│   ├── git.nix
+│   ├── ghostty.nix
+│   ├── mise.nix
+│   ├── neovim.nix
+│   ├── packages.nix
+│   ├── zsh.nix
+│   └── config/
+│       ├── ghostty/config
+│       ├── nvim/
+│       └── starship.toml
+├── modules/homebrew.nix
+├── system/defaults.nix
+└── docs/migration-audit.md
+```
+
+ユーザー名は `flake.nix` の `username` 1か所を正とし、現在は `wadakatu` を指定している。
+新しい Mac のアカウント short name と一致させること。
 
 ## 前提
 
-- macOS (Apple Silicon。Intel の場合は `flake.nix` の `nixpkgs.hostPlatform` を `x86_64-darwin` に)
-- [Determinate Nix Installer](https://github.com/DeterminateSystems/nix-installer) で Nix をインストール（flakes デフォルト有効）
+- Apple Silicon Mac
+- 管理者権限
+- 作業前のTime Machineまたは同等のバックアップ
+- [Determinate Nix for macOS](https://docs.determinate.systems/getting-started/individuals/)
+- [Homebrew](https://brew.sh/)
 
-  ```bash
-  curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | sh -s -- install
-  ```
-- GUI アプリ用に [Homebrew](https://brew.sh/) をインストール（nix-darwin は cask を管理するが Homebrew 本体は別途必要）
+nix-darwinはHomebrew本体をインストールしないため、Homebrewは先に用意する。
 
-## 新しい Mac でのセットアップ
+## 新しい Mac の初回セットアップ
 
 ```bash
-git clone https://github.com/wadakatu/dotfiles.git
-cd dotfiles
+git clone https://github.com/wadakatu/dotfiles.git ~/www/dotfiles
+cd ~/www/dotfiles
 
-# 初回適用 (nix-darwin 未インストールの状態から)
-nix run nix-darwin -- switch --flake .#mymac
+# 評価とビルド。ユーザー環境にはまだ適用しない
+nix flake check --show-trace
+nix build .#darwinConfigurations.mymac.system --no-link --show-trace
+
+# 初回だけ nix run で darwin-rebuild を起動する
+sudo nix run nix-darwin/master#darwin-rebuild -- \
+  switch --flake .#mymac
 ```
 
-`mymac` はホスト名に依存しない論理名。どの Mac でも `.#mymac` で同じ設定を呼べる。
+初回適用後はターミナルを開き直す。
 
-> 初回 activation で既存の `~/.zshrc` 等と衝突した場合は `.before-nix-darwin` / `.before-hm` にバックアップされる。`Unexpected files in /etc` で止まる場合は該当ファイルを `.before-nix-darwin` にリネームして再実行する。
+## 現 Mac で初回適用する前の注意
+
+- 現在の `~/.zshrc` はHome Managerと衝突するため、`before-hm` suffixで退避される。
+- `~/.gitconfig` とHome Managerが生成する `~/.config/git/config` はGitから両方読まれる。
+  移植内容を確認後、旧 `~/.gitconfig` は手動で退避する。
+- `GITHUB_TOKEN=$(gh auth token)` のようにトークンを常時環境変数へ展開しない。
+  新しい Mac では `gh auth login` でKeychainへ保存する。
+- Homebrewのcleanupは棚卸し完了まで `none` とし、未宣言パッケージを削除しない。
 
 ## 日常運用
 
 ```bash
-# 設定を変更したあと適用
-sudo darwin-rebuild switch --flake .#mymac
-
-# 適用前に dry-run でビルドだけ確認
+# 副作用なしのビルド確認
 darwin-rebuild build --flake .#mymac
 
-# 依存を最新化 (flake.lock 更新) してから適用
-nix flake update
+# 確認後に適用
 sudo darwin-rebuild switch --flake .#mymac
+
+# input更新。lockfile差分とビルド結果を確認してから適用する
+nix flake update
+nix flake check --show-trace
+darwin-rebuild build --flake .#mymac
 ```
 
-> 新規 `.nix` ファイルは `git add` しないと flake から見えない（「ファイルが存在しない」エラーになる）点に注意。
+新しいNixファイルはGitの追跡対象でないとflakeから見えない。追加後はビルド前に
+`git add <file>` する。
 
-## メモ
+## シークレットと移行対象外データ
 
-- **言語ランタイム** (PHP/Node/Python 等) は当面 Herd / volta などに任せる。Herd 注入の `HERD_PHP_XX_INI_SCAN_DIR` は `home/zsh.nix` の `initContent` にハードコードしているため、PHP バージョン追加時はそこを更新する。
-- **シークレット**（SSH 鍵など）はコミットしない。
-- 移行の経緯と方針は [CLAUDE.md](./CLAUDE.md) を参照。
+次のデータはコミットしない。
+
+- API token、PAT、秘密鍵、`.env*`
+- GitHub CLIやGoogle Cloud SDKの認証情報
+- SSH / GPG秘密鍵
+- Herd、Docker、ブラウザ、各GUIアプリのユーザーデータ
+
+これらはKeychain、1Password、Time Machine、各サービスへの再ログインで移行する。

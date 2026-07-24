@@ -1,4 +1,4 @@
-{ pkgs, lib, ... }: {
+{ ... }: {
   programs.zsh = {
     enable = true;
     enableCompletion = true;
@@ -7,14 +7,9 @@
     autosuggestion.enable = true;
     syntaxHighlighting.enable = true;
 
-    # 旧 aliases.zsh
+    # 現行 ~/.zshrc のエイリアス。
     shellAliases = {
-      python = "python3";
-    };
-
-    # 環境変数。.zshenv 相当の文脈で展開される。
-    sessionVariables = {
-      VOLTA_HOME = "$HOME/.volta";
+      sail = "./vendor/bin/sail";
     };
 
     # 旧 .zshrc の Herd 注入分。手動メンテナンス方針 (CLAUDE.md 参照)。
@@ -26,19 +21,24 @@
       export HERD_PHP_83_INI_SCAN_DIR="$HOME/Library/Application Support/Herd/config/php/83/"
       export HERD_PHP_82_INI_SCAN_DIR="$HOME/Library/Application Support/Herd/config/php/82/"
       export HERD_PHP_81_INI_SCAN_DIR="$HOME/Library/Application Support/Herd/config/php/81/"
-      export HERD_PHP_74_INI_SCAN_DIR="$HOME/Library/Application Support/Herd/config/php/74/"
+
+      # Bun の補完ファイルは Bun が生成した場合だけ読み込む。
+      if [[ -s "$HOME/.bun/_bun" ]]; then
+        source "$HOME/.bun/_bun"
+      fi
     '';
   };
 
   # 旧 paths.zsh。home.sessionPath は PATH の末尾に追加される。
   # /usr/bin 等の標準パスは macOS デフォルトで既に通っているので列挙不要。
   home.sessionPath = [
-    "/opt/homebrew/bin"
-    "/opt/homebrew/sbin"
+    "$HOME/.local/share/mise/shims"
     "$HOME/Library/Application Support/Herd/bin"
-    "$HOME/.volta/bin"
     "$HOME/.cargo/bin"
     "$HOME/.local/bin"
+    "$HOME/.opencode/bin"
+    "/opt/homebrew/bin"
+    "/opt/homebrew/sbin"
   ];
 
   # 旧 .fzf.zsh 全部を置き換え。シェル統合と key-bindings/completion を有効化。
@@ -53,30 +53,6 @@
   programs.starship = {
     enable = true;
     enableZshIntegration = true;
-    settings = {
-      add_newline = true;
-      # 旧プロンプトの "wadakatu(arm64):dir git-status\n$" に近い構成。
-      # %~ → $directory、git_super_status → $git_branch + $git_status。
-      format = lib.concatStrings [
-        "[wadakatu](bold green)"
-        "($hostname)"
-        ":$directory"
-        "$git_branch$git_status"
-        "$line_break"
-        "$character"
-      ];
-      hostname = {
-        ssh_only = false;
-        format = "([$hostname](bold green))";
-      };
-      directory = {
-        truncation_length = 3;
-        truncate_to_repo = false;
-      };
-      character = {
-        success_symbol = "[\\$](bold green)";
-        error_symbol = "[\\$](bold red)";
-      };
-    };
+    settings = builtins.fromTOML (builtins.readFile ./config/starship.toml);
   };
 }
