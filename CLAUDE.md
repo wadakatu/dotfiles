@@ -1,6 +1,11 @@
 # CLAUDE.md
 
-このリポジトリで作業するときに Claude が参照する指針。
+> **Historical document:** 以下は2026年5月に完了したNix移行の設計記録。
+> 現在の構成・セットアップ手順は `README.md`、新Mac移行の判断状況は
+> `docs/migration-audit.md` を正とする。
+> 2026年7月の棚卸しでiTerm2は不要と判断し、プロファイルも削除した。
+
+このリポジトリで実施したNix移行の背景と判断記録。
 
 ## このプロジェクトの目的
 
@@ -99,7 +104,7 @@ macOS 用 dotfiles を **nix-darwin + home-manager + Nix flakes** に段階的�
 - **GUI アプリは Homebrew cask のまま**。nix-darwin の `homebrew.casks` 経由で宣言する
 - **iTerm2 プロファイル (`wadakatu.json`)** は引き続き手動 import。Nix での自動インポートは複雑度に見合わないため対象外
 - **シークレット / 個人情報**（メールアドレス、SSH 鍵など）はリポジトリにコミットしない。`.gitconfig` の `user.email` などは `home.file` の代わりに別途管理する設計を検討
-- **PHP / Node / Python などの言語ランタイム**は当面 `Brewfile` 由来の Herd / nvm 等に任せる。Phase 6 以降で `direnv + nix develop` / `devenv` への移行検討余地あり（Herd と排他ではなく共存可能：カジュアル開発=Herd、特定プロジェクト=Nix devShell）
+- **言語ランタイム**はPHP / ComposerをHerd、それ以外のグローバルランタイムをmiseで管理する。PythonはCodex・Claudeの汎用処理向けにmiseの`latest`（プレリリースを除く最新安定版）を使い、プロジェクト固有の設定を優先する。特定プロジェクトでは`direnv + nix develop` / `devenv`との共存も可能
 - **Herd 注入の `HERD_PHP_XX_INI_SCAN_DIR`** は `home/zsh.nix` の `initContent` にハードコード。PHP バージョン追加時は Nix ファイルを更新する運用
 - **Nix インストーラ**: [Determinate Nix Installer](https://github.com/DeterminateSystems/nix-installer) を採用。flakes デフォルト有効、クリーンなアンインストール可能
 - **flake input URL**: Determinate 連携ガイドに合わせて flakehub.com URL を採用（SemVer ピン留め対応）

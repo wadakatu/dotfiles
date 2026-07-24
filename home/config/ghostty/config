@@ -1,0 +1,167 @@
+# Ghostty Configuration
+# Tokyo Night Style
+
+# ===================
+# Font Settings
+# ===================
+font-family = JetBrains Mono
+font-size = 14
+
+# ===================
+# Color Settings (Tokyo Night)
+# ===================
+# Dark background with soft foreground
+background = 1a1b26
+foreground = c0caf5
+
+# Cursor
+cursor-color = c0caf5
+cursor-text = 1a1b26
+
+# Selection colors
+selection-background = 33467c
+selection-foreground = c0caf5
+
+# Terminal color palette (Tokyo Night)
+# Black (normal/bright)
+palette = 0=#15161e
+palette = 8=#414868
+
+# Red
+palette = 1=#f7768e
+palette = 9=#f7768e
+
+# Green
+palette = 2=#9ece6a
+palette = 10=#9ece6a
+
+# Yellow
+palette = 3=#e0af68
+palette = 11=#e0af68
+
+# Blue
+palette = 4=#7aa2f7
+palette = 12=#7aa2f7
+
+# Magenta
+palette = 5=#bb9af7
+palette = 13=#bb9af7
+
+# Cyan
+palette = 6=#7dcfff
+palette = 14=#7dcfff
+
+# White
+palette = 7=#a9b1d6
+palette = 15=#c0caf5
+
+# Background transparency (semi-transparent)
+background-opacity = 0.85
+
+# ===================
+# Window Settings
+# ===================
+window-width = 120
+window-height = 40
+
+# Tab-integrated titlebar style
+macos-titlebar-style = tabs
+
+# Window padding for comfortable reading
+window-padding-x = 8
+window-padding-y = 4
+
+# ===================
+# Cursor Settings
+# ===================
+cursor-style = block
+cursor-style-blink = true
+
+# ===================
+# Clipboard Settings
+# ===================
+copy-on-select = true
+
+# ===================
+# Shell Integration
+# ===================
+shell-integration = detect
+
+# ===================
+# Additional Retro Effects
+# ===================
+# Slight bold for that classic CRT look
+bold-is-bright = true
+
+# ===================
+# Quick Terminal (Drop-down Terminal)
+# ===================
+# Global hotkey to toggle quick terminal (works system-wide)
+# Note: Requires Accessibility permission on macOS
+keybind = global:cmd+grave_accent=toggle_quick_terminal
+
+# Drop-down from top of screen (iTerm2 style)
+quick-terminal-position = top
+
+# Size: Full screen (100%)
+quick-terminal-screen = main
+quick-terminal-size = 100%
+
+# Auto-hide when focus is lost
+quick-terminal-autohide = true
+
+# Smooth animation
+quick-terminal-animation-duration = 0.2
+
+# ===================
+# Mouse Settings
+# ===================
+# Hide mouse cursor while typing
+mouse-hide-while-typing = true
+
+# ===================
+# Split Pane Settings
+# ===================
+# Dim unfocused split panes (0.0-1.0, lower = darker)
+unfocused-split-opacity = 0.7
+
+# Split divider color (match Tokyo Night theme)
+split-divider-color = 414868
+
+# ===================
+# Scrollback Settings
+# ===================
+# Large scrollback buffer (50MB)
+scrollback-limit = 52428800
+
+# ===================
+# Window Behavior
+# ===================
+# Save window state (tabs, splits, working directory)
+window-save-state = always
+
+# Confirm before closing window with running processes
+confirm-close-surface = true
+
+# ===================
+# Custom Keybindings
+# ===================
+# Font size controls
+keybind = cmd+plus=increase_font_size:1
+keybind = cmd+minus=decrease_font_size:1
+keybind = cmd+zero=reset_font_size
+
+# Shift+Enter for newline
+keybind = shift+enter=text:\n
+
+# ===================
+# Split Navigation (home position: I J K L)
+# ===================
+keybind = ctrl+i=goto_split:top
+keybind = ctrl+j=goto_split:left
+keybind = ctrl+k=goto_split:bottom
+keybind = ctrl+l=goto_split:right
+
+# Create splits
+keybind = cmd+d=new_split:right
+keybind = cmd+shift+d=new_split:down
