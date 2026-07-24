@@ -1,17 +1,15 @@
 # nix-darwin の flake が壊れていないかを検証する CI。
 # 旧 installation.yaml / shell_check.yml (レガシースクリプト用) の後継。
 #
-# コスト方針: macOS ランナーは public リポジトリでも分課金される
-# (standard runner の無料枠は Linux/Windows のみ。macOS は対象外)。
-# そのため通常 CI は無料の Linux で「評価のみ」を回し、課金される
-# macOS 実ビルドは手動トリガ (workflow_dispatch) のときだけ走らせる。
+# public repository の standard macOS runner は無料で利用できるため、
+# Linuxでの評価に加えてApple Silicon上の実ビルドも常時行う。
 name: nix
 
 on:
   pull_request:
   push:
     branches: [main]
-  workflow_dispatch: # 手動実行時のみ macOS 実ビルドを許可するトリガ
+  workflow_dispatch:
 
 # determinate-nix-action が FlakeHub Cache を OIDC で利用するために必要。
 permissions:
@@ -19,7 +17,7 @@ permissions:
   contents: read
 
 jobs:
-  # ── 常時実行: 無料の Linux で flake を評価検証 ──────────────
+  # ── Linux で flake を評価検証 ────────────────────────────
   # nix flake check は darwinConfigurations を「評価するだけでビルドしない」
   # (ローカルで build skipped を確認済み)。評価はクロスプラットフォームで
   # 可能なので、aarch64-darwin 構成でも Linux 上で型・オプション名を検証できる。
@@ -31,12 +29,9 @@ jobs:
       - name: nix flake check
         run: nix flake check --show-trace
 
-  # ── 手動実行のみ: 課金される macOS で実ビルド ──────────────
-  # GitHub の macOS ランナーは arm64 で flake の aarch64-darwin と一致する。
-  # 毎 PR では走らせず、switch 前に確認したいときだけ Actions 画面から手動起動する。
+  # ── 現 Mac と同系統の macOS 26 / arm64 で実ビルド ─────────
   build-darwin:
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/determinate-nix-action@v3

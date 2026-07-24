@@ -32,9 +32,13 @@
 
   outputs = inputs@{ self, nix-darwin, nixpkgs, determinate, home-manager }:
     let
+      # macOS の short user name。ユーザー名とホームパスを各モジュールへ
+      # 重複記述せず、新しい Mac でもここだけを確認すればよいようにする。
+      username = "wadakatu";
+      homeDirectory = "/Users/${username}";
+
       # configuration: 1台のホストに適用する設定モジュール。
-      # 引数 { pkgs, ... } は nix-darwin が自動的に渡してくれる。
-      configuration = { pkgs, ... }: {
+      configuration = { ... }: {
         # Determinate にインストールされた Nix を使う宣言。
         # これを true にすることで nix-darwin 側の nix.* 系オプションは無効化される。
         # customSettings = {} は /etc/nix/nix.custom.conf (Determinate が作成するファイル) の
@@ -48,19 +52,15 @@
         # ユーザー宣言。home-manager の nixos/common.nix が
         # config.users.users.<name>.home から home.homeDirectory を導出するため、
         # ここで宣言しないと null になり「homeDirectory is not of type 'absolute path'」エラー。
-        users.users.koyoisono = {
-          name = "koyoisono";
-          home = "/Users/koyoisono";
+        users.users.${username} = {
+          name = username;
+          home = homeDirectory;
         };
 
         # nix-darwin は system activation を root で実行する方式へ移行した。
         # homebrew.* など「実行ユーザーに紐づく」オプションは、root ではなく
         # この primaryUser に適用される。homebrew.enable を使うには宣言必須。
-        system.primaryUser = "koyoisono";
-
-        # システムにインストールされるパッケージ。動作確認用に vim を1つだけ。
-        # ユーザー領域の CLI ツールは home/packages.nix (home.packages) 側で管理する。
-        environment.systemPackages = [ pkgs.vim ];
+        system.primaryUser = username;
 
         # darwin-version コマンドが返す revision に git commit hash を埋め込む。
         system.configurationRevision = self.rev or self.dirtyRev or null;
@@ -78,6 +78,9 @@
       # 名前 "mymac" は hostname に依存しない論理名。新しい Mac でも使い回せる。
       # ビルド: darwin-rebuild switch --flake .#mymac
       darwinConfigurations."mymac" = nix-darwin.lib.darwinSystem {
+        # nix-darwin モジュールへユーザー情報を渡す。
+        specialArgs = { inherit username homeDirectory; };
+
         modules = [
           determinate.darwinModules.default
           home-manager.darwinModules.home-manager
@@ -91,10 +94,12 @@
             # useUserPackages: home.packages を ~/.nix-profile 配下に置く。
             # 副作用として nix-env でインストールしたものと衝突しなくなる。
             home-manager.useUserPackages = true;
+            # Home Manager モジュールへも同じユーザー情報を渡す。
+            home-manager.extraSpecialArgs = { inherit username homeDirectory; };
             # 既存 ~/.zshrc 等と衝突した場合は .before-hm を付けてバックアップ。
             # 初回 activation で既存 dotfiles symlink を自動退避できる。
             home-manager.backupFileExtension = "before-hm";
-            home-manager.users.koyoisono = import ./home/default.nix;
+            home-manager.users.${username} = import ./home/default.nix;
           }
         ];
       };

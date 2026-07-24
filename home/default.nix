@@ -1,16 +1,18 @@
-{ pkgs, lib, ... }: {
+{ lib, username, homeDirectory, ... }: {
   # imports: 機能ごとに分割した子モジュールを取り込む。
-  # 子モジュールも (pkgs, ...) を受け取り、option を merge していく。
+  # 子モジュールの option は Home Manager によって merge される。
   imports = [
     ./zsh.nix
     ./git.nix
-    ./vim.nix
+    ./mise.nix
+    ./neovim.nix
+    ./ghostty.nix
     ./packages.nix
   ];
 
-  # ユーザー識別。/Users/koyoisono が home-manager の管理対象。
-  home.username = "koyoisono";
-  home.homeDirectory = "/Users/koyoisono";
+  # ユーザー識別は flake.nix の1か所を正とする。
+  home.username = username;
+  home.homeDirectory = homeDirectory;
 
   # home.stateVersion: home-manager のデフォルト値の互換ベースライン。
   # 一度決めたら基本的には上げない (確認: home-manager release notes)。
