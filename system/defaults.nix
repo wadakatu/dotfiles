@@ -1,4 +1,4 @@
-{ ... }: {
+{ homeDirectory, ... }: {
   # Phase 4: macOS システム設定の宣言化。
   # system.defaults.<domain>.<key> は switch 時に root 権限で `defaults write` を実行し、
   # Dock / Finder を再起動して即反映する。手動 GUI 設定はここで上書きされる点に注意。
@@ -54,7 +54,7 @@
     screencapture = {
       # 保存先。screencapture は "~" を展開しないので絶対パスで指定する。
       # フォルダ自体は home-manager 側 (home/default.nix) で作成する。
-      location = "/Users/koyoisono/Screenshots";
+      location = "${homeDirectory}/Screenshots";
       type = "png"; # 保存形式
       disable-shadow = true; # ウィンドウ撮影時の影を付けない
       show-thumbnail = true; # 撮影後にサムネイルを表示
