@@ -1,0 +1,4 @@
+interface:
+  display_name: "Review PR Comments"
+  short_description: "PR指摘を修正・pushしリアクションまで実行"
+  default_prompt: "Use $review-pr-comments to address unresolved PR feedback, verify and push accepted fixes, then acknowledge each actionable thread."
