@@ -19,6 +19,7 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 | CLI パッケージ | nixpkgs `home.packages` |
 | GUI アプリ | nix-darwin `homebrew.casks` |
 | Dock / Finder / キーボード / スクリーンショット | nix-darwin `system.defaults` |
+| Claude Code / Codex のスキル・コマンド | `agents/` に実体を置き手動コピー（Nix 管理外） |
 | シークレット、アプリデータ、ブラウザデータ | Keychain / 1Password / バックアップ |
 
 ## 構成
@@ -27,6 +28,12 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 .
 ├── flake.nix
 ├── flake.lock
+├── agents/
+│   ├── claude/
+│   │   ├── commands/     # /commit /pr /review-pr-comments
+│   │   └── skills/       # defer-to-issue
+│   └── codex/
+│       └── skills/       # frontend-live-verify, review-pr-comments
 ├── home/
 │   ├── default.nix
 │   ├── git.nix
@@ -124,6 +131,26 @@ darwin-rebuild build --flake .#mymac
 
 新しいNixファイルはGitの追跡対象でないとflakeから見えない。追加後はビルド前に
 `git add <file>` する。
+
+## エージェントスキルとコマンド
+
+Claude Code と Codex の自作スキル・コマンドは `agents/` に実体を置く。Nix 管理では
+なくリポジトリを正とし、home 側へ手動コピーして反映する（Claude に依頼してもよい）。
+
+| リポジトリ | 配置先 |
+|---|---|
+| `agents/claude/skills/` | `~/.claude/skills/` |
+| `agents/claude/commands/` | `~/.claude/commands/` |
+| `agents/codex/skills/` | `~/.codex/skills/` |
+
+```bash
+cp -R agents/claude/skills/* ~/.claude/skills/
+cp agents/claude/commands/*.md ~/.claude/commands/
+cp -R agents/codex/skills/* ~/.codex/skills/
+```
+
+home 側で直接編集した場合は同じ対応でリポジトリへ取り込み直す。ここにないスキル
+（herdr、hatch-pet など外部配布物や実験中のもの）はローカル管理のままとする。
 
 ## シークレットと移行対象外データ
 

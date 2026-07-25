@@ -1,0 +1,4 @@
+interface:
+  display_name: "Frontend Live Verify"
+  short_description: "UI/UX変更をローカル実機で検証しPR本文に結果を記録"
+  default_prompt: "Use $frontend-live-verify to verify this UI change in the local app and record the result in the PR."
