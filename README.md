@@ -19,7 +19,7 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 | CLI パッケージ | nixpkgs `home.packages` |
 | GUI アプリ | nix-darwin `homebrew.casks` |
 | Dock / Finder / キーボード / スクリーンショット | nix-darwin `system.defaults` |
-| Claude Code / Codex のスキル・コマンド | `agents/` に実体を置き手動コピー（Nix 管理外） |
+| Claude Code / Codex の設定・スキル・コマンド | `agents/` に実体を置き手動コピー（Nix 管理外） |
 | シークレット、アプリデータ、ブラウザデータ | Keychain / 1Password / バックアップ |
 
 ## 構成
@@ -30,6 +30,9 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 ├── flake.lock
 ├── agents/
 │   ├── claude/
+│   │   ├── settings.json # 権限・フック・ステータスライン
+│   │   ├── CLAUDE.md     # グローバル指示
+│   │   ├── statusline.py # 2行ステータスライン
 │   │   ├── commands/     # /commit /pr /review-pr-comments /next /fix-ci
 │   │   │                 # /sync-pr /verify-no-regression /close-issue
 │   │   ├── skills/       # defer-to-issue, research, memory-triage
@@ -136,41 +139,41 @@ darwin-rebuild build --flake .#mymac
 
 ## エージェントスキルとコマンド
 
-Claude Code と Codex の自作スキル・コマンドは `agents/` に実体を置く。Nix 管理では
+Claude Code と Codex の設定・自作スキル・コマンドは `agents/` に実体を置く。Nix 管理では
 なくリポジトリを正とし、home 側へ手動コピーして反映する（Claude に依頼してもよい）。
+
+Claude Code の設定を Nix の `home.file` でシンボリックリンクにしないのは、`~/.claude`
+配下が読み取り専用になると Claude Code 自身（`/config`、権限ダイアログの「常に許可」、
+プラグイン導入）が設定を書き換えられなくなるため。
 
 | リポジトリ | 配置先 |
 |---|---|
+| `agents/claude/settings.json` | `~/.claude/settings.json` |
+| `agents/claude/CLAUDE.md` | `~/.claude/CLAUDE.md` |
+| `agents/claude/statusline.py` | `~/.claude/statusline.py` |
 | `agents/claude/skills/` | `~/.claude/skills/` |
 | `agents/claude/commands/` | `~/.claude/commands/` |
 | `agents/claude/hooks/` | `~/.claude/hooks/` |
 | `agents/codex/skills/` | `~/.codex/skills/` |
 
 ```bash
+mkdir -p ~/.claude/skills ~/.claude/commands ~/.claude/hooks ~/.codex/skills
+cp -f agents/claude/settings.json agents/claude/CLAUDE.md agents/claude/statusline.py ~/.claude/
+chmod +x ~/.claude/statusline.py
 cp -R agents/claude/skills/* ~/.claude/skills/
 cp agents/claude/commands/*.md ~/.claude/commands/
 cp agents/claude/hooks/*.sh ~/.claude/hooks/
+chmod +x ~/.claude/hooks/*.sh
 cp -R agents/codex/skills/* ~/.codex/skills/
 ```
 
+`settings.json` にはステータスライン、権限ルール、フック登録がまとまっている。
 `branch-guard.sh`（保護ブランチ main / master / dev 上での `git commit` / `git push` と、
-保護ブランチを push 先に指名するコマンドをブロックする PreToolUse フック）は、
-コピーに加えて `~/.claude/settings.json` への登録が必要。
+保護ブランチを push 先に指名するコマンドをブロックする PreToolUse フック）も
+登録済みなので、コピー以外の手作業は不要。
 
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          { "type": "command", "command": "/Users/wadakatu/.claude/hooks/branch-guard.sh" }
-        ]
-      }
-    ]
-  }
-}
-```
+`~/.claude/settings.local.json` は Claude Code が権限の「常に許可」を書き込む
+ローカル専用ファイル。リポジトリには取り込まない。
 
 home 側で直接編集した場合は同じ対応でリポジトリへ取り込み直す。ここにないスキル
 （herdr、hatch-pet など外部配布物や実験中のもの）はローカル管理のままとする。
