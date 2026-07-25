@@ -30,8 +30,10 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 ├── flake.lock
 ├── agents/
 │   ├── claude/
-│   │   ├── commands/     # /commit /pr /review-pr-comments
-│   │   └── skills/       # defer-to-issue
+│   │   ├── commands/     # /commit /pr /review-pr-comments /next /fix-ci
+│   │   │                 # /sync-pr /verify-no-regression /close-issue
+│   │   ├── skills/       # defer-to-issue, research, memory-triage
+│   │   └── hooks/        # branch-guard.sh
 │   └── codex/
 │       └── skills/       # frontend-live-verify, review-pr-comments
 ├── home/
@@ -141,12 +143,33 @@ Claude Code と Codex の自作スキル・コマンドは `agents/` に実体�
 |---|---|
 | `agents/claude/skills/` | `~/.claude/skills/` |
 | `agents/claude/commands/` | `~/.claude/commands/` |
+| `agents/claude/hooks/` | `~/.claude/hooks/` |
 | `agents/codex/skills/` | `~/.codex/skills/` |
 
 ```bash
 cp -R agents/claude/skills/* ~/.claude/skills/
 cp agents/claude/commands/*.md ~/.claude/commands/
+cp agents/claude/hooks/*.sh ~/.claude/hooks/
 cp -R agents/codex/skills/* ~/.codex/skills/
+```
+
+`branch-guard.sh`（保護ブランチ main / master / dev 上での `git commit` / `git push` と、
+保護ブランチを push 先に指名するコマンドをブロックする PreToolUse フック）は、
+コピーに加えて `~/.claude/settings.json` への登録が必要。
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "/Users/wadakatu/.claude/hooks/branch-guard.sh" }
+        ]
+      }
+    ]
+  }
+}
 ```
 
 home 側で直接編集した場合は同じ対応でリポジトリへ取り込み直す。ここにないスキル
