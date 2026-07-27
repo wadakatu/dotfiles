@@ -30,6 +30,8 @@
   "askUserQuestionTimeout": "10m",
 
   "permissions": {
+    "defaultMode": "auto",
+
     "deny": [
       "Read(//**/.env)",
       "Read(//**/.env.local)",
