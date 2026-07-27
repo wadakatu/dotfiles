@@ -30,6 +30,8 @@
   "askUserQuestionTimeout": "10m",
 
   "permissions": {
+    "defaultMode": "auto",
+
     "deny": [
       "Read(//**/.env)",
       "Read(//**/.env.local)",
@@ -79,6 +81,7 @@
       "Bash(git worktree list *)",
       "Bash(git shortlog *)",
       "Bash(git describe *)",
+      "Bash(git push *)",
 
       "Bash(gh pr view *)",
       "Bash(gh pr list *)",
