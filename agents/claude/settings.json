@@ -10,6 +10,11 @@
     "context7@claude-plugins-official": true
   },
 
+  "model": "opus",
+  "effortLevel": "high",
+  "showThinkingSummaries": true,
+  "switchModelsOnFlag": false,
+
   "tui": "fullscreen",
   "theme": "dark",
   "agentPushNotifEnabled": true,
