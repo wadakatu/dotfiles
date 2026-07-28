@@ -16,6 +16,7 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 | mise とグローバルランタイム | Home Manager `programs.mise` |
 | Neovim と設定 | Home Manager + `home/config/nvim` |
 | Ghostty と設定 | Homebrew cask + Home Manager |
+| herdr の設定 | `home/config/herdr/config.toml` を Home Manager が out-of-store symlink（本体は Nix 管理外） |
 | CLI パッケージ | nixpkgs `home.packages` |
 | GUI アプリ | nix-darwin `homebrew.casks` |
 | Dock / Finder / キーボード / スクリーンショット | nix-darwin `system.defaults` |
@@ -43,12 +44,14 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 │   ├── default.nix
 │   ├── git.nix
 │   ├── ghostty.nix
+│   ├── herdr.nix
 │   ├── mise.nix
 │   ├── neovim.nix
 │   ├── packages.nix
 │   ├── zsh.nix
 │   └── config/
 │       ├── ghostty/config
+│       ├── herdr/config.toml
 │       ├── nvim/
 │       └── starship.toml
 ├── modules/homebrew.nix
@@ -177,6 +180,39 @@ cp -R agents/codex/skills/* ~/.codex/skills/
 
 home 側で直接編集した場合は同じ対応でリポジトリへ取り込み直す。ここにないスキル
 （herdr、hatch-pet など外部配布物や実験中のもの）はローカル管理のままとする。
+
+## herdr の設定
+
+herdr（AI コーディングエージェント用のターミナルワークスペースマネージャ）本体は
+`herdr update` が自前で `~/.local/bin` を更新するため Nix 管理外。設定ファイルだけを
+`home/config/herdr/config.toml` に置き、`home/herdr.nix` から Home Manager の
+`mkOutOfStoreSymlink` で `~/.config/herdr/config.toml` へリンクする。
+
+Ghostty のように `.source = ./config/...` としないのは、herdr が config.toml を
+自分で書き換えるため。`/nix/store` への読み取り専用リンクにすると、オンボーディング
+完了時の `onboarding = false` 書き込みや `herdr config reset-keys` が失敗する
+（`~/.claude` を symlink にしない理由と同じ）。
+
+`mkOutOfStoreSymlink` は `/nix/store` を経由せず指定した絶対パスへ直接リンクを張る
+ヘルパー。実体はリポジトリ側の1ファイルだけになるので、
+
+- herdr 自身の書き換えが通り、その差分がそのまま `git status` に出る
+- 設定をいじるたびに `darwin-rebuild switch` する必要がない（`herdr server reload-config`
+  だけで反映される）
+
+flake では相対パスを渡すと flake source の store コピーを指してしまうため、
+`config.home.homeDirectory` を使った絶対パスの文字列を渡している
+（[home-manager#2085](https://github.com/nix-community/home-manager/issues/2085)）。
+このため、このリポジトリのクローン先は `~/www/dotfiles` である前提。
+
+なお、herdr が書き換え時に「一時ファイル + rename」方式を使う場合は
+`~/.config/herdr/config.toml` の symlink 自体が実ファイルに置き換わり、リポジトリから
+切り離される。設定を変えたのに `git status` に出ないときはこれを疑い、
+`ls -l ~/.config/herdr/config.toml` で symlink のままか確認する。
+
+エージェント状態検知のフック `agents/claude/hooks/herdr-agent-state.sh` は
+`herdr integration install claude` が生成するもので、こちらは他の Claude Code 設定と
+同じく手動コピー運用。
 
 ## シークレットと移行対象外データ
 

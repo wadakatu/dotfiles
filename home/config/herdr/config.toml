@@ -1,0 +1,107 @@
+# herdr configuration (herdr 0.7.5)
+# Reference: https://herdr.dev/docs/configuration/
+# Keyboard:  https://herdr.dev/docs/keyboard/
+#
+# Reload without restarting panes:  herdr server reload-config  (prefix+shift+R)
+# Print upstream defaults:          herdr --default-config
+
+# config.toml が無いと毎回オンボーディングが出る。選択済みなので false。
+onboarding = false
+
+[theme]
+# Ghostty 側が Tokyo Night (~/.config/ghostty/config) なので揃える。
+name = "tokyo-night"
+
+[terminal]
+# "auto" = macOS では login shell で起動する。
+# nix-darwin は /etc/zshenv のガード (__NIX_DARWIN_SET_ENVIRONMENT_DONE) で
+# PATH を組むため、non_login にすると PATH が欠ける事故が起きやすい。auto 固定。
+shell_mode = "auto"
+# 新規ペイン/タブは元のペインの cwd を引き継ぐ。
+new_cwd = "follow"
+
+[update]
+channel = "stable"
+version_check = true
+
+[keys]
+# tmux / zellij は未インストールなので既定の ctrl+b をそのまま使う。
+prefix = "ctrl+b"
+
+# 公式が「全プラットフォームで最も安全」と明言している ctrl+alt 系の直接チョードを
+# prefix 版と併記する（配列構文で両方が同時に有効）。
+# https://herdr.dev/docs/keyboard/
+focus_pane_left    = ["prefix+h", "ctrl+alt+h"]
+focus_pane_down    = ["prefix+j", "ctrl+alt+j"]
+focus_pane_up      = ["prefix+k", "ctrl+alt+k"]
+focus_pane_right   = ["prefix+l", "ctrl+alt+l"]
+previous_tab       = ["prefix+p", "ctrl+alt+["]
+next_tab           = ["prefix+n", "ctrl+alt+]"]
+new_tab            = ["prefix+c", "ctrl+alt+c"]
+split_vertical     = ["prefix+v", "ctrl+alt+d"]
+split_horizontal   = ["prefix+minus", "ctrl+alt+shift+d"]
+zoom               = ["prefix+z", "ctrl+alt+z"]
+
+# 既定では未割り当ての indexed バインド。エージェント多重化ではここが効く。
+switch_tab       = "prefix+1..9"
+switch_workspace = "prefix+shift+1..9"
+focus_agent      = "prefix+alt+1..9"   # サイドバーの N 番目のエージェントへ直行
+
+# 直前のペインへ往復。既定では未割り当て（prefix+tab は cycle_pane_next が使用中）。
+last_pane = "prefix+backtick"
+
+[ui]
+# 分割時にどのペインがどのエージェントか枠に出す（既定 false）。
+show_agent_labels_on_pane_borders = true
+
+# タブが1枚のときはタブ行を隠して縦を稼ぐ（既定 false）。
+hide_tab_bar_when_single_tab = true
+
+# "spaces" = ワークスペース順 / "priority" = 要対応の待ち行列順。
+# 複数エージェントを回すなら priority のほうが「今どれが止まっているか」に直結する。
+agent_panel_sort = "priority"
+
+# サイドバーのエージェント行。Claude Code はターミナルタイトルに作業内容が出るので表示する。
+[ui.sidebar.agents]
+rows = [["state_icon", "workspace", "tab"], ["agent", "state_text"]]
+
+[ui.sidebar.agents.rows_by_agent]
+claude = [
+  ["state_icon", "workspace", "tab"],
+  ["terminal_title_stripped"],
+  ["agent", "state_text"],
+]
+
+# Git ブランチと変更状況をスペース行に出す。
+[ui.sidebar.spaces]
+rows = [["state_icon", "workspace"], ["branch", "git_status"]]
+
+[ui.toast]
+# エージェントが done / blocked になったことに気づけないと多重化の意味が薄いので、
+# OS の通知センターに出す。Ghostty 側に任せたい場合は "terminal"、
+# herdr の画面内トーストだけにしたい場合は "herdr"。
+delivery = "system"
+delay_seconds = 1
+
+[session]
+# サーバ再起動後にエージェントのネイティブセッションへ復帰する。
+# 効かせるには `herdr integration install claude` が必要。
+resume_agents_on_restore = true
+
+[experimental]
+# --- 日本語 IME まわり（macOS 限定・このマシンで効く設定） ---
+# prefix モード中だけ ASCII 入力ソースへ一時切り替え。
+# 日本語入力中に prefix+... が効かない問題への対策。
+switch_ascii_input_source_in_prefix = true
+
+# Claude Code / Codex のような自前でカーソルを描く TUI に対して、
+# 外側ターミナルへカーソル位置を露出し、変換候補ウィンドウを追従させる。
+reveal_hidden_cursor_for_cjk_ime = true
+cjk_ime_agents = ["claude", "codex"]
+
+# サーバ完全再起動をまたいでペインの画面履歴を保持する（既定 false）。
+pane_history = true
+
+# Ghostty は Kitty graphics 対応なので有効化できるが、描画不具合の報告余地が
+# あるため既定 false のまま。画像を出したくなったら true に。
+# kitty_graphics = false
