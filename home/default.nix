@@ -7,6 +7,7 @@
     ./mise.nix
     ./neovim.nix
     ./ghostty.nix
+    ./herdr.nix
     ./packages.nix
   ];
 
