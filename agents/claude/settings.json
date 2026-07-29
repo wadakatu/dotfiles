@@ -29,6 +29,12 @@
   "cleanupPeriodDays": 90,
   "askUserQuestionTimeout": "10m",
 
+  "attribution": {
+    "commit": "",
+    "pr": "",
+    "sessionUrl": false
+  },
+
   "permissions": {
     "defaultMode": "auto",
 
