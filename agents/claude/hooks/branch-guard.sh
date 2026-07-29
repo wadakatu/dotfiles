@@ -18,8 +18,10 @@ input=$(cat)
 # fallback over-matches (payload noise) but only costs a false block.
 if command -v jq >/dev/null 2>&1; then
   cmd=$(printf '%s' "$input" | jq -r '.tool_input.command // empty')
+  payload_cwd=$(printf '%s' "$input" | jq -r '.cwd // empty')
 else
   cmd=$input
+  payload_cwd=""
 fi
 
 case $cmd in
@@ -27,12 +29,33 @@ case $cmd in
   *) exit 0 ;;
 esac
 
+# Which repository does this command actually act on? CLAUDE_PROJECT_DIR is
+# only the session's root, and several projects keep sibling checkouts inside
+# it (dev-docker has app/, auth/, front/). Judging those by the outer repo's
+# HEAD blocks every commit in a sub-repo whenever the outer one sits on master.
+#
+# Order: an explicit `git -C <dir>` beats the session cwd, which beats the
+# project dir. A relative -C path is resolved against the cwd git itself would
+# use, so the three stay consistent.
 dir=${CLAUDE_PROJECT_DIR:-$PWD}
+[ -n "$payload_cwd" ] && [ -d "$payload_cwd" ] && dir=$payload_cwd
+
+target=$(printf '%s' "$cmd" \
+  | sed -n "s/.*git[[:space:]][[:space:]]*-C[[:space:]][[:space:]]*\([^[:space:]]*\).*/\1/p" \
+  | head -n1 \
+  | sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/")
+if [ -n "$target" ]; then
+  case $target in
+    /*) dir=$target ;;
+    *)  dir="$dir/$target" ;;
+  esac
+fi
+
 branch=$(git -C "$dir" symbolic-ref --short -q HEAD) || exit 0
 
 for p in $PROTECTED; do
   if [ "$branch" = "$p" ]; then
-    echo "branch-guard: HEAD is on protected branch '$branch'." >&2
+    echo "branch-guard: HEAD is on protected branch '$branch' ($dir)." >&2
     echo "Create a feature branch first (e.g. git switch -c feature/<topic>) and retry." >&2
     exit 2
   fi
