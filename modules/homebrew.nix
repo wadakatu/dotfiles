@@ -44,6 +44,10 @@
       "elgato-wave-link"
       "herd"
       "ghostty"
+      # 普段使いのブラウザではなく、Puppeteer / CDP 経由の動作確認用。
+      # chrome-devtools MCP は実在の Chrome バイナリに接続する仕組みで、
+      # Safari は接続先にならないため必要。
+      "google-chrome"
       "logi-options+"
       "notion"
       "slack"
