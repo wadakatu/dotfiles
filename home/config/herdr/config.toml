@@ -59,7 +59,7 @@ hide_tab_bar_when_single_tab = true
 
 # "spaces" = ワークスペース順 / "priority" = 要対応の待ち行列順。
 # 複数エージェントを回すなら priority のほうが「今どれが止まっているか」に直結する。
-agent_panel_sort = "priority"
+agent_panel_sort = "spaces"
 
 # サイドバーのエージェント行。Claude Code はターミナルタイトルに作業内容が出るので表示する。
 [ui.sidebar.agents]

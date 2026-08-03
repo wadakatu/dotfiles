@@ -26,6 +26,30 @@
       if [[ -s "$HOME/.bun/_bun" ]]; then
         source "$HOME/.bun/_bun"
       fi
+
+      # gcloud のデフォルトプロジェクト (core/project) を切り替える。
+      #   gcp              -> fzf で一覧から選ぶ
+      #   gcp <PROJECT_ID> -> 直接指定
+      #   gcp -            -> 現在のプロジェクトを表示するだけ
+      gcp() {
+        local project
+        case "$1" in
+          -|--show)
+            gcloud config get-value project 2>/dev/null
+            return
+            ;;
+          "")
+            project=$(gcloud projects list --format='table[no-heading](projectId,name)' \
+              | fzf --prompt='gcloud project> ' --height=40% --reverse --no-multi \
+              | awk '{print $1}')
+            ;;
+          *)
+            project="$1"
+            ;;
+        esac
+        [[ -z "$project" ]] && return 1
+        gcloud config set project "$project"
+      }
     '';
   };
 
