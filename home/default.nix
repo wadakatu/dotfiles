@@ -9,6 +9,7 @@
     ./ghostty.nix
     ./herdr.nix
     ./packages.nix
+    ./worktree-gc.nix
   ];
 
   # ユーザー識別は flake.nix の1か所を正とする。
