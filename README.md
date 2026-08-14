@@ -17,6 +17,7 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 | Neovim と設定 | Home Manager + `home/config/nvim` |
 | Ghostty と設定 | Homebrew cask + Home Manager |
 | herdr の設定 | `home/config/herdr/config.toml` を Home Manager が out-of-store symlink（本体は Nix 管理外） |
+| studio-api の worktree / コンテナ掃除 | Home Manager `launchd.agents`（1 日 2 回、`home/scripts/worktree-gc.sh`） |
 | CLI パッケージ | nixpkgs `home.packages` |
 | GUI アプリ | nix-darwin `homebrew.casks` |
 | Dock / Finder / キーボード / スクリーンショット | nix-darwin `system.defaults` |
@@ -48,7 +49,10 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 │   ├── mise.nix
 │   ├── neovim.nix
 │   ├── packages.nix
+│   ├── worktree-gc.nix
 │   ├── zsh.nix
+│   ├── scripts/
+│   │   └── worktree-gc.sh
 │   └── config/
 │       ├── ghostty/config
 │       ├── herdr/config.toml
@@ -213,6 +217,46 @@ flake では相対パスを渡すと flake source の store コピーを指し�
 エージェント状態検知のフック `agents/claude/hooks/herdr-agent-state.sh` は
 `herdr integration install claude` が生成するもので、こちらは他の Claude Code 設定と
 同じく手動コピー運用。
+
+## worktree / コンテナの自動掃除
+
+studio-api（`~/www/dev/app`）の worktree は放置すると 1 つにつき nginx / php-fpm /
+redis の 3 コンテナと bridge network を持ち続け、docker のサブネットプールが枯れて
+`make up` が落ちる。`home/worktree-gc.nix` が定義する LaunchAgent が毎日 12:00 と
+21:00 に `home/scripts/worktree-gc.sh` を回してこれを掃除する。
+
+削除は次を **全て** 満たす worktree だけ。1 つでも欠ければ残す。
+
+| 条件 | 意図 |
+|---|---|
+| main worktree ではない | 本体は対象外 |
+| `git status --porcelain` が空 | 未コミットの作業を消さない |
+| ディレクトリの mtime が 24 時間より古い | 稼働中のエージェントが作った直後のものを除外 |
+| upstream が remote から消えている（= PR が merge / close 済み）<br>または detached かつ `origin/dev` から辿れる | 固有のコミットを持たないものだけ消す |
+
+ただし `~/.herdr/worktrees/` 配下は条件を満たしても**自動削除しない**。herdr が自前で
+workspace 状態を持っており `git worktree remove` を直接叩くと食い違うため、候補として
+ログに出すだけに留める（削除は `herdr worktree remove --workspace <ID> --force`）。
+
+`git worktree remove` はブランチを消さないので、コミットは常に残る。コンテナ側は
+`app-app-` / `app-worktree-` で始まる compose プロジェクトだけを対象にし、共有インフラ
+（mysql、traefik、grafana…）や他リポジトリ（`docker-*`、`studio-*`）、本体の `app` には
+触らない。working_dir が既に消えている孤児プロジェクトも同時に落とす。
+
+ディスク回収は dangling image / volume と 168 時間より古い build cache のみ。
+`docker image prune -a` を毎日回すと `api-base` が消えて `make build` のたびに
+再 pull になるため使わない。
+
+手で確認・実行する場合:
+
+```bash
+DRY_RUN=1 ~/www/dotfiles/home/scripts/worktree-gc.sh   # 消さずに判定だけ出す
+tail -50 ~/Library/Logs/worktree-gc.log                # 直近の実行ログ
+launchctl kickstart -k gui/$(id -u)/org.nix-community.home.worktree-gc  # 即時実行
+```
+
+閾値や除外を変えるだけなら `darwin-rebuild` は不要（plist はリポジトリの絶対パスを
+直接叩いているため）。実行時刻を変えるときだけ `worktree-gc.nix` を直して rebuild する。
 
 ## シークレットと移行対象外データ
 
