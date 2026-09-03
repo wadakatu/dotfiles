@@ -13,12 +13,6 @@ GitHub Pages 上の恒久 URL をユーザーに返すまでを担保する。
 - ローカル: `~/www/eli5`
 - 公開 URL: https://www.wadakatu.dev/eli5/ （custom domain。`wadakatu.github.io/eli5/` も同じ内容を返す）
 
-## なぜこのスキルが必要か
-
-eli5 プラグイン本体は `~/.claude/plugins/cache/` 配下のキャッシュで編集できない。
-つまり「生成したら保存する」を仕込める場所は **このスキルの description による自動トリガーだけ**。
-保存を忘れると Artifact は残っても一覧から辿れず、「後から見返せる」という当初の目的が崩れる。
-
 ## トリガー
 
 以下のいずれかに該当したら、**同じアシスタントターン内で** 最後まで実行する:
@@ -37,8 +31,7 @@ cd ~/www/eli5 && git switch main && git pull
 
 ### 2. カテゴリを決める
 
-保存先は `~/www/eli5/<category>/` 配下。**カテゴリ = ディレクトリ名** が唯一の情報源で、
-これがそのまま一覧の見出しになる。メタデータファイルも front matter も持たない。
+保存先は `~/www/eli5/<category>/` 配下。**カテゴリ = ディレクトリ名** がそのまま一覧の見出しになる。
 
 まず既存カテゴリを見て、当てはまるものがあれば **必ず再利用する**:
 
@@ -53,8 +46,7 @@ ls -d ~/www/eli5/*/ 2>/dev/null
 
 ### 3. ファイル名を決める
 
-`<category>/YYYY-MM-DD-<english-kebab-slug>.html`。日付とスラッグがそのまま一覧の表示になるので、
-**スラッグは内容が分かる英語の kebab-case**（`how-tcp-works`, `what-is-oauth`）にする。
+`<category>/YYYY-MM-DD-<english-kebab-slug>.html`。
 日付は会話コンテキストの日付を信用せず `date +%F` で取る。
 
 衝突していたら末尾に `-2`, `-3` を付ける（上書きしない）:
@@ -72,22 +64,49 @@ cd ~/www/eli5 && git switch -c add/<slug>
 > **重要**: `branch-guard` hook は Bash 呼び出しが **始まった時点の HEAD** を見る。
 > ブランチ切り替えとコミットを 1 コマンドに繋ぐと、切り替え前の main が判定されてブロックされる。
 > **ブランチ切り替えと、コミット・push は必ず別々の Bash 呼び出しに分ける。**
-> 同じ理由で、`main` にいる状態では hook の対象文字列を含むコマンドが弾かれる。
-> ヒアドキュメント本文にその文字列が入るだけでも誤検知するので、長い本文は Write ツールで書く。
+> ヒアドキュメント本文に hook の対象文字列が入るだけでも誤検知するので、長い本文は Write ツールで書く。
 
-### 5. 保存してコミット・push
+### 5. 保存して組み立てる
 
 ```
 cd ~/www/eli5 && mkdir -p <category> && cp <生成した HTML のパス> ./<category>/$(date +%F)-<slug>.html
 ```
 
-続けて別の Bash 呼び出しで add → コミット → push（メッセージは `Add: <topic を表す短い英語>`、
-push 先は `-u origin add/<slug>`）。
-
-### 6. PR を作って squash merge
+続けて `tools/archive.py` を通す。**これを飛ばすと外枠が付かず、一覧にも載らない。**
 
 ```
-gh pr create --repo wadakatu/eli5 --title "Add: <topic>" --body "<1〜2行の説明>"
+cd ~/www/eli5 && python3 tools/archive.py <category>/$(date +%F)-<slug>.html
+```
+
+スクリプトは private 情報を検査し、共通の外枠（doctype・フォント・`eli5.css`・戻る線）を被せ、
+`pages.json` に登録し、`index.html` を書き直す。冪等なのでやり直しても安全。
+
+タイトルと概要は生成物の `<title>` と `<meta name="description">` から拾う。
+どちらか欠けていたら失敗するので、`/eli5` 側で必ず書かせる。概要が比喩のままだったら
+`--summary "…"` で具体的な一行に差し替える（一覧に出るのはこれ）。
+
+**private リポジトリの情報を見つけたら保存を拒否する。** その場合は該当箇所を一般名詞に
+言い換えてから再実行する（消すだけだと文が壊れる）。拒否されたら報告に出力をそのまま貼る。
+
+検査は機械的にできる範囲（ticket 参照・`github.com/owner/repo`・ローカルパス・メール
+アドレス・内部ホスト名・`~/.config/eli5/private-terms.txt` の固有名）だけを見る。
+**教えていない内部クラス名やストア名は素通しする。** だから保存の前に本文を自分で読んで、
+private な repo / サービス / クラス / チケットを指す語を一般名詞に置き換えること。
+eli5 のたとえ話は元々抽象的なので、置き換えても内容は壊れない。
+
+新しい private リポジトリの話を書いたときは、その名前を
+`~/.config/eli5/private-terms.txt` に足す（このファイルは repo に置かない。private な
+名前の一覧そのものが同じ情報を漏らすため）。
+
+### 6. コミット・push
+
+別の Bash 呼び出しで add → コミット → push（メッセージは `Add: <topic を表す短い英語>`、
+push 先は `-u origin add/<slug>`）。`pages.json` と `index.html` も一緒に入ることを確認する。
+
+### 7. PR を作って squash merge
+
+```
+gh pr create --repo wadakatu/eli5 --title "Add: <topic>" --body "<短い説明>"
 gh pr merge --repo wadakatu/eli5 --squash --delete-branch
 ```
 
@@ -96,9 +115,9 @@ gh pr merge --repo wadakatu/eli5 --squash --delete-branch
 
 merge 後にローカルを戻す: `cd ~/www/eli5 && git switch main && git pull`
 
-### 7. 公開を確認してから完了と言う
+### 8. 公開を確認してから完了と言う
 
-Pages のビルドは 1〜2 分かかる。**built を確認し、実 URL が 200 を返すまで「保存した」と言わない**:
+Pages の配信まで 1〜2 分かかる。**built を確認し、実 URL が 200 を返すまで「保存した」と言わない**:
 
 ```
 for i in $(seq 1 20); do
@@ -108,24 +127,26 @@ done
 curl -s -o /dev/null -w '%{http_code}\n' "https://www.wadakatu.dev/eli5/<category>/$(date +%F)-<slug>.html"
 ```
 
-### 8. ユーザーに URL を返す
+### 9. ユーザーに URL を返す
 
 一覧 https://www.wadakatu.dev/eli5/ と、追加したページの直リンク、入れたカテゴリを提示する。
 
 ## 仕組み（触る前に知っておくこと）
 
-`index.html` は Jekyll の `site.static_files` を走査し、`group_by_exp` でパス先頭の
-ディレクトリ名ごとにまとめて一覧を自動生成する
-（[Jekyll docs](https://jekyllrb.com/docs/liquid/filters/)、[変数](https://jekyllrb.com/docs/variables/)）。
-だから **一覧もカテゴリ見出しも手編集は不要**。ディレクトリを掘れば増え、空になれば消える。
+**何もビルドしない。** GitHub Pages はブランチをそのまま配信し、`.nojekyll` が Jekyll を止める
+（[docs](https://docs.github.com/en/pages/setting-up-a-github-pages-site-with-jekyll/about-github-pages-and-jekyll)）。
+commit した内容がそのまま配信されるので、ローカルで開いて見えたものが本番で見えるもの。
 
-front matter を持たない HTML は Jekyll が変換も Liquid 展開もせず素通しする。
-つまり eli5 の HTML に `{{ }}` や `{% %}` が含まれていても壊れない。
-**逆に、保存する HTML に front matter を足してはいけない**（Jekyll がページ扱いして
-一覧から消え、中身も Liquid 展開されて壊れる）。
+- `eli5.css` — 全記事に共通のデザイン。色・書体・`e-` の部品はここだけ。
+  **見た目を変えたいときはこの 1 ファイルを直して `--rebuild`**
+- `tools/archive.py` — 保存時に走る唯一の道具。外枠を被せ、`pages.json` に登録し、
+  `index.html` を書き出す。すでに組み立て済みのページは一度フラグメントに戻してから
+  組み直すので、外枠を変えても全記事に反映できる
+- `pages.json` — 一覧に出すタイトルと概要
+- `index.html` — **生成物。手で編集しない**（`archive.py` が上書きする）
 
-リンクは `index.html` 側で相対パスとして出力している。この site は
-`/eli5/` 配下で配信される project pages なので、ルート絶対パスにすると 404 になる。
+記事は完結した文書として配信されるが、書くのは body フラグメント。共通レイアウトを
+当てられないのではなく、**当てる場所が `archive.py` になった**。
 
 ## アンチパターン
 
@@ -135,6 +156,9 @@ front matter を持たない HTML は Jekyll が変換も Liquid 展開もせず
 - **1 本ごとに新カテゴリを作る**: 見出しだらけで一覧の意味がなくなる。既存を先に探して再利用する。
 - **ブランチ切り替えとコミットを 1 コマンドに繋ぐ**: `branch-guard` にブロックされる（手順 4 参照）。
 - **main に直接コミットしようとする**: hook で弾かれる。必ず branch → PR → squash merge。
-- **Pages のビルドを待たずに「保存しました」と報告する**: 404 の URL を渡すことになる。
-- **保存する HTML に front matter を足す / `index.html` を手で書き換える**: 自動生成が壊れる。
+- **Pages の配信を待たずに「保存しました」と報告する**: 404 の URL を渡すことになる。
+- **`tools/archive.py` を通さずにコミットする**: 外枠が付かず、一覧にも載らず、private の検査も飛ぶ。
+- **`index.html` を手で書き換える**: 次の保存で上書きされる。
+- **記事ごとにパレットや書体を作り込む**: `eli5.css` に揃っているものを壊す。記事の `<style>` は絵のためだけ。
+- **private リポジトリ名・issue / PR 番号・内部クラス名を残したまま保存する**: public リポジトリなので公開される。検査は補助であって保証ではない（手順 5 参照）。
 - **日本語や大文字混じりのファイル名・ディレクトリ名にする**: URL が percent-encode されて扱いにくい。英語 kebab-case で統一する。
