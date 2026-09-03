@@ -1,5 +1,6 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "advisorModel": "fable",
 
   "enabledPlugins": {
     "frontend-design@claude-plugins-official": false,
@@ -7,11 +8,24 @@
     "chrome-devtools-mcp@claude-plugins-official": true,
     "claude-code-setup@claude-plugins-official": false,
     "laravel-boost@claude-plugins-official": false,
-    "context7@claude-plugins-official": true
+    "context7@claude-plugins-official": true,
+    "ponytail@ponytail": true,
+    "code-review@claude-plugins-official": true
   },
 
   "model": "opus",
-  "effortLevel": "high",
+  "effortLevel": "xhigh",
+  "modelSettings": {
+    "claude-fable-5-1": {
+      "effortLevel": "high"
+    },
+    "claude-fable-5": {
+      "effortLevel": "xhigh"
+    },
+    "claude-opus-5": {
+      "effortLevel": "xhigh"
+    }
+  },
   "showThinkingSummaries": true,
   "switchModelsOnFlag": false,
 
@@ -158,6 +172,20 @@
     ]
   },
 
+  "extraKnownMarketplaces": {
+    "ponytail": {
+      "source": {
+        "source": "github",
+        "repo": "DietrichGebert/ponytail"
+      }
+    },
+    "claude-community": {
+      "source": {
+        "source": "github",
+        "repo": "anthropics/claude-plugins-community"
+      }
+    }
+  },
   "hooks": {
     "SessionStart": [
       {

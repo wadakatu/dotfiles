@@ -155,7 +155,7 @@ Claude Code の設定を Nix の `home.file` でシンボリックリンクに�
 
 | リポジトリ | 配置先 |
 |---|---|
-| `agents/claude/settings.json` | `~/.claude/settings.json` |
+| `agents/claude/settings.json` | `~/.claude/settings.json`（`settings.private.json` と合成） |
 | `agents/claude/CLAUDE.md` | `~/.claude/CLAUDE.md` |
 | `agents/claude/statusline.py` | `~/.claude/statusline.py` |
 | `agents/claude/skills/` | `~/.claude/skills/` |
@@ -165,7 +165,9 @@ Claude Code の設定を Nix の `home.file` でシンボリックリンクに�
 
 ```bash
 mkdir -p ~/.claude/skills ~/.claude/commands ~/.claude/hooks ~/.codex/skills
-cp -f agents/claude/settings.json agents/claude/CLAUDE.md agents/claude/statusline.py ~/.claude/
+cp -f agents/claude/CLAUDE.md agents/claude/statusline.py ~/.claude/
+[ -f ~/.claude/settings.private.json ] || echo '{}' > ~/.claude/settings.private.json
+jq -s '.[0] * .[1]' agents/claude/settings.json ~/.claude/settings.private.json > ~/.claude/settings.json.new && mv ~/.claude/settings.json.new ~/.claude/settings.json
 chmod +x ~/.claude/statusline.py
 cp -R agents/claude/skills/* ~/.claude/skills/
 cp agents/claude/commands/*.md ~/.claude/commands/
@@ -178,6 +180,11 @@ cp -R agents/codex/skills/* ~/.codex/skills/
 `branch-guard.sh`（保護ブランチ main / master / dev 上での `git commit` / `git push` と、
 保護ブランチを push 先に指名するコマンドをブロックする PreToolUse フック）も
 登録済みなので、コピー以外の手作業は不要。
+
+`~/.claude/settings.private.json` は公開しない設定を置く overlay。`autoMode` の社内向け
+ルールや `skipDangerousModePermissionPrompt` のようなマシン固有の安全設定はここに書き、
+上の `jq` がリポジトリ側の `settings.json` に重ねて `~/.claude/settings.json` を作る
+（同じキーは overlay が勝つ）。リポジトリの `settings.json` には入れない。
 
 `~/.claude/settings.local.json` は Claude Code が権限の「常に許可」を書き込む
 ローカル専用ファイル。リポジトリには取り込まない。
