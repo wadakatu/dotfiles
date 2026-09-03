@@ -12,7 +12,8 @@
     "ponytail@ponytail": true,
     "code-review@claude-plugins-official": true,
     "web-quality-skills@addy-web-quality-skills": true,
-    "impeccable@claude-community": true
+    "impeccable@claude-community": true,
+    "cloudflare@cloudflare": true
   },
 
   "model": "opus",
@@ -191,6 +192,12 @@
       "source": {
         "source": "github",
         "repo": "addyosmani/web-quality-skills"
+      }
+    },
+    "cloudflare": {
+      "source": {
+        "source": "github",
+        "repo": "cloudflare/skills"
       }
     }
   },
