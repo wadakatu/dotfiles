@@ -9,7 +9,7 @@ description: Use this skill whenever you are about to defer work to a separate G
 
 ## なぜこのスキルが必要か
 
-人間のレビュワーから見ると「別 issue で対応します」は **約束** だが、LLM の応答ループでは口約束のまま流れて忘れられやすい。実際に過去 PR #NNNN のレビュー対応で、reply に「別 issue で対応」と書きながら作成し忘れ、ユーザーから「issue は作成しましたか？」と確認される事例が発生した。
+人間のレビュワーから見ると「別 issue で対応します」は **約束** だが、応答の中では口約束のまま流れて忘れられやすい。
 
 このスキルの目的は、deferral 文言を出すこと自体を **issue 起票のトリガー** に変え、reply / 説明に issue 番号を載せる前に一度立ち止まることにある。
 
@@ -33,7 +33,7 @@ issue にする内容を、自分の reply 草稿から抽出する:
 
 | 項目 | 抽出元 |
 | --- | --- |
-| **タイトル** | 「何を直すのか」を 1 行で。`<カテゴリ> — <対象 / 修正内容>` 形式が読みやすい（例: `impl — SomeController::put() で 500 → 404 に修正`） |
+| **タイトル** | 「何を直すのか」を 1 行で。`<カテゴリ> — <対象 / 修正内容>` 形式が読みやすい（例: `impl — <Controller>::<method>() で 500 → 404 に修正`） |
 | **背景** | 元のレビューコメント / PR / file:line / 該当コミットへのリンク |
 | **問題** | なぜ修正が必要か（テスト失敗、規約違反、UX、セキュリティ、誤実装、etc.） |
 | **やること** | 想定する diff / 変更ポイント。CodeRabbit が `suggestion` を出していればそれを引用 |
@@ -55,7 +55,7 @@ gh issue list --repo <owner>/<repo> \
 
 検索キーワードの選び方:
 
-- **対象シンボル / API パス** をそのまま入れる（`SomeController::put`, `SomeListResponse cursor`, `/v2/some/{id}/path` など）
+- **対象シンボル / API パス** の実名を入れる（クラス名 + メソッド名、レスポンス型名 + フィールド名、API パスなど）
 - ファイル名 + 動作（`phpunit.xml schema 13`）
 - 過度に一般的なキーワード（`bug`, `fix`）だけだと無関係 issue が大量にヒットするので **必ず固有名と組み合わせる**
 
@@ -71,7 +71,7 @@ gh issue list --repo <owner>/<repo> \
 
 重複なしなら作成。リポジトリのラベル規約に従う（不明なら一度 `gh label list` で確認）。
 
-リポジトリに **Issue Type（Bug / Feature / Task）運用がある場合は必ず設定する**。`gh issue create` には `--type` が無いため、その場合は GraphQL mutation で作成する（例: work-api は CLAUDE.md の「GitHub Issue 運用」節に repoId と Issue Type ID 付きのコマンドが明記されている。type 未設定だと needs-triage が自動付与される）。
+リポジトリに **Issue Type（Bug / Feature / Task）運用がある場合は必ず設定する**。`gh issue create` には `--type` が無いため、その場合は GraphQL mutation で作成する（対象リポジトリの CLAUDE.md に repoId / Issue Type ID 付きの手順があればそれに従う）。
 
 ```bash
 gh issue create --repo <owner>/<repo> \
@@ -102,7 +102,7 @@ EOF
 )"
 ```
 
-タイトルと本文は **issue 単独で読んで自己完結** するように書く。「PR #NNNN で言ったあれ」だけだと未来の自分・他人が辿れない。
+タイトルと本文は **issue 単独で読んで自己完結** するように書く。「あの PR で言ったあれ」だけだと未来の自分・他人が辿れない。
 
 ### 4. reply / PR 本文に issue 番号を埋め込む
 
@@ -129,14 +129,6 @@ issue を作った直後（あるいは作成と同じターン）に、deferral
 - **重複チェックなしで作る**: 同じ問題に対する issue が複数立つとトリアージが破綻する。`gh issue list --search` の手数は必ず払う。
 - **タイトルに PR 番号や日付しか書かない**: 「PR #NNNN のフォローアップ」だけでは検索性ゼロ。**何を直すのか** を主語にする。
 - **本文を空にする / `-b ""` で作る**: 後で読み返したとき何の情報もないので、最低限「背景・問題・やること・ゴール」の 4 セクションは入れる。
-
-## 実例（PR #NNNN で実際に作った issue）
-
-reply:
-
-> 「不存在 → 500 ではなく 404 が正しい」という指摘自体には同意なので、ここは別途 issue 化して後続で対応します。
-
-→ 同ターン内で `gh issue list --search "SomeController 404"` でゼロヒット確認 → `gh issue create` で #NNNN を作成 → 同 thread に `follow-up issue 起票しました: #NNNN` を投稿、PR description のフォローアップ節にも追加。
 
 ## 関連スキル
 

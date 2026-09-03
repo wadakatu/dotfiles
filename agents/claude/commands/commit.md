@@ -20,7 +20,3 @@ description: 変更内容を適切な粒度でコミットする。ブランチ�
     - 既定は **英語の Conventional Commits**（`feat:` `fix:` `docs:` `refactor:` `chore:` 等。破壊的変更は `!` を付与）
     - 対象リポジトリの CLAUDE.md / プロジェクトコマンドに明示規約がある場合は**そちらを優先**する。迷ったら `git log --oneline -10` で直近の実例に合わせる
     - `Co-Authored-By: Claude ...` などのトレーラーは付けない
-
-## 使用技術
-
-- **Git コマンド**: ローカルリポジトリの操作、コミット

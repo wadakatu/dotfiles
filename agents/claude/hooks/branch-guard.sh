@@ -30,9 +30,9 @@ case $cmd in
 esac
 
 # Which repository does this command actually act on? CLAUDE_PROJECT_DIR is
-# only the session's root, and several projects keep sibling checkouts inside
-# it (dev-compose has <sub-repos>). Judging those by the outer repo's
-# HEAD blocks every commit in a sub-repo whenever the outer one sits on master.
+# only the session's root, and some projects keep sibling checkouts nested
+# inside an outer repository. Judging those by the outer repo's HEAD blocks
+# every commit in a sub-repo whenever the outer one sits on master.
 #
 # Order: an explicit `git -C <dir>` beats the session cwd, which beats the
 # project dir. A relative -C path is resolved against the cwd git itself would

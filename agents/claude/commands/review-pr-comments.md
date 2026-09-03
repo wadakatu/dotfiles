@@ -85,11 +85,11 @@ gh api repos/{owner}/{repo}/pulls/{pull_number}/comments/{comment_id}/replies \
 2. **根拠** - sibling ファイル / CLAUDE.md ルール / 該当コミットハッシュ などの具体的なポインタ
 3. **スコープの扱い** - 「本 PR のスコープ外」「別 issue 化推奨」など、フォローアップの方向性
 
-例:
+例（形の参考。内容は架空）:
 
-> sibling の `Some/Module/*Controller.php` も同じ invokable パターンで `__invoke` に PHPDoc を付けていないため、リポジトリ内の既存規約に合わせて省略します。PHPDoc を必要とするなら sibling 全体で統一したほうが一貫性があり、本 PR のスコープ外と判断しました。
+> sibling の `<同種のクラス群>` も同じパターンで PHPDoc を付けていないため、リポジトリ内の既存規約に合わせて省略します。必要なら sibling 全体で統一したほうが一貫性があり、本 PR のスコープ外と判断しました。
 
-> CodeRabbit の前提が古いコミットです。現在の `SomeException::render()` は `expectsJson()` で分岐しブラウザに `SOME_URL?error=some_error` でリダイレクトする（コミット 0000000）ので、OAS の description と Location ヘッダー記述は実装と一致しています。
+> 指摘の前提が古いコミットです。現在の `<該当メソッド>` は `<現在の挙動>`（コミット `<hash>`）なので、ドキュメントの記述は実装と一致しています。
 
 ### 7. 結果レポート
 
@@ -132,6 +132,6 @@ gh api repos/{owner}/{repo}/pulls/{pull_number}/comments/{comment_id}/replies \
 
 - コメントを確認する前に、必ず最新のコードを読んでから判定する
 - 自動レビューツール（CodeRabbit等）と人間のレビュー、両方のコメントを対象にする
-- 修正時はCLAUDE.mdの規約に従い、プロジェクト規定のリンターを通す（例: work-auth なら `make lint`）
+- 修正時は対象リポジトリの CLAUDE.md の規約に従い、そこで規定されたリンター/フォーマッタを通す
 - 判断に迷う場合は「対応不要」ではなく、ユーザーに確認を取る
 - **対応不要 (👎) は reply で理由説明を必ず残す** — 👎 だけだと後からレビュワーが辿れない
