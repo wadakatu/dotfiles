@@ -68,6 +68,10 @@ def _git_status(cwd: str) -> dict:
 
     ブランチ名・ahead/behind・staged/modified/untracked/conflict が
     この1コマンドで揃うので、git を複数回呼ぶより速い。
+
+    GIT_OPTIONAL_LOCKS=0 で index の書き戻し (index.lock) を止める。timeout 時は
+    SIGKILL されるため、lock を取っていると消されずに残り、その worktree の
+    git add/commit や Orca の dev 更新が失敗し続ける (スリープ中の DarkWake で実際に起きた)。
     """
     result = subprocess.run(
         ["git", "status", "--porcelain=v2", "--branch", "--untracked-files=normal"],
@@ -75,6 +79,7 @@ def _git_status(cwd: str) -> dict:
         capture_output=True,
         text=True,
         timeout=GIT_TIMEOUT,
+        env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
     )
     if result.returncode != 0:
         return {}
