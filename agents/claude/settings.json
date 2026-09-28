@@ -6,17 +6,17 @@
   },
 
   "enabledPlugins": {
-    "frontend-design@claude-plugins-official": true,
+    "frontend-design@claude-plugins-official": false,
     "superpowers@claude-plugins-official": true,
     "chrome-devtools-mcp@claude-plugins-official": true,
     "claude-code-setup@claude-plugins-official": false,
     "laravel-boost@claude-plugins-official": false,
     "context7@claude-plugins-official": true,
     "ponytail@ponytail": true,
-    "code-review@claude-plugins-official": true,
-    "web-quality-skills@addy-web-quality-skills": true,
-    "impeccable@claude-community": true,
-    "cloudflare@cloudflare": true
+    "code-review@claude-plugins-official": false,
+    "web-quality-skills@addy-web-quality-skills": false,
+    "impeccable@claude-community": false,
+    "cloudflare@cloudflare": false
   },
 
   "model": "opus",
