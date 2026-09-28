@@ -59,6 +59,20 @@ run() {
 
 log "=== worktree-gc 開始 (repo=$REPO dry_run=$DRY_RUN) ==="
 
+# ---- 取り残された index.lock を消す ----
+# git は SIGKILL されると lock を消せない (timeout 付きで git を叩くツールや、落ちたエージェント)。
+# 本体の lock が残ると Orca がローカル dev を fast-forward できず、worktree の lock が残ると
+# その worktree で add/commit できなくなる。1 時間以上前のもので、かつ git が 1 本も
+# 動いていないときだけ stale とみなす (エディタ待ちの commit などは git プロセスが居る)。
+if pgrep -x git >/dev/null; then
+    log "keep  index.lock の掃除は見送り (git が実行中)"
+else
+    while read -r lock; do
+        log "stale-lock $lock"
+        run rm -f "$lock"
+    done < <(find "$REPO/.git" -maxdepth 3 -name index.lock -mmin +60 2>/dev/null)
+fi
+
 # upstream が消えたか (= PR が merge/close された) を見るために必要。
 # オフライン時はこの判定だけ諦めて、孤児の掃除は続ける。
 fetch_ok=1
