@@ -30,12 +30,40 @@
 
 `~/.claude/{settings.json,CLAUDE.md,statusline.py,commands,skills,hooks}` は
 **`~/www/dotfiles/agents/claude/` が正**。`~/.claude` 側は手動コピーされた複製。
+Codex の `~/.codex/AGENTS.md` も同じく **`~/www/dotfiles/agents/codex/AGENTS.md` が正**。
 
-`~/.claude` を直接編集したら、同じ内容を dotfiles 側にも反映してコミットすること
+`~/.claude` や `~/.codex/AGENTS.md` を直接編集したら、同じ内容を dotfiles 側にも反映してコミットすること
 （逆方向のコピーは `~/www/dotfiles/README.md` の手順を参照）。
 
 ## 作業のしかた
 
-- 破壊的・不可逆な操作（force push を除く履歴書き換え、リソース削除、外部への送信）は
-  実行前に確認する。
 - テストが落ちたら落ちたと報告する。通っていない状態を「完了」と言わない。
+
+## 委任の線引き
+
+人間がボトルネックにならないよう、次の線で動く。どちらか迷うものは止まって聞く。
+
+**聞かずに進め、事後に報告する**
+
+- 自分の作業ブランチへの push と PR 作成（検証が通ってから。マージは承認レビューで人が見る）。
+- 自分の PR に付いたレビュー指摘への返信とリアクション。
+  ただし人間の指摘を「対応しない」と断る返信だけは、文面を見せてから投稿する。
+- 作業中に見つけた「別 issue で対応」の起票。重複検索と Issue Type の設定は必ず行う。
+- issue のクローズ。解決を検証し、根拠コメントを付ける。
+- 実装の二択で、動かせば答えが出るもの。試すだけでなく公式ドキュメントやベストプラクティスも
+  出典付きで調べ、その時点で使える最も賢いモデルで判断する。
+- PR が MERGED / CLOSED になった worktree の削除と docker の停止。未コミット変更なし・
+  PR に入っていないコミットなし・中のエージェントが作業中でない、をすべて満たすとき。
+
+**止まって聞く**
+
+- 本番への反映（本番ブランチへの push・release、本番環境への apply・デプロイ）。
+- 仕様・挙動・API の形・スコープが変わる判断。
+- 他人の PR・issue へのコメント（レビューを含む）。
+- Slack・メール・社外への発信。社内外とも、送る前に文面を見せる。
+- 上記以外の破壊的・不可逆な操作（force push を除く履歴書き換え、データやクラウド資源の削除）。
+
+止まって聞くとき、Orca の worktree にいれば
+`orca worktree set --worktree current --workspace-status needs-decision --unread --comment "<何を判断してほしいか 1 行>" --json`
+でボードの Needs decision 列にカードを移す。判断をもらったら `--workspace-status in-progress --read` に戻す。
+（`needs-decision` は Needs decision 列の内部名。UI で列を作り直すと `status-<番号>` になるので、そのときは内部名を付け直す。）結果に `warnings` が出たら列が無いか内部名が変わっているので、未読マークと一言だけで知らせて報告する。

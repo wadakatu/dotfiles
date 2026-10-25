@@ -161,6 +161,7 @@ Claude Code の設定を Nix の `home.file` でシンボリックリンクに�
 | `agents/claude/skills/` | `~/.claude/skills/` |
 | `agents/claude/commands/` | `~/.claude/commands/` |
 | `agents/claude/hooks/` | `~/.claude/hooks/` |
+| `agents/codex/AGENTS.md` | `~/.codex/AGENTS.md` |
 | `agents/codex/skills/` | `~/.codex/skills/` |
 
 ```bash
@@ -173,6 +174,7 @@ cp -R agents/claude/skills/* ~/.claude/skills/
 cp agents/claude/commands/*.md ~/.claude/commands/
 cp agents/claude/hooks/*.sh ~/.claude/hooks/
 chmod +x ~/.claude/hooks/*.sh
+cp -f agents/codex/AGENTS.md ~/.codex/
 cp -R agents/codex/skills/* ~/.codex/skills/
 ```
 
