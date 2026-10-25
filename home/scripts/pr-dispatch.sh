@@ -18,6 +18,8 @@ set -euo pipefail
 # launchd の PATH は /usr/sbin:/usr/bin:/sbin:/bin だけで、orca も gh も jq も入らない。
 PATH="/etc/profiles/per-user/${USER}/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 export PATH
+# launchd の環境にはロケールが無く、cut -c がバイト単位で切って日本語のコメントが文字化けする。
+export LC_ALL=en_US.UTF-8
 
 ORCA_ROOT="${ORCA_ROOT:-$HOME/orca/workspaces}"
 # 起動済みの (PR, 対応, 状態) を 1 行ずつ覚える。直せなかった状態に周期ごと起動し直さないため。
@@ -212,7 +214,7 @@ done < <(jq -r --arg root "$ORCA_ROOT" '
     .result.worktrees[]?
     | select((.isMainWorktree | not) and (.path | startswith($root + "/")) and ((.agents // []) | length > 0))
     | (.agents | max_by(.updatedAt // 0)) as $a
-    | [.path, (.workspaceStatus // ""), $a.state, (($a.stateStartedAt // 0) | tostring),
+    | [.path, ((.workspaceStatus // "") | if . == "" then "-" else . end), $a.state, (($a.stateStartedAt // 0) | tostring),
        (($a.lastAssistantMessage // "") | gsub("[\t\r]"; " ") | gsub("\n"; " ⏎ "))] | @tsv' <<<"$ps_json")
 
 if [ "$launched" -gt 0 ] || [ "$flagged" -gt 0 ]; then
