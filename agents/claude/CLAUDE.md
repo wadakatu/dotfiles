@@ -30,8 +30,9 @@
 
 `~/.claude/{settings.json,CLAUDE.md,statusline.py,commands,skills,hooks}` は
 **`~/www/dotfiles/agents/claude/` が正**。`~/.claude` 側は手動コピーされた複製。
+Codex の `~/.codex/AGENTS.md` も同じく **`~/www/dotfiles/agents/codex/AGENTS.md` が正**。
 
-`~/.claude` を直接編集したら、同じ内容を dotfiles 側にも反映してコミットすること
+`~/.claude` や `~/.codex/AGENTS.md` を直接編集したら、同じ内容を dotfiles 側にも反映してコミットすること
 （逆方向のコピーは `~/www/dotfiles/README.md` の手順を参照）。
 
 ## 作業のしかた
