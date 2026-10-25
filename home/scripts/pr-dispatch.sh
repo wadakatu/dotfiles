@@ -62,10 +62,12 @@ board() {
     fi
 }
 
-# 最後の発言が人への質問で終わっているか。末尾の数行に疑問符か依頼の言い回しがあれば質問とみなす。
-# ponytail: 文末の決まり文句だけで見ている。誤判定が多ければ、エージェントに決まった印を書かせる方式に切り替える。
+# 最後の発言が質問で終わっているか (最終行が疑問符で終わる)。
+# 人の判断待ちは AskUserQuestion で出させ、Claude には Stop hook (question-guard.sh) で強制している。
+# これは hook の効かない Codex や古いセッション向けの保険。「ください」などの依頼の言い回しまで
+# 拾うと、2026-10-26 の初回で 5 件中 4 件が誤判定だったので、疑問符だけに絞った。
 looks_like_question() {
-    printf '%s' "$1" | awk 'NF' | tail -n 3 | grep -Eq '[?？]|ますか|ですか|でしょうか|ください|教えて'
+    printf '%s' "$1" | awk 'NF' | tail -n 1 | grep -Eq '[?？][[:space:]）)」』*]*$'
 }
 
 if ! orca status --json 2>/dev/null | jq -e '.result.runtime.reachable == true' >/dev/null 2>&1; then

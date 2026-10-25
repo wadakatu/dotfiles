@@ -50,7 +50,6 @@
   },
 
   "cleanupPeriodDays": 90,
-  "askUserQuestionTimeout": "10m",
 
   "attribution": {
     "commit": "",
@@ -238,6 +237,15 @@
             "command": "/usr/bin/afplay",
             "args": ["/System/Library/Sounds/Glass.aiff"],
             "async": true
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/question-guard.sh",
+            "timeout": 15
           }
         ]
       }

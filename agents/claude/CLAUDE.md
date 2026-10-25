@@ -63,6 +63,8 @@ Codex の `~/.codex/AGENTS.md` も同じく **`~/www/personal/dotfiles/agents/co
 - Slack・メール・社外への発信。社内外とも、送る前に文面を見せる。
 - 上記以外の破壊的・不可逆な操作（force push を除く履歴書き換え、データやクラウド資源の削除）。
 
+人の判断が要る質問は、文章で終わらせず AskUserQuestion で聞く。文章の質問は Orca のボードにも Needs You にも出ず、
+ユーザーからは完了に見える（Stop hook の question-guard.sh が差し戻す）。
 止まって聞くとき、Orca の worktree にいれば
 `orca worktree set --worktree current --workspace-status needs-decision --unread --comment "<何を判断してほしいか 1 行>" --json`
 でボードの Needs decision 列にカードを移す。判断をもらったら `--workspace-status in-progress --read` に戻す。
