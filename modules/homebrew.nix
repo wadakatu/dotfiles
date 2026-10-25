@@ -42,6 +42,9 @@
       # "docker-desktop" にリネームされている (旧名は deprecated エイリアス)。
       "docker-desktop"
       "elgato-wave-link"
+      # Figma プラグインの開発と公開に必要。Import from manifest は
+      # ローカルの manifest.json を読むため、ブラウザ版では実行できない。
+      "figma"
       "herd"
       "ghostty"
       # 普段使いのブラウザではなく、Puppeteer / CDP 経由の動作確認用。
