@@ -79,8 +79,8 @@ nix-darwinはHomebrew本体をインストールしないため、Homebrewは先
 ## 新しい Mac の初回セットアップ
 
 ```bash
-git clone https://github.com/wadakatu/dotfiles.git ~/www/dotfiles
-cd ~/www/dotfiles
+git clone https://github.com/wadakatu/dotfiles.git ~/www/personal/dotfiles
+cd ~/www/personal/dotfiles
 
 # 評価とビルド。ユーザー環境にはまだ適用しない
 nix flake check --no-update-lock-file path:. --show-trace
@@ -214,9 +214,12 @@ Ghostty のように `.source = ./config/...` としないのは、herdr が con
   だけで反映される）
 
 flake では相対パスを渡すと flake source の store コピーを指してしまうため、
-`config.home.homeDirectory` を使った絶対パスの文字列を渡している
+絶対パスの文字列を渡している
 （[home-manager#2085](https://github.com/nix-community/home-manager/issues/2085)）。
-このため、このリポジトリのクローン先は `~/www/dotfiles` である前提。
+このため、このリポジトリのクローン先は `home/default.nix` の `dotfilesDir`
+（既定は `~/www/personal/dotfiles`）と一致させる。launchd のスクリプト
+（worktree-gc / pr-dispatch）も同じ値を見るので、クローン先を変えるときは
+`dotfilesDir` を直して `darwin-rebuild switch` する。
 
 なお、herdr が書き換え時に「一時ファイル + rename」方式を使う場合は
 `~/.config/herdr/config.toml` の symlink 自体が実ファイルに置き換わり、リポジトリから
@@ -259,7 +262,7 @@ workspace 状態を持っており `git worktree remove` を直接叩くと食�
 手で確認・実行する場合:
 
 ```bash
-DRY_RUN=1 ~/www/dotfiles/home/scripts/worktree-gc.sh   # 消さずに判定だけ出す
+DRY_RUN=1 ~/www/personal/dotfiles/home/scripts/worktree-gc.sh   # 消さずに判定だけ出す
 tail -50 ~/Library/Logs/worktree-gc.log                # 直近の実行ログ
 launchctl kickstart -k gui/$(id -u)/org.nix-community.home.worktree-gc  # 即時実行
 ```

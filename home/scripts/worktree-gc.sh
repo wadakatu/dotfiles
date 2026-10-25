@@ -5,7 +5,7 @@
 # launchd から 1 日 2 回 (12:00 / 21:00) 実行される。定義は home/worktree-gc.nix。
 #
 # 手で確認するとき:
-#   DRY_RUN=1 ~/www/dotfiles/home/scripts/worktree-gc.sh
+#   DRY_RUN=1 ~/www/personal/dotfiles/home/scripts/worktree-gc.sh
 #
 set -euo pipefail
 

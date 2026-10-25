@@ -1,4 +1,4 @@
-{ config, ... }: {
+{ config, dotfilesDir, ... }: {
   # herdr 本体は herdr 自身の updater (`herdr update`) が ~/.local/bin へ入れるので
   # Nix では管理せず、設定ファイルだけをリポジトリ側に置く。
 
@@ -17,5 +17,5 @@
   # store コピーを指してしまうため、絶対パスの文字列を渡す (home-manager#2085)。
   xdg.configFile."herdr/config.toml".source =
     config.lib.file.mkOutOfStoreSymlink
-      "${config.home.homeDirectory}/www/dotfiles/home/config/herdr/config.toml";
+      "${dotfilesDir}/home/config/herdr/config.toml";
 }

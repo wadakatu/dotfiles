@@ -18,9 +18,9 @@
 
 - **nix-darwin + home-manager 管理**。`~/.zshrc` `~/.config/git/config`
   `~/.config/ghostty/config` などは `/nix/store` への読み取り専用シンボリックリンク。
-  **直接編集しない**。実体は `~/www/dotfiles` にあり、そこを直してから反映する。
+  **直接編集しない**。実体は `~/www/personal/dotfiles` にあり、そこを直してから反映する。
 - 反映コマンドは副作用が大きいので、自分で実行せずプロンプトに提示してユーザーに実行してもらう:
-  `! cd ~/www/dotfiles && sudo darwin-rebuild switch --flake .#mymac`
+  `! cd ~/www/personal/dotfiles && sudo darwin-rebuild switch --flake .#mymac`
 - ランタイムは **mise**（node / bun / pnpm / yarn / python）。PHP は **Herd**（8.2〜8.5）。
 - 使えるツール: `gh` `rg` `jq` `yq` `glow` `age` `uv` `imagemagick` `gcloud`
 - `mise exec` / `npx` / `docker exec` のようなランナー経由の実行は権限ルールをすり抜けるので、
@@ -29,11 +29,11 @@
 ## Claude Code 自身の設定
 
 `~/.claude/{settings.json,CLAUDE.md,statusline.py,commands,skills,hooks}` は
-**`~/www/dotfiles/agents/claude/` が正**。`~/.claude` 側は手動コピーされた複製。
-Codex の `~/.codex/AGENTS.md` も同じく **`~/www/dotfiles/agents/codex/AGENTS.md` が正**。
+**`~/www/personal/dotfiles/agents/claude/` が正**。`~/.claude` 側は手動コピーされた複製。
+Codex の `~/.codex/AGENTS.md` も同じく **`~/www/personal/dotfiles/agents/codex/AGENTS.md` が正**。
 
 `~/.claude` や `~/.codex/AGENTS.md` を直接編集したら、同じ内容を dotfiles 側にも反映してコミットすること
-（逆方向のコピーは `~/www/dotfiles/README.md` の手順を参照）。
+（逆方向のコピーは `~/www/personal/dotfiles/README.md` の手順を参照）。
 
 ## 作業のしかた
 
