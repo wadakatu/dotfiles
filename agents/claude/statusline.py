@@ -16,7 +16,7 @@ stdin にセッション情報の JSON が渡され、stdout に出したもの�
 - 何があっても例外で落とさない。落ちるとステータスラインが空になる。
 
 表示:
-  ◆ Opus 5 high · ~/www/dotfiles · main ↑2 +2 ~5 ?1
+  ◆ Opus 5 high · ~/www/personal/dotfiles · main ↑2 +2 ~5 ?1
   ███████░░░ 68% · $1.24 · 12m · +156/-23
 """
 

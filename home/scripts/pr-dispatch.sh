@@ -6,7 +6,7 @@
 # launchd から 30 分ごとに実行される。定義は home/pr-dispatch.nix。
 #
 # 手で確認するとき:
-#   DRY_RUN=1 ~/www/dotfiles/home/scripts/pr-dispatch.sh
+#   DRY_RUN=1 ~/www/personal/dotfiles/home/scripts/pr-dispatch.sh
 #
 set -euo pipefail
 

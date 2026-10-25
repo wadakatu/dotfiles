@@ -1,4 +1,4 @@
-{ config, ... }: {
+{ config, dotfilesDir, ... }: {
   # work-api と Orca 管理下の全リポの worktree、それに紐づく docker compose プロジェクトを
   # 1 日 2 回掃除する LaunchAgent。放置すると worktree ごとに nginx/php-fpm/redis の
   # 3 コンテナと bridge network が積み上がり、docker のサブネットプールが枯れて
@@ -16,7 +16,7 @@
       # 実行ビットはリポジトリ側で立てておくこと (chmod +x)。
       ProgramArguments = [
         "/bin/bash"
-        "${config.home.homeDirectory}/www/dotfiles/home/scripts/worktree-gc.sh"
+        "${dotfilesDir}/home/scripts/worktree-gc.sh"
       ];
 
       # 12:00 と 21:00。スリープ中に跨いだ分は起床後にまとめて 1 回実行される

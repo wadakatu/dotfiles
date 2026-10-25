@@ -1,4 +1,4 @@
-{ config, ... }: {
+{ config, dotfilesDir, ... }: {
   # 自分の OPEN な PR を 30 分ごとに見て、conflict / CI 失敗 / 未対応のレビューがあれば
   # Orca のタブでエージェントを起動する LaunchAgent。対象は Orca に worktree がある非 draft の PR。
   #
@@ -10,7 +10,7 @@
       # スクリプト実体はリポジトリの絶対パスを直接叩く (worktree-gc.nix と同じ判断)。
       ProgramArguments = [
         "/bin/bash"
-        "${config.home.homeDirectory}/www/dotfiles/home/scripts/pr-dispatch.sh"
+        "${dotfilesDir}/home/scripts/pr-dispatch.sh"
       ];
 
       # 30 分ごと。スリープ中は走らず、起床後に次の周期から再開する。
