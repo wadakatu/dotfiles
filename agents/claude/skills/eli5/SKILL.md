@@ -9,9 +9,9 @@ description: 「/eli5 <topic>」と入力されたとき、「絵で説明して
 
 書くのは **body フラグメント**。`<!doctype>` も `<html>` も `<head>` も `<body>` も書かない。
 外枠（doctype・言語・フォント・スタイルシート・一覧へ戻る線）は
-`~/www/eli5/tools/archive.py` が被せる。
+`~/www/personal/eli5/tools/archive.py` が被せる。
 
-デザインは `~/www/eli5/eli5.css` にある。**記事ごとに違ってよいのは、絵と文だけ。**
+デザインは `~/www/personal/eli5/eli5.css` にある。**記事ごとに違ってよいのは、絵と文だけ。**
 `<style>` を書いてよいのは自分の絵を動かす / 塗るときだけで、パレット・書体・`e-` の
 見た目は上書きしない。
 

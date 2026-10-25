@@ -10,7 +10,7 @@ description: eli5 スキル（/eli5）が解説用の HTML を生成したら、
 GitHub Pages 上の恒久 URL をユーザーに返すまでを担保する。
 
 - リポジトリ: https://github.com/wadakatu/eli5 (public)
-- ローカル: `~/www/eli5`
+- ローカル: `~/www/personal/eli5`
 - 公開 URL: https://www.wadakatu.dev/eli5/ （custom domain。`wadakatu.github.io/eli5/` も同じ内容を返す）
 
 ## トリガー
@@ -26,17 +26,17 @@ GitHub Pages 上の恒久 URL をユーザーに返すまでを担保する。
 ### 1. リポジトリを最新化
 
 ```
-cd ~/www/eli5 && git switch main && git pull
+cd ~/www/personal/eli5 && git switch main && git pull
 ```
 
 ### 2. カテゴリを決める
 
-保存先は `~/www/eli5/<category>/` 配下。**カテゴリ = ディレクトリ名** がそのまま一覧の見出しになる。
+保存先は `~/www/personal/eli5/<category>/` 配下。**カテゴリ = ディレクトリ名** がそのまま一覧の見出しになる。
 
 まず既存カテゴリを見て、当てはまるものがあれば **必ず再利用する**:
 
 ```
-ls -d ~/www/eli5/*/ 2>/dev/null
+ls -d ~/www/personal/eli5/*/ 2>/dev/null
 ```
 
 当てはまらないときだけ新しいディレクトリを作る。名前は英語の kebab-case
@@ -52,13 +52,13 @@ ls -d ~/www/eli5/*/ 2>/dev/null
 衝突していたら末尾に `-2`, `-3` を付ける（上書きしない）:
 
 ```
-ls ~/www/eli5/<category>/$(date +%F)-<slug>*.html 2>/dev/null
+ls ~/www/personal/eli5/<category>/$(date +%F)-<slug>*.html 2>/dev/null
 ```
 
 ### 4. ブランチを切る（**単独の Bash 呼び出しで**）
 
 ```
-cd ~/www/eli5 && git switch -c add/<slug>
+cd ~/www/personal/eli5 && git switch -c add/<slug>
 ```
 
 > **重要**: `branch-guard` hook は Bash 呼び出しが **始まった時点の HEAD** を見る。
@@ -69,13 +69,13 @@ cd ~/www/eli5 && git switch -c add/<slug>
 ### 5. 保存して組み立てる
 
 ```
-cd ~/www/eli5 && mkdir -p <category> && cp <生成した HTML のパス> ./<category>/$(date +%F)-<slug>.html
+cd ~/www/personal/eli5 && mkdir -p <category> && cp <生成した HTML のパス> ./<category>/$(date +%F)-<slug>.html
 ```
 
 続けて `tools/archive.py` を通す。**これを飛ばすと外枠が付かず、一覧にも載らない。**
 
 ```
-cd ~/www/eli5 && python3 tools/archive.py <category>/$(date +%F)-<slug>.html
+cd ~/www/personal/eli5 && python3 tools/archive.py <category>/$(date +%F)-<slug>.html
 ```
 
 スクリプトは private 情報を検査し、共通の外枠（doctype・フォント・`eli5.css`・戻る線）を被せ、
@@ -113,7 +113,7 @@ gh pr merge --repo wadakatu/eli5 --squash --delete-branch
 `gh pr merge` は hook の対象文字列に一致しないので `branch-guard` を通る。
 **この自動 merge は `wadakatu/eli5` 限定**。他リポジトリに一般化しないこと。
 
-merge 後にローカルを戻す: `cd ~/www/eli5 && git switch main && git pull`
+merge 後にローカルを戻す: `cd ~/www/personal/eli5 && git switch main && git pull`
 
 ### 8. 公開を確認してから完了と言う
 
