@@ -18,6 +18,8 @@ set -euo pipefail
 # launchd の PATH は /usr/sbin:/usr/bin:/sbin:/bin だけで、orca も gh も jq も入らない。
 PATH="/etc/profiles/per-user/${USER}/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 export PATH
+# launchd の環境にはロケールが無く、cut -c がバイト単位で切って日本語のコメントが文字化けする。
+export LC_ALL=en_US.UTF-8
 
 ORCA_ROOT="${ORCA_ROOT:-$HOME/orca/workspaces}"
 # 起動済みの (PR, 対応, 状態) を 1 行ずつ覚える。直せなかった状態に周期ごと起動し直さないため。
@@ -121,11 +123,12 @@ query($q: String!) {
     exit 0
 }
 # 未対応のレビュー = 未解決のスレッドのうち、最後の発言が自分以外のもの。その発言 ID の並びを状態に使う。
+# 無いときは "-"。空欄にすると read がタブの連続を 1 つに詰め、後ろの列がずれる。
 prs=$(jq -r --arg me "$me" '.data.search.nodes[]
     | [ .repository.nameWithOwner, .headRefName, (.number | tostring), .url, .headRefOid, .mergeable,
         (.commits.nodes[0].commit.statusCheckRollup.state // "NONE"),
         ([.reviewThreads.nodes[] | select((.isResolved | not) and (.comments.nodes[0].author.login != $me))
-          | .comments.nodes[0].id] | sort | join(",")),
+          | .comments.nodes[0].id] | sort | join(",") | if . == "" then "-" else . end),
         .mergeStateStatus, (if .autoMergeRequest then "auto" else "manual" end) ] | @tsv' <<<"$prs_json")
 ps_json=$(orca worktree ps --json 2>/dev/null || echo '{}')
 
@@ -142,7 +145,7 @@ while IFS=$'\t' read -r slug branch num url head mergeable ci threads merge_stat
         action="sync-pr"; sig="$head"
     elif [ "$ci" = "FAILURE" ] || [ "$ci" = "ERROR" ]; then
         action="fix-ci"; sig="$head"
-    elif [ -n "$threads" ]; then
+    elif [ "$threads" != "-" ]; then
         action="review-pr-comments"; sig="$head:$threads"
     else
         # 対応が要らない PR。CLEAN で auto-merge が無ければ、マージするかは人が決める。
@@ -211,7 +214,7 @@ done < <(jq -r --arg root "$ORCA_ROOT" '
     .result.worktrees[]?
     | select((.isMainWorktree | not) and (.path | startswith($root + "/")) and ((.agents // []) | length > 0))
     | (.agents | max_by(.updatedAt // 0)) as $a
-    | [.path, (.workspaceStatus // ""), $a.state, (($a.stateStartedAt // 0) | tostring),
+    | [.path, ((.workspaceStatus // "") | if . == "" then "-" else . end), $a.state, (($a.stateStartedAt // 0) | tostring),
        (($a.lastAssistantMessage // "") | gsub("[\t\r]"; " ") | gsub("\n"; " ⏎ "))] | @tsv' <<<"$ps_json")
 
 if [ "$launched" -gt 0 ] || [ "$flagged" -gt 0 ]; then
