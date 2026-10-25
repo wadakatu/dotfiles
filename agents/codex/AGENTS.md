@@ -30,6 +30,8 @@
 
 止まって聞くとき、Orca の worktree にいれば `orca worktree set --worktree current --workspace-status needs-decision --unread --comment "<何を判断してほしいか 1 行>" --json` でボードの Needs decision 列にカードを移す。判断をもらったら `--workspace-status in-progress --read` に戻す。（`needs-decision` は Needs decision 列の内部名。UI で列を作り直すと `status-<番号>` になるので、そのときは内部名を付け直す。）結果に `warnings` が出たら列が無いか内部名が変わっているので、未読マークと一言だけで知らせて報告する。
 
+Orca の worktree で作業するときは、何の作業か固まった時点で（遅くとも PR を出すときに）`orca worktree set --worktree current --display-name "<リポジトリ>: <何の作業か>" --json` でカードに名前を付ける。名前は 1 行に収まる日本語にし、ブランチ名や issue のタイトルをそのまま使わない。リポジトリは `api` `front` `auth` `infra` のように短く書く。作業の中身が変わったら付け直す。
+
 ## Verification
 
 - 変更後は、対象に近い format、lint、型検査、テストを可能な範囲で自動実行する。
