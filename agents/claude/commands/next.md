@@ -15,8 +15,13 @@ description: 現在の PR のマージを確認し、default ブランチを同�
     - 現ブランチに PR がない場合（すでに default ブランチ上にいる等）は手順 3 へ進む
 
 2. **default ブランチの同期とローカル掃除**
-    - default ブランチ（`gh repo view --json defaultBranchRef` で確認）へ switch → `git pull --ff-only`
-    - マージ済みの作業ブランチを `git branch -d` で削除する（`-D` は使わない。削除できない場合は理由を報告して残す）
+    - **Orca が管理する worktree にいるとき**（`orca worktree current --json` が `"ok": true` で `isMainWorktree` が false）:
+        - switch・pull・ブランチ削除はしない（default ブランチは main checkout で使用中なので worktree では switch できない）
+        - `orca worktree set --worktree current --workspace-status completed --comment "merged #<番号>" --json` でボードを Done にする
+        - この worktree 自体は消さない（自分のタブごと閉じるため）。worktree-gc が削除条件を確かめて消す
+    - それ以外（main checkout や Orca 外）:
+        - default ブランチ（`gh repo view --json defaultBranchRef` で確認）へ switch → `git pull --ff-only`
+        - マージ済みの作業ブランチを `git branch -d` で削除する（`-D` は使わない。削除できない場合は理由を報告して残す）
 
 3. **次タスクの特定と着手**
     - 次タスクは以下の優先順で特定する:
@@ -25,7 +30,7 @@ description: 現在の PR のマージを確認し、default ブランチを同�
         3. ユーザーの直前の指示
     - 特定できたら **「次: 〜」と簡潔に提示してから**着手する
     - 候補が複数ある・特定できない場合は、候補を並べてユーザーに確認する（勝手に選ばない）
-    - 着手時は通常のフロー（ブランチ作成 → 実装 → 検証 → `/pr`）に従う
+    - 着手時は通常のフロー（ブランチ作成 → 実装 → 検証 → `/pr`）に従う。Orca の worktree にいたときは、次のタスクを `orca worktree create` で作る新しい worktree で始める（この worktree では続けない）
 
 ## 注意事項
 

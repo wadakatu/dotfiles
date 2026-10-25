@@ -23,6 +23,12 @@ description: 実装が一区切りつき、変更をレビューに出す段階�
     - **リポジトリに `.github/PULL_REQUEST_TEMPLATE.md` や直近 PR から読み取れるタイトル規約がある場合はそちらが最優先**で、下記の既定は使わない。テンプレートの条件付きセクション（migration チェックリスト等）は該当時に必ず埋める
     - タイトルは既定でプロジェクト指定の言語 + 種別プレフィックス: `Bugfix:` / `Refactoring:` / `New Feature:` / `Incident:` / `Document:`
 
+5. **Orca への書き戻し**（Orca が管理する worktree のときだけ）
+    - `orca worktree current --json` が `"ok": true` のときに、次の 2 つを実行する
+        - `orca reference add <PR の URL> --worktree current --json`
+        - `orca worktree set --worktree current --workspace-status in-review --comment "PR #<番号>" --json`
+    - `"ok": false`（Orca 外）やコマンドの失敗は無視する。PR 作成は成功として扱う
+
 ## PR 本文の形
 
 読み手は人間のレビュワーで、diff もコミットも別途読める。本文には判断に必要なことだけを書き、それ以外は diff とコミットに任せる。
