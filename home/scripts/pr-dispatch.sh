@@ -121,11 +121,12 @@ query($q: String!) {
     exit 0
 }
 # 未対応のレビュー = 未解決のスレッドのうち、最後の発言が自分以外のもの。その発言 ID の並びを状態に使う。
+# 無いときは "-"。空欄にすると read がタブの連続を 1 つに詰め、後ろの列がずれる。
 prs=$(jq -r --arg me "$me" '.data.search.nodes[]
     | [ .repository.nameWithOwner, .headRefName, (.number | tostring), .url, .headRefOid, .mergeable,
         (.commits.nodes[0].commit.statusCheckRollup.state // "NONE"),
         ([.reviewThreads.nodes[] | select((.isResolved | not) and (.comments.nodes[0].author.login != $me))
-          | .comments.nodes[0].id] | sort | join(",")),
+          | .comments.nodes[0].id] | sort | join(",") | if . == "" then "-" else . end),
         .mergeStateStatus, (if .autoMergeRequest then "auto" else "manual" end) ] | @tsv' <<<"$prs_json")
 ps_json=$(orca worktree ps --json 2>/dev/null || echo '{}')
 
@@ -142,7 +143,7 @@ while IFS=$'\t' read -r slug branch num url head mergeable ci threads merge_stat
         action="sync-pr"; sig="$head"
     elif [ "$ci" = "FAILURE" ] || [ "$ci" = "ERROR" ]; then
         action="fix-ci"; sig="$head"
-    elif [ -n "$threads" ]; then
+    elif [ "$threads" != "-" ]; then
         action="review-pr-comments"; sig="$head:$threads"
     else
         # 対応が要らない PR。CLEAN で auto-merge が無ければ、マージするかは人が決める。
