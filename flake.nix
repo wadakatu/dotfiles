@@ -15,6 +15,10 @@
     # nixpkgs: ほぼ全てのパッケージが含まれる本体。
     nixpkgs.url = "https://flakehub.com/f/NixOS/nixpkgs/0";
 
+    # 安定版 (0 = nixos-26.05) に新しい版が無いパッケージだけをここから取る。
+    # 0.1 は nixos-unstable を指す。
+    nixpkgs-unstable.url = "https://flakehub.com/f/NixOS/nixpkgs/0.1";
+
     # nix-darwin: macOS をシステムレベルで宣言的に管理するための仕組み。
     nix-darwin = {
       url = "https://flakehub.com/f/nix-darwin/nix-darwin/0";
@@ -30,12 +34,16 @@
     };
   };
 
-  outputs = inputs@{ self, nix-darwin, nixpkgs, determinate, home-manager }:
+  outputs = inputs@{ self, nix-darwin, nixpkgs, nixpkgs-unstable, determinate, home-manager }:
     let
       # macOS の short user name。ユーザー名とホームパスを各モジュールへ
       # 重複記述せず、新しい Mac でもここだけを確認すればよいようにする。
       username = "wadakatu";
       homeDirectory = "/Users/${username}";
+
+      # Apple Silicon。Intel Mac なら "x86_64-darwin"。
+      system = "aarch64-darwin";
+      pkgsUnstable = nixpkgs-unstable.legacyPackages.${system};
 
       # configuration: 1台のホストに適用する設定モジュール。
       configuration = { ... }: {
@@ -70,8 +78,7 @@
         # 確認コマンド: darwin-rebuild changelog
         system.stateVersion = 6;
 
-        # Apple Silicon。Intel Mac なら "x86_64-darwin"。
-        nixpkgs.hostPlatform = "aarch64-darwin";
+        nixpkgs.hostPlatform = system;
       };
     in
     {
@@ -96,7 +103,7 @@
             # 副作用として nix-env でインストールしたものと衝突しなくなる。
             home-manager.useUserPackages = true;
             # Home Manager モジュールへも同じユーザー情報を渡す。
-            home-manager.extraSpecialArgs = { inherit username homeDirectory; };
+            home-manager.extraSpecialArgs = { inherit username homeDirectory pkgsUnstable; };
             # 既存 ~/.zshrc 等と衝突した場合は .before-hm を付けてバックアップ。
             # 初回 activation で既存 dotfiles symlink を自動退避できる。
             home-manager.backupFileExtension = "before-hm";
