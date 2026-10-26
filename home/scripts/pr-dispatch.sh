@@ -223,9 +223,9 @@ while IFS=$'\t' read -r slug branch num state; do
     [ -n "$line" ] || continue
     wt=$(printf '%s' "$line" | cut -f3)
     [ "$(printf '%s' "$line" | cut -f4)" = "completed" ] && continue
-    if printf '%s' "$prs" | awk -F'\t' -v s="$slug" -v b="$branch" '$1 == s && $2 == b { found = 1 } END { exit !found }'; then
-        continue
-    fi
+    # 同じブランチに OPEN の PR があれば作業は続いている。$prs は draft と他人の PR を含まないので、ここで別に聞く。
+    open_count=$(gh pr list -R "$slug" --head "$branch" --state open --json number -q 'length' 2>/dev/null) || continue
+    [ "$open_count" = "0" ] || continue
     busy=$(jq -r --arg p "$wt" '[.result.worktrees[]? | select(.path == $p) | .agents[]?.state | select(. != "done")] | join(",")' <<<"$ps_json")
     if [ -n "$busy" ]; then
         vlog "keep  $slug#$num ($state だがエージェントが $busy)"
