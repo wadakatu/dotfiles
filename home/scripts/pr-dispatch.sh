@@ -152,7 +152,7 @@ while IFS=$'\t' read -r slug branch num url head mergeable ci threads merge_stat
     else
         # 対応が要らない PR。CLEAN で auto-merge が無ければ、マージするかは人が決める。
         if [ "$merge_state" = "CLEAN" ] && [ "$merge_mode" = "manual" ] && [ "$board" != "needs-decision" ]; then
-            board "$wt" merge "$head" needs-decision "マージ判断: #$num（CLEAN・auto-merge なし）"
+            board "$wt" merge "$head" needs-decision "マージ判断: #${num}（CLEAN・auto-merge なし）"
         fi
         continue
     fi
