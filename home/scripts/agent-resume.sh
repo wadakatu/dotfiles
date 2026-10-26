@@ -79,6 +79,8 @@ orca worktree ps --json >/dev/null 2>&1 || exit 0
 # 以前は kern.boottime の秒を使っていたが、再起動していないのに時計の補正で 2 秒ずれ、
 # 生きている 6 つのセッションを「前の起動」と取り違えて二重に開いた (2026-10-26 12:07)。
 boot=$(sysctl -n kern.bootsessionuuid)
+# 以前の形式の印 (kern.boottime の秒) が今の起動のものかを見分けるため。時計の補正による数秒のずれは許す。
+boot_sec=$(sysctl -n kern.boottime | sed -E 's/^\{ sec = ([0-9]+),.*/\1/')
 mkdir -p "$STATE_DIR/sessions" "$STATE_DIR/resumed"
 # この回で再開した worktree。下の Needs decision の節で二重に開かないため。
 launched=""
@@ -88,17 +90,17 @@ for f in "$STATE_DIR/sessions"/*; do
     sid=${f##*/}
     IFS=$'\t' read -r b pid wtid cwd transcript <"$f" || continue
 
-    # claude のプロセスが生きているセッションは、起動 ID がどうであれ再開しない。
-    if [ "$(ps -o comm= -p "$pid" 2>/dev/null)" = "claude" ]; then
-        # 以前の形式 (kern.boottime の秒) の印は、今の起動 ID に書き換える。
-        if [ "$b" != "$boot" ] && [ "$DRY_RUN" != "1" ]; then
-            printf '%s\t%s\t%s\t%s\t%s\n' "$boot" "$pid" "$wtid" "$cwd" "$transcript" >"$f"
-        fi
-        continue
+    # 以前の形式の印は、起動時刻の差が 5 分以内なら今の起動のものとして、今の起動 ID に書き換える。
+    # それより離れていれば前の起動のものなので、そのまま下の再開に回す。
+    if [[ "$b" =~ ^[0-9]+$ ]] && [ "$(( b > boot_sec ? b - boot_sec : boot_sec - b ))" -le 300 ]; then
+        b=$boot
+        [ "$DRY_RUN" = "1" ] || printf '%s\t%s\t%s\t%s\t%s\n' "$b" "$pid" "$wtid" "$cwd" "$transcript" >"$f"
     fi
-    # プロセスの無い印のうち、今の起動のものは普通に終わったセッション。
-    # 以前の形式 (数字だけ) の印は、hook を入れてから再起動していない間に書かれたので、これも今の起動として扱う。
-    if [ "$b" = "$boot" ] || [[ "$b" =~ ^[0-9]+$ ]]; then
+
+    # 今の起動の印は、claude のプロセスが生きていれば何もせず、無ければ普通に終わったので消す。
+    # 起動 ID が違う印は前の起動のもの。pid は再起動で別のプロセスに使い回されうるので、ここでは見ない。
+    if [ "$b" = "$boot" ]; then
+        [ "$(ps -o comm= -p "$pid" 2>/dev/null)" = "claude" ] && continue
         [ "$DRY_RUN" = "1" ] || rm -f "$f"
         continue
     fi
