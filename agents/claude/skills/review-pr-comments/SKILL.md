@@ -1,4 +1,5 @@
 ---
+name: review-pr-comments
 description: PR のレビューコメント（人間・CodeRabbit 等の自動ツール両方）を取得し、現在のコードと照合して妥当性を判定。要修正は修正してコミット・プッシュ、対応不要は理由の reply とリアクションを付与する。
 ---
 
