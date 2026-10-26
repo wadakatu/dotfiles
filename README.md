@@ -18,6 +18,7 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 | Ghostty と設定 | Homebrew cask + Home Manager |
 | herdr の設定 | `home/config/herdr/config.toml` を Home Manager が out-of-store symlink（本体は Nix 管理外） |
 | work-api の worktree / コンテナ掃除 | Home Manager `launchd.agents`（1 日 2 回、`home/scripts/worktree-gc.sh`） |
+| 再起動で止まった Claude の再開 | Home Manager `launchd.agents`（ログイン時と 3 分ごと、`home/scripts/agent-resume.sh`）＋ SessionStart hook `agents/claude/hooks/session-marker.sh` |
 | CLI パッケージ | nixpkgs `home.packages` |
 | GUI アプリ | nix-darwin `homebrew.casks` |
 | Dock / Finder / キーボード / スクリーンショット | nix-darwin `system.defaults` |
@@ -50,9 +51,11 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 │   ├── neovim.nix
 │   ├── packages.nix
 │   ├── worktree-gc.nix
+│   ├── agent-resume.nix
 │   ├── zsh.nix
 │   ├── scripts/
-│   │   └── worktree-gc.sh
+│   │   ├── worktree-gc.sh
+│   │   └── agent-resume.sh
 │   └── config/
 │       ├── ghostty/config
 │       ├── herdr/config.toml
