@@ -39,6 +39,30 @@ Codex の `~/.codex/AGENTS.md` も同じく **`~/www/personal/dotfiles/agents/co
 
 - テストが落ちたら落ちたと報告する。通っていない状態を「完了」と言わない。
 
+## 開発の流れ
+
+実装を伴うタスクは、言われなくても次の分担で進める（ユーザーの既定の方針。別の分担を指示されたらそちらに従う）。
+
+1. 設計: Fable に設計書を書かせる。
+2. 設計レビュー: Codex Astra に設計書をレビューさせる。
+3. 実装: Opus（このセッション）が実装する。
+4. 実装レビュー: Codex Astra に差分をレビューさせてから PR にする。
+
+レビューの指摘は、コードや公式ドキュメントで裏を取ってから反映する。
+設計判断の無い変更（CI の修正、レビュー指摘への対応、設定・文言・依存の更新、数行の修正）は 1 と 2 を省く。
+新しく PR にするものは、それでも 4 を通す。
+
+- Fable: Agent ツールで `subagent_type: "Plan"`（読み取り専用）と `model: "fable"` を指定する。設計書は最後のメッセージで返させ、
+  ファイルに保存する（scratchpad は再起動で消えるので、数日かかる作業はリポジトリに置く）。
+- Codex Astra: モデルは `~/.codex/config.toml` の既定（Astra）。どちらも Bash を `run_in_background: true` にして実行し、
+  stdin を閉じる（閉じないと入力を待ち続ける）。
+  - 設計レビュー: `codex exec -C <worktree> -s read-only -o <out.md> - < <prompt.md>`。設計書のパスを渡し、
+    記述を鵜呑みにせずコードで確かめるよう書く。
+  - 実装レビュー: Codex 組み込みのレビュー（Codex の `/review` と同じ）を使う。
+    `codex exec -C <worktree> -s read-only -o <out.md> review --base <base> < /dev/null`。
+    `--base` と観点の指定は同時に使えないので、観点は足さない。
+- ユーザーが途中を見たいと言ったら、`orca agent launch --agent claude --model claude-fable-5-1 --prompt "<依頼>" --json` で Orca のタブに出す。
+
 ## 委任の線引き
 
 人間がボトルネックにならないよう、次の線で動く。どちらか迷うものは止まって聞く。
