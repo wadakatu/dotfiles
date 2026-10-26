@@ -24,6 +24,7 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 | Dock / Finder / キーボード / スクリーンショット | nix-darwin `system.defaults` |
 | Claude Code / Codex の設定 | `agents/` に実体を置き手動コピー（Nix 管理外） |
 | Claude Code / Codex のスキル | `agents/` に実体を置き、Home Manager がスキルごとに out-of-store symlink（`home/agent-skills.nix`） |
+| Claude Code のエージェント定義 | `agents/claude/agents/` を `~/.claude/agents` へ out-of-store symlink（`home/agent-skills.nix`）。複数リポジトリの入口になる `orchestrator` は Orca の folder workspace で `claude --agent orchestrator` |
 | シークレット、アプリデータ、ブラウザデータ | Keychain / 1Password / バックアップ |
 
 ## 構成
@@ -188,6 +189,7 @@ cp -f agents/codex/AGENTS.md ~/.codex/
 |---|---|
 | `agents/skills/<name>/` | `~/.claude/skills/<name>` と `~/.agents/skills/<name>`（Claude Code と Codex の両方） |
 | `agents/claude/skills/<name>/` | `~/.claude/skills/<name>`（Claude Code だけ） |
+| `agents/claude/agents/` | `~/.claude/agents`（ディレクトリごと。Claude Code のエージェント定義） |
 | `agents/codex/skills/<name>/` | `~/.agents/skills/<name>`（Codex だけ） |
 
 - Codex が読む個人用スキルの場所は `~/.agents/skills`（[Codex のスキル](https://learn.chatgpt.com/docs/build-skills.md)）。`~/.codex/skills` は使わない。
