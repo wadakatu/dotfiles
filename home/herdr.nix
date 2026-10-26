@@ -6,7 +6,7 @@
   # symlink になるが、herdr は config.toml を自分で書き換えるため使えない
   #   - オンボーディング完了時に `onboarding = false` を書き込む
   #   - `herdr config reset-keys` が config.toml をバックアップして書き換える
-  # ~/.claude を symlink にしていないのと同じ理由 (README「エージェントスキルとコマンド」)。
+  # ~/.claude の設定を symlink にしていないのと同じ理由 (README「エージェントの設定とスキル」)。
   #
   # mkOutOfStoreSymlink: home-manager が /nix/store を経由せず、指定した絶対パスへ
   # 直接 symlink を張るためのヘルパー。実体はリポジトリ側の1ファイルだけになり、

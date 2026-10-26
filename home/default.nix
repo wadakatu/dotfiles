@@ -12,6 +12,7 @@
     ./worktree-gc.nix
     ./pr-dispatch.nix
     ./agent-resume.nix
+    ./agent-skills.nix
   ];
 
   # ユーザー識別は flake.nix の1か所を正とする。

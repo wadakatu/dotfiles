@@ -1,4 +1,5 @@
 ---
+name: sync-pr
 description: PR ブランチを base の最新に rebase で追従させ、conflict を解消して push する。「conflictを解消してください」「最新化してください」の定型フローを1コマンド化。
 ---
 

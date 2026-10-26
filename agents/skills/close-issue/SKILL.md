@@ -1,4 +1,5 @@
 ---
+name: close-issue
 description: issue が本当に解決済みかを検証してから、根拠コメント付きでクローズする。
 ---
 

@@ -28,12 +28,16 @@
 
 ## Claude Code 自身の設定
 
-`~/.claude/{settings.json,CLAUDE.md,statusline.py,commands,skills,hooks}` は
+`~/.claude/{settings.json,CLAUDE.md,statusline.py,hooks}` は
 **`~/www/personal/dotfiles/agents/claude/` が正**。`~/.claude` 側は手動コピーされた複製。
 Codex の `~/.codex/AGENTS.md` も同じく **`~/www/personal/dotfiles/agents/codex/AGENTS.md` が正**。
 
 `~/.claude` や `~/.codex/AGENTS.md` を直接編集したら、同じ内容を dotfiles 側にも反映してコミットすること
 （逆方向のコピーは `~/www/personal/dotfiles/README.md` の手順を参照）。
+
+自作の skill は dotfiles の `agents/skills/`（Claude と Codex の両方）、`agents/claude/skills/`、`agents/codex/skills/` が実体で、
+`~/.claude/skills/<name>` と `~/.agents/skills/<name>` はそこへの symlink（Home Manager が張る）。直すときは dotfiles 側を編集する。
+skill を足したり消したりしたら、`darwin-rebuild switch` でリンクを張り直す。
 
 ## 作業のしかた
 

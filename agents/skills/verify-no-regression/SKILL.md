@@ -1,4 +1,5 @@
 ---
+name: verify-no-regression
 description: ブランチ / PR の変更でデグレ・バグが起きないことを、diff 全読 + テストゲート + 実機確認で証拠つきで検証する。
 ---
 
