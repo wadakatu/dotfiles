@@ -133,7 +133,8 @@ while IFS=$'\t' read -r wtid wt; do
     dir="$HOME/.claude/projects/$(printf '%s' "$wt" | sed 's/[^A-Za-z0-9]/-/g')"
     sid=-
     while IFS= read -r x; do
-        ep=$(head -c 100000 "$x" | jq -r 'select(.entrypoint) | .entrypoint' 2>/dev/null | head -n 1 || true)
+        # 記録は行単位で読み、最初に entrypoint が出たところで止める (先頭の 1 行が長くても切らない)。
+        ep=$(jq -rn 'first(inputs | select(.entrypoint) | .entrypoint) // empty' "$x" 2>/dev/null || true)
         if [ "$ep" = "cli" ]; then
             sid=$(basename "$x" .jsonl)
             break
@@ -151,12 +152,13 @@ while IFS=$'\t' read -r wtid wt; do
         log "DRY-RUN: recheck $sid → $wt"
         continue
     fi
-    printf '%s\n' "$key" >>"$ORPHANS_FILE"
+    # 記録は開けたときだけ。失敗したものは次の回にもう一度試す。
     if orca terminal create --worktree "id:$wtid" --title "再開" \
         --command "bash '${BASH_SOURCE[0]}' launch '$sid' recheck '$wt'" --json >/dev/null; then
+        printf '%s\n' "$key" >>"$ORPHANS_FILE"
         log "recheck $sid → $wt"
     else
-        log "failed to reopen $sid → $wt"
+        log "failed to reopen $sid → $wt (次の回にもう一度試す)"
     fi
     sleep "$LAUNCH_INTERVAL"
 done < <(orca worktree ps --json 2>/dev/null | jq -r '
