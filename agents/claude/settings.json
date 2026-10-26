@@ -10,14 +10,10 @@
     "frontend-design@claude-plugins-official": false,
     "superpowers@claude-plugins-official": true,
     "chrome-devtools-mcp@claude-plugins-official": true,
-    "claude-code-setup@claude-plugins-official": false,
-    "laravel-boost@claude-plugins-official": false,
-    "context7@claude-plugins-official": true,
     "ponytail@ponytail": true,
-    "code-review@claude-plugins-official": false,
     "web-quality-skills@addy-web-quality-skills": false,
     "impeccable@claude-community": false,
-    "cloudflare@cloudflare": false
+    "claude-security@anthropic-plugin-directory": true
   },
 
   "effortLevel": "xhigh",
@@ -195,12 +191,6 @@
       "source": {
         "source": "github",
         "repo": "addyosmani/web-quality-skills"
-      }
-    },
-    "cloudflare": {
-      "source": {
-        "source": "github",
-        "repo": "cloudflare/skills"
       }
     }
   },
