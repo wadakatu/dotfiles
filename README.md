@@ -22,7 +22,8 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 | CLI パッケージ | nixpkgs `home.packages` |
 | GUI アプリ | nix-darwin `homebrew.casks` |
 | Dock / Finder / キーボード / スクリーンショット | nix-darwin `system.defaults` |
-| Claude Code / Codex の設定・スキル・コマンド | `agents/` に実体を置き手動コピー（Nix 管理外） |
+| Claude Code / Codex の設定 | `agents/` に実体を置き手動コピー（Nix 管理外） |
+| Claude Code / Codex のスキル | `agents/` に実体を置き、Home Manager がスキルごとに out-of-store symlink（`home/agent-skills.nix`） |
 | シークレット、アプリデータ、ブラウザデータ | Keychain / 1Password / バックアップ |
 
 ## 構成
@@ -32,16 +33,16 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 ├── flake.nix
 ├── flake.lock
 ├── agents/
+│   ├── skills/           # Claude Code と Codex の両方: commit pr next fix-ci sync-pr
+│   │                     # close-issue verify-no-regression defer-to-issue research memory-triage
 │   ├── claude/
 │   │   ├── settings.json # 権限・フック・ステータスライン
 │   │   ├── CLAUDE.md     # グローバル指示
 │   │   ├── statusline.py # 2行ステータスライン
-│   │   ├── commands/     # /commit /pr /review-pr-comments /next /fix-ci
-│   │   │                 # /sync-pr /verify-no-regression /close-issue
-│   │   ├── skills/       # defer-to-issue, research, memory-triage
+│   │   ├── skills/       # Claude Code だけ: review-pr-comments
 │   │   └── hooks/        # branch-guard.sh
 │   └── codex/
-│       └── skills/       # frontend-live-verify, review-pr-comments
+│       └── skills/       # Codex だけ: frontend-live-verify, review-pr-comments
 ├── home/
 │   ├── default.nix
 │   ├── git.nix
@@ -147,11 +148,13 @@ darwin-rebuild build --flake .#mymac
 新しいNixファイルはGitの追跡対象でないとflakeから見えない。追加後はビルド前に
 `git add <file>` する。
 
-## エージェントスキルとコマンド
+## エージェントの設定とスキル
 
-Claude Code と Codex の設定・自作スキル・コマンドは `agents/` に実体を置く。Nix 管理では
-なくリポジトリを正とし、home 側へ手動コピーして反映する（Claude に依頼してもよい）。
+Claude Code と Codex の設定・自作スキルは `agents/` に実体を置き、リポジトリを正とする。
 
+### 設定（手動コピー）
+
+設定は Nix 管理ではなく、home 側へ手動コピーして反映する（Claude に依頼してもよい）。
 Claude Code の設定を Nix の `home.file` でシンボリックリンクにしないのは、`~/.claude`
 配下が読み取り専用になると Claude Code 自身（`/config`、権限ダイアログの「常に許可」、
 プラグイン導入）が設定を書き換えられなくなるため。
@@ -161,25 +164,37 @@ Claude Code の設定を Nix の `home.file` でシンボリックリンクに�
 | `agents/claude/settings.json` | `~/.claude/settings.json`（`settings.private.json` と合成） |
 | `agents/claude/CLAUDE.md` | `~/.claude/CLAUDE.md` |
 | `agents/claude/statusline.py` | `~/.claude/statusline.py` |
-| `agents/claude/skills/` | `~/.claude/skills/` |
-| `agents/claude/commands/` | `~/.claude/commands/` |
 | `agents/claude/hooks/` | `~/.claude/hooks/` |
 | `agents/codex/AGENTS.md` | `~/.codex/AGENTS.md` |
-| `agents/codex/skills/` | `~/.codex/skills/` |
 
 ```bash
-mkdir -p ~/.claude/skills ~/.claude/commands ~/.claude/hooks ~/.codex/skills
+mkdir -p ~/.claude/hooks
 cp -f agents/claude/CLAUDE.md agents/claude/statusline.py ~/.claude/
 [ -f ~/.claude/settings.private.json ] || echo '{}' > ~/.claude/settings.private.json
 jq -s '.[0] * .[1]' agents/claude/settings.json ~/.claude/settings.private.json > ~/.claude/settings.json.new && mv ~/.claude/settings.json.new ~/.claude/settings.json
 chmod +x ~/.claude/statusline.py
-cp -R agents/claude/skills/* ~/.claude/skills/
-cp agents/claude/commands/*.md ~/.claude/commands/
 cp agents/claude/hooks/*.sh ~/.claude/hooks/
 chmod +x ~/.claude/hooks/*.sh
 cp -f agents/codex/AGENTS.md ~/.codex/
-cp -R agents/codex/skills/* ~/.codex/skills/
 ```
+
+### スキル（Home Manager の symlink）
+
+スキルは `home/agent-skills.nix` が、スキルごとに作業ツリーの実体へ out-of-store symlink を張る。
+実体を直接指すので読み取り専用にはならず、スキルを直すと rebuild なしで両方のエージェントに効く。
+スキルを足したり消したりしたときだけ `darwin-rebuild switch` する。
+
+| リポジトリ | 配置先 |
+|---|---|
+| `agents/skills/<name>/` | `~/.claude/skills/<name>` と `~/.agents/skills/<name>`（Claude Code と Codex の両方） |
+| `agents/claude/skills/<name>/` | `~/.claude/skills/<name>`（Claude Code だけ） |
+| `agents/codex/skills/<name>/` | `~/.agents/skills/<name>`（Codex だけ） |
+
+- Codex が読む個人用スキルの場所は `~/.agents/skills`（[Codex のスキル](https://learn.chatgpt.com/docs/build-skills.md)）。`~/.codex/skills` は使わない。
+- 同じ名前のスキルを Claude Code 用と Codex 用で分けたいときは、`agents/skills/` ではなく `agents/claude/skills/` と `agents/codex/skills/` に置く（例: review-pr-comments）。
+- `SKILL.md` の frontmatter には `name` と `description` を書く（Codex は両方が必須）。
+- `~/.claude/skills` と `~/.agents/skills` はディレクトリごとは管理しない。`~/.claude/skills/synced`（claude.ai から同期したスキル）や Orca が入れる `orca-cli` が同じ場所に置かれるため。
+- 初めて rebuild するとき、リンクを張る場所に実ディレクトリ（以前の手動コピー）が残っていると Home Manager が止まる。先に消しておく。
 
 `settings.json` にはステータスライン、権限ルール、フック登録がまとまっている。
 `branch-guard.sh`（保護ブランチ main / master / dev 上での `git commit` / `git push` と、
@@ -230,7 +245,7 @@ flake では相対パスを渡すと flake source の store コピーを指し�
 `ls -l ~/.config/herdr/config.toml` で symlink のままか確認する。
 
 エージェント状態検知のフック `agents/claude/hooks/herdr-agent-state.sh` は
-`herdr integration install claude` が生成するもので、こちらは他の Claude Code 設定と
+`herdr integration install claude` が生成するもので、こちらは他の Claude Code の設定と
 同じく手動コピー運用。
 
 ## worktree / コンテナの自動掃除
