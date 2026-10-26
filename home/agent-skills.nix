@@ -26,5 +26,11 @@ in
     linkSkills ".claude/skills" "skills" ../agents/skills
     // linkSkills ".agents/skills" "skills" ../agents/skills
     // linkSkills ".claude/skills" "claude/skills" ../agents/claude/skills
-    // linkSkills ".agents/skills" "codex/skills" ../agents/codex/skills;
+    // linkSkills ".agents/skills" "codex/skills" ../agents/codex/skills
+    # Claude Code のエージェント定義はディレクトリごと張る。ここには他のツールが自分のファイルを置かないので、
+    # 定義を足しても rebuild は要らない (/agents で作った定義もリポジトリ側に入る)。
+    // {
+      ".claude/agents".source =
+        config.lib.file.mkOutOfStoreSymlink "${dotfilesDir}/agents/claude/agents";
+    };
 }
