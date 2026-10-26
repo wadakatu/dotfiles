@@ -52,8 +52,9 @@ Codex の `~/.codex/AGENTS.md` も同じく **`~/www/personal/dotfiles/agents/co
 - issue のクローズ。解決を検証し、根拠コメントを付ける。
 - 実装の二択で、動かせば答えが出るもの。試すだけでなく公式ドキュメントやベストプラクティスも
   出典付きで調べ、その時点で使える最も賢いモデルで判断する。
-- PR が MERGED / CLOSED になった worktree の削除と docker の停止。未コミット変更なし・
-  PR に入っていないコミットなし・中のエージェントが作業中でない、をすべて満たすとき。
+- 終わった worktree の削除と docker の停止。PR が MERGED / CLOSED になったもの、または PR を出さない作業で
+  目的の issue がクローズ済みのもので、未コミット変更なし・PR にも本体にも入っていないコミットなし・
+  中のエージェントが作業中でない、をすべて満たすとき。
 
 **止まって聞く**
 
@@ -69,3 +70,8 @@ Codex の `~/.codex/AGENTS.md` も同じく **`~/www/personal/dotfiles/agents/co
 `orca worktree set --worktree current --workspace-status needs-decision --unread --comment "<何を判断してほしいか 1 行>" --json`
 でボードの Needs decision 列にカードを移す。判断をもらったら `--workspace-status in-progress --read` に戻す。
 （`needs-decision` は Needs decision 列の内部名。UI で列を作り直すと `status-<番号>` になるので、そのときは内部名を付け直す。）結果に `warnings` が出たら列が無いか内部名が変わっているので、未読マークと一言だけで知らせて報告する。
+
+Orca の worktree で作業するときは、何の作業か固まった時点で（遅くとも PR を出すときに）
+`orca worktree set --worktree current --display-name "<リポジトリ>: <何の作業か>" --json` でカードに名前を付ける。
+名前は 1 行に収まる日本語にし、ブランチ名や issue のタイトルをそのまま使わない。リポジトリは `api` `front` `auth` `infra` のように短く書く。
+作業の中身が変わったら付け直す。
