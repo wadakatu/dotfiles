@@ -11,6 +11,9 @@
 #   AskUserQuestion の答え待ち → 同じ質問を出し直させる
 #   作業の途中 → 状況を確かめて続けさせる
 #   手が空いていた → 会話を開くだけ (指示を送らないので、トークンを使わない)
+#
+# あわせて、Needs decision のカードで会話が開いていない (ターミナルが 1 つも無い) worktree は、
+# 最後の対話セッションを開き直し、判断待ちがまだ残っているかを確かめさせる (下の「Needs decision」の節)。
 # launchd からログイン時と 3 分ごとに実行される。定義は home/agent-resume.nix。
 #
 # 手で確認するとき:
@@ -28,6 +31,9 @@ if [ "${1:-}" = "launch" ]; then
         ;;
     work)
         exec claude -r "$sid" "Mac の再起動でセッションが途中で止まりました。git status と直前の会話から状況を確かめて、中断した作業を続けてください。もう終わっていたら、何もせずにそう伝えてください。"
+        ;;
+    recheck)
+        exec claude -r "$sid" "Orca のボードでこのカードは Needs decision にありますが、会話が開いていなかったので開き直しました。直前の会話と git・PR の状態から、ユーザーの判断待ちがまだ残っているかを確かめてください。残っているなら、同じ判断を AskUserQuestion でもう一度聞き、\`orca worktree set --worktree current --unread --json\` で未読にしてください（列は Needs decision のまま）。もう要らなくなっていたら、\`orca worktree set --worktree current --workspace-status <in-progress / in-review / completed のどれか> --comment \"<今の状態を 1 行>\" --json\` で列を直して止まってください。新しい作業は始めないでください。"
         ;;
     *)
         exec claude -r "$sid"
@@ -72,6 +78,8 @@ orca worktree ps --json >/dev/null 2>&1 || exit 0
 # "{ sec = 1792979048, usec = 168067 } Mon Oct 26 ..." の sec。session-marker.sh と同じ値にする。
 boot=$(sysctl -n kern.boottime | sed -E 's/^\{ sec = ([0-9]+),.*/\1/')
 mkdir -p "$STATE_DIR/sessions" "$STATE_DIR/resumed"
+# この回で再開した worktree。下の Needs decision の節で二重に開かないため。
+launched=""
 
 for f in "$STATE_DIR/sessions"/*; do
     [ -f "$f" ] || continue
@@ -91,6 +99,7 @@ for f in "$STATE_DIR/sessions"/*; do
     fi
 
     kind=$(classify "$transcript")
+    launched="$launched$wtid"$'\n'
     if [ "$DRY_RUN" = "1" ]; then
         log "DRY-RUN: resume $sid ($kind) → $cwd"
         continue
@@ -108,3 +117,51 @@ for f in "$STATE_DIR/sessions"/*; do
     fi
     sleep "$LAUNCH_INTERVAL"
 done
+
+# ---- Needs decision のカードで、会話が開いていないものを開き直す ----
+# 人の判断待ちのカードは、答えるための会話が開いていないと先へ進まない。ターミナルが 1 つも無い worktree は、
+# その worktree の最後の対話セッションを開き直し、判断待ちがまだ残っているかを確かめさせる。
+# 確かめさせる指示は会話全体を送り直す (セッションあたり数百円かかりうる) ので、同じ (worktree, セッション) には
+# 1 回だけ。開き直したタブを人が閉じたら、それ以上は開かない。対話セッションの無い worktree は記録だけして触らない。
+ORPHANS_FILE="$STATE_DIR/orphans.tsv"
+touch "$ORPHANS_FILE"
+while IFS=$'\t' read -r wtid wt; do
+    [ -n "$wtid" ] || continue
+    printf '%s' "$launched" | grep -qxF -- "$wtid" && continue
+
+    # 最新の対話セッション (claude -p の sdk-cli は除く)。
+    dir="$HOME/.claude/projects/$(printf '%s' "$wt" | sed 's/[^A-Za-z0-9]/-/g')"
+    sid=-
+    while IFS= read -r x; do
+        # 記録は行単位で読み、最初に entrypoint が出たところで止める (先頭の 1 行が長くても切らない)。
+        ep=$(jq -rn 'first(inputs | select(.entrypoint) | .entrypoint) // empty' "$x" 2>/dev/null || true)
+        if [ "$ep" = "cli" ]; then
+            sid=$(basename "$x" .jsonl)
+            break
+        fi
+    done < <(ls -t "$dir"/*.jsonl 2>/dev/null || true)
+
+    key="$wtid"$'\t'"$sid"
+    grep -qxF -- "$key" "$ORPHANS_FILE" && continue
+    if [ "$sid" = "-" ]; then
+        log "skip $wt: Needs decision だが対話セッションが無い"
+        [ "$DRY_RUN" = "1" ] || printf '%s\n' "$key" >>"$ORPHANS_FILE"
+        continue
+    fi
+    if [ "$DRY_RUN" = "1" ]; then
+        log "DRY-RUN: recheck $sid → $wt"
+        continue
+    fi
+    # 記録は開けたときだけ。失敗したものは次の回にもう一度試す。
+    if orca terminal create --worktree "id:$wtid" --title "再開" \
+        --command "bash '${BASH_SOURCE[0]}' launch '$sid' recheck '$wt'" --json >/dev/null; then
+        printf '%s\n' "$key" >>"$ORPHANS_FILE"
+        log "recheck $sid → $wt"
+    else
+        log "failed to reopen $sid → $wt (次の回にもう一度試す)"
+    fi
+    sleep "$LAUNCH_INTERVAL"
+done < <(orca worktree ps --json 2>/dev/null | jq -r '
+    (.result.worktrees // .result)[]?
+    | select((.isMainWorktree | not) and .workspaceStatus == "needs-decision" and (.liveTerminalCount // 0) == 0)
+    | [.worktreeId, .path] | @tsv')
