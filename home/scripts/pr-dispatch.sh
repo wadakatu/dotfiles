@@ -8,6 +8,7 @@
 #   CLEAN で auto-merge の無い PR (マージするかは人が決める) → Needs decision
 #   入力待ち (waiting) のエージェント → Needs decision
 #   文章で質問して止まったエージェント (Orca では done に見える) → 未読と「要確認」のコメントだけ付ける
+#   PR がマージ・クローズされた worktree → Done (worktree-gc が消すまでの置き場所)
 # launchd から数分ごとに実行される。定義は home/pr-dispatch.nix。
 #
 # 手で確認するとき:
@@ -42,6 +43,7 @@ vlog() { [ "$VERBOSE" = "1" ] && log "$@"; return 0; }
 flagged=0
 # board <path> <reason> <sig> <status|-> <comment>
 # (path, reason, sig) を初めて見たときだけボードに書く。status が - なら列は動かさず未読とコメントだけ付ける。
+# Done (completed) へ移すときは人の対応が要らないので、未読にしない。
 board() {
     local wt=$1 reason=$2 sig=$3 status=$4 comment=$5 key
     key="$wt"$'\t'"$reason"$'\t'"$sig"
@@ -51,7 +53,8 @@ board() {
         flagged=$((flagged + 1))
         return 0
     fi
-    local args=(--worktree "path:$wt" --unread --comment "$comment" --json)
+    local args=(--worktree "path:$wt" --comment "$comment" --json)
+    [ "$status" = "completed" ] || args+=(--unread)
     [ "$status" = "-" ] || args+=(--workspace-status "$status")
     if orca worktree set "${args[@]}" >/dev/null 2>&1; then
         printf '%s\n' "$key" >>"$BOARD_FILE"
@@ -198,6 +201,40 @@ while IFS=$'\t' read -r slug branch num url head mergeable ci threads merge_stat
     fi
 done <<<"$prs"
 
+# ---- PR がマージ・クローズされた worktree のカードを Done に移す ----
+# worktree を消すのは worktree-gc (1 日 2 回) なので、それまでの間 In progress や In review に残って紛らわしい。
+# GitHub Projects の既定の自動化 (マージされた PR を Done にする) と同じ形。
+# worktree-gc が消さないもの (エージェントが作業中・入力待ち) と、同じブランチで OPEN の PR があるものは動かさない。
+closed_since=$(date -v-14d +%Y-%m-%d)
+# shellcheck disable=SC2016  # $q は GraphQL の変数。シェルに展開させない
+closed_prs=$(gh api graphql -f q="is:pr is:closed author:$me closed:>=$closed_since $repos" -f query='
+query($q: String!) {
+  search(query: $q, type: ISSUE, first: 100) {
+    nodes { ... on PullRequest { number state headRefName repository { nameWithOwner } } }
+  }
+}' --jq '.data.search.nodes[] | [.repository.nameWithOwner, .headRefName, (.number | tostring), .state] | @tsv' 2>/dev/null) || {
+    log "WARN: GitHub からクローズ済みの PR を取れない。Done への移動は見送り"
+    closed_prs=""
+}
+moved_to_done=""
+while IFS=$'\t' read -r slug branch num state; do
+    [ -n "$slug" ] || continue
+    line=$(printf '%s' "$worktrees" | awk -F'\t' -v s="$slug" -v b="$branch" '$1 == s && $2 == b { print; exit }')
+    [ -n "$line" ] || continue
+    wt=$(printf '%s' "$line" | cut -f3)
+    [ "$(printf '%s' "$line" | cut -f4)" = "completed" ] && continue
+    if printf '%s' "$prs" | awk -F'\t' -v s="$slug" -v b="$branch" '$1 == s && $2 == b { found = 1 } END { exit !found }'; then
+        continue
+    fi
+    busy=$(jq -r --arg p "$wt" '[.result.worktrees[]? | select(.path == $p) | .agents[]?.state | select(. != "done")] | join(",")' <<<"$ps_json")
+    if [ -n "$busy" ]; then
+        vlog "keep  $slug#$num ($state だがエージェントが $busy)"
+        continue
+    fi
+    board "$wt" closed-pr "$state#$num" completed "$(printf '%s' "$state" | tr '[:upper:]' '[:lower:]') #${num}（worktree-gc の削除待ち）"
+    moved_to_done="$moved_to_done$wt"$'\n'
+done <<<"$closed_prs"
+
 # ---- エージェントの状態をボードに出す (PR の有無に関係なく、Orca の全 worktree が対象) ----
 # 最新のエージェント 1 体を見る。waiting は Orca が入力待ちと判定したもの。
 # done でも、最後の発言が質問なら人待ちなので、列は動かさず未読と「要確認」だけ付ける。
@@ -205,6 +242,9 @@ done <<<"$prs"
 while IFS=$'\t' read -r wt board state since last; do
     [ -n "$wt" ] || continue
     [ "$board" = "needs-decision" ] && continue
+    # Done のカードは worktree-gc の削除待ちなので、最後の発言が質問でも人には上げない。
+    [ "$board" = "completed" ] && continue
+    printf '%s' "$moved_to_done" | grep -qxF -- "$wt" && continue
     last=${last// ⏎ /$'\n'}
     first=$(printf '%s' "$last" | awk 'NF' | tail -n 1 | cut -c1-80)
     if [ "$state" = "waiting" ]; then
