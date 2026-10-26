@@ -54,9 +54,13 @@ Codex の `~/.codex/AGENTS.md` も同じく **`~/www/personal/dotfiles/agents/co
 
 - Fable: Agent ツールで `subagent_type: "Plan"`（読み取り専用）と `model: "fable"` を指定する。設計書は最後のメッセージで返させ、
   ファイルに保存する（scratchpad は再起動で消えるので、数日かかる作業はリポジトリに置く）。
-- Codex Astra: Bash を `run_in_background: true` にして `codex exec -C <worktree> -s read-only -o <out.md> - < <prompt.md>` を実行する。
-  stdin を閉じないと入力を待ち続ける。モデルは `~/.codex/config.toml` の既定（Astra）。
-  実装レビューは「まず `git diff <base>...HEAD` を読む」から始め、設計書の記述を鵜呑みにせず自分で確かめるよう書く。
+- Codex Astra: モデルは `~/.codex/config.toml` の既定（Astra）。どちらも Bash を `run_in_background: true` にして実行し、
+  stdin を閉じる（閉じないと入力を待ち続ける）。
+  - 設計レビュー: `codex exec -C <worktree> -s read-only -o <out.md> - < <prompt.md>`。設計書のパスを渡し、
+    記述を鵜呑みにせずコードで確かめるよう書く。
+  - 実装レビュー: Codex 組み込みのレビュー（Codex の `/review` と同じ）を使う。
+    `codex exec -C <worktree> -s read-only -o <out.md> review --base <base> < /dev/null`。
+    `--base` と観点の指定は同時に使えないので、観点は足さない。
 - ユーザーが途中を見たいと言ったら、`orca agent launch --agent claude --model claude-fable-5-1 --prompt "<依頼>" --json` で Orca のタブに出す。
 
 ## 委任の線引き
