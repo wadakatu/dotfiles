@@ -168,7 +168,7 @@ Claude Code の設定を Nix の `home.file` でシンボリックリンクに�
 | `agents/codex/AGENTS.md` | `~/.codex/AGENTS.md` |
 
 ```bash
-mkdir -p ~/.claude/hooks
+mkdir -p ~/.claude/hooks ~/.codex
 cp -f agents/claude/CLAUDE.md agents/claude/statusline.py ~/.claude/
 [ -f ~/.claude/settings.private.json ] || echo '{}' > ~/.claude/settings.private.json
 jq -s '.[0] * .[1]' agents/claude/settings.json ~/.claude/settings.private.json > ~/.claude/settings.json.new && mv ~/.claude/settings.json.new ~/.claude/settings.json
