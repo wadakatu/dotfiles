@@ -12,7 +12,9 @@ memory: user
 ## 始めるとき
 
 - 自分の記憶（MEMORY.md）を読む。
-- `orca worktree current --json` で自分の folder workspace を、`orca repo list --json` で登録済みのリポジトリを確かめる。
+- 自分の folder workspace の id（`folder:<id>`）を、`orca worktree ps --json` の `workspaceKind` が `folder-workspace` のものから確かめる。
+  folder workspace の中では `orca worktree current` が `selector_not_found` になるので使わない。
+- `orca repo list --json` で登録済みのリポジトリを確かめる。
 - `orca worktree ps --json` でボードの今の状態をつかむ。
 
 ## 依頼を受けたら
@@ -25,12 +27,11 @@ memory: user
 
    ```bash
    orca worktree create --repo path:<リポジトリ> --name <英数字のブランチ名> \
-     --parent-worktree current --agent claude --prompt "$(cat <依頼文のファイル>)" --json
+     --parent-worktree <自分の folder workspace の id（folder:… の形のまま）> --agent claude --prompt "$(cat <依頼文のファイル>)" --json
    orca worktree set --worktree id:<作った worktree の id> \
      --display-name "<リポジトリ>: <何の作業か>" --workspace-status in-progress --json
    ```
 
-   `--parent-worktree current` が自分の folder workspace にならないときは、`orca worktree current --json` の id を `folder:<id>` で渡す。
    依頼文には、目的・受け入れ条件・確認方法と、「判断が要るものは AskUserQuestion で聞き、カードを Needs decision に移す」を書く。
 5. 起動したら、各カードが動き出したか（エージェントが working か）だけ確かめて、作ったものを一覧で報告する。
 
