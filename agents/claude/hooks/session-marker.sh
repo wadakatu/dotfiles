@@ -17,8 +17,8 @@ sid=$(jq -r '.session_id // empty' <<<"$input")
 
 dir="$HOME/Library/Application Support/agent-resume/sessions"
 mkdir -p "$dir"
-# "{ sec = 1792979048, usec = 168067 } Mon Oct 26 ..." の sec。
-boot=$(sysctl -n kern.boottime | sed -E 's/^\{ sec = ([0-9]+),.*/\1/')
+# 起動ごとに変わる ID。kern.boottime の秒は時計の補正でずれる (agent-resume.sh を参照)。
+boot=$(sysctl -n kern.bootsessionuuid)
 # hook の親は claude のプロセス。
 pid=$PPID
 
@@ -26,7 +26,8 @@ pid=$PPID
 for f in "$dir"/*; do
     [ -f "$f" ] || continue
     IFS=$'\t' read -r b p _ <"$f" || continue
-    [ "$b" = "$boot" ] && [ "$p" = "$pid" ] && rm -f "$f"
+    # 以前の形式 (kern.boottime の秒、数字だけ) の印も、同じプロセスのものなら消す。
+    { [ "$b" = "$boot" ] || [[ "$b" =~ ^[0-9]+$ ]]; } && [ "$p" = "$pid" ] && rm -f "$f"
 done
 
 printf '%s\t%s\t%s\t%s\t%s\n' "$boot" "$pid" "$ORCA_WORKTREE_ID" \
