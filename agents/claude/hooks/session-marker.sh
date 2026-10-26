@@ -17,8 +17,8 @@ sid=$(jq -r '.session_id // empty' <<<"$input")
 
 dir="$HOME/Library/Application Support/agent-resume/sessions"
 mkdir -p "$dir"
-# "{ sec = 1792979048, usec = 168067 } Mon Oct 26 ..." の sec。
-boot=$(sysctl -n kern.boottime | sed -E 's/^\{ sec = ([0-9]+),.*/\1/')
+# 起動ごとに変わる ID。kern.boottime の秒は時計の補正でずれる (agent-resume.sh を参照)。
+boot=$(sysctl -n kern.bootsessionuuid)
 # hook の親は claude のプロセス。
 pid=$PPID
 
