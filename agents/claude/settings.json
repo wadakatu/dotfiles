@@ -16,6 +16,21 @@
     "claude-security@anthropic-plugin-directory": true
   },
 
+  "skillOverrides": {
+    "anthropic-skills:docs": "user-invocable-only",
+    "anthropic-skills:docx": "user-invocable-only",
+    "anthropic-skills:pptx": "user-invocable-only",
+    "anthropic-skills:xlsx": "user-invocable-only",
+    "anthropic-skills:pdf": "user-invocable-only",
+    "anthropic-skills:google-workspace": "user-invocable-only",
+    "anthropic-skills:skill-creator": "user-invocable-only",
+    "anthropic-skills:morning": "user-invocable-only",
+    "anthropic-skills:import-memory": "user-invocable-only",
+    "memory-triage": "user-invocable-only",
+    "stripe-upgrade": "name-only",
+    "create-aggregate": "name-only"
+  },
+
   "effortLevel": "xhigh",
   "modelSettings": {
     "claude-fable-5-1": {

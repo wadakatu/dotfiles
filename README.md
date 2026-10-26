@@ -195,6 +195,7 @@ cp -f agents/codex/AGENTS.md ~/.codex/
 - `SKILL.md` の frontmatter には `name` と `description` を書く（Codex は両方が必須）。
 - `~/.claude/skills` と `~/.agents/skills` はディレクトリごとは管理しない。`~/.claude/skills/synced`（claude.ai から同期したスキル）や Orca が入れる `orca-cli` が同じ場所に置かれるため。
 - 初めて rebuild するとき、リンクを張る場所に実ディレクトリ（以前の手動コピー）が残っていると Home Manager が止まる。先に消しておく。
+- 使わない skill も一覧に載るだけで毎ターン文脈を使う。`/skill-doctor` で一度も使っていないものを見つけ、`settings.json` の `skillOverrides` で外す。claude.ai から同期される skill（`anthropic-skills:*`）は手元で消しても再同期されるので、ここで `user-invocable-only`（Claude の一覧からは消え、`/名前` では使える）にする。プラグインの skill には効かない。
 
 `settings.json` にはステータスライン、権限ルール、フック登録がまとまっている。
 `branch-guard.sh`（保護ブランチ main / master / dev 上での `git commit` / `git push` と、
