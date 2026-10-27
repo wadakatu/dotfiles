@@ -139,8 +139,6 @@
       "Bash(jq *)",
       "Bash(yq *)",
       "Bash(glow *)",
-      "Bash(* --version)",
-      "Bash(* --help *)",
 
       "Bash(mise ls *)",
       "Bash(mise current *)",
