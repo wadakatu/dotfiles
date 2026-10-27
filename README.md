@@ -181,7 +181,7 @@ cp -f agents/claude/CLAUDE.md agents/claude/statusline.py ~/.claude/
 # Orca が ~/.claude/settings.json に直接書く hook (~/.orca/agent-hooks/ を呼ぶもの) は
 # リポジトリに無い。jq の * は配列を置き換えるので、今のファイルから拾ってイベントごとに足し戻す。
 jq -s '
-  (.[2].hooks // {} | map_values(map(select(any(.hooks[]?; .command | test("\\.orca/agent-hooks/"))))) | with_entries(select(.value != []))) as $orca
+  (.[2].hooks // {} | map_values(map(select(any(.hooks[]?; (.command // "") | test("\\.orca/agent-hooks/"))))) | with_entries(select(.value != []))) as $orca
   | (.[0] * .[1])
   | reduce ($orca | to_entries[]) as $e (.; .hooks[$e.key] += $e.value)
 ' agents/claude/settings.json ~/.claude/settings.private.json ~/.claude/settings.json > ~/.claude/settings.json.new && mv ~/.claude/settings.json.new ~/.claude/settings.json
