@@ -30,9 +30,11 @@
 
 `~/.claude/{settings.json,CLAUDE.md,statusline.py,hooks}` は
 **`~/www/personal/dotfiles/agents/claude/` が正**。`~/.claude` 側は手動コピーされた複製。
-Codex の `~/.codex/AGENTS.md` も同じく **`~/www/personal/dotfiles/agents/codex/AGENTS.md` が正**。
+Codex の `~/.codex/AGENTS.md` は `agents/codex/AGENTS.md` への symlink、手で書く Codex の設定は
+`agents/codex/config.toml`（`/etc/codex/config.toml` に配置される system 層）が正。
+Codex の設定を変えるときは `~/.codex/config.toml` ではなくこちらを直す（README「Codex の設定」）。
 
-`~/.claude` や `~/.codex/AGENTS.md` を直接編集したら、同じ内容を dotfiles 側にも反映してコミットすること
+`~/.claude` を直接編集したら、同じ内容を dotfiles 側にも反映してコミットすること
 （逆方向のコピーは `~/www/personal/dotfiles/README.md` の手順を参照）。
 
 自作の skill は dotfiles の `agents/skills/`（Claude と Codex の両方）、`agents/claude/skills/`、`agents/codex/skills/` が実体で、

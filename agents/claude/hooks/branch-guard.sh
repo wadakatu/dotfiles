@@ -1,14 +1,16 @@
 #!/bin/sh
-# branch-guard: PreToolUse(Bash) hook for Claude Code.
+# branch-guard: PreToolUse(Bash) hook for Claude Code and Codex.
 #
 # Blocks `git commit` / `git push` while HEAD is on a protected branch,
 # and pushes that explicitly target a protected branch from anywhere.
-# Guards only Claude-driven Bash commands; manual git in a terminal is
-# unaffected. Exit 2 = block (stderr goes back to Claude), exit 0 = allow.
+# Guards only agent-driven Bash commands; manual git in a terminal is
+# unaffected. Exit 2 = block (stderr goes back to the agent), exit 0 = allow.
+# Both agents send the same payload (tool_input.command, cwd).
 #
 # Register in ~/.claude/settings.json:
 #   "PreToolUse": [{ "matcher": "Bash", "hooks": [
 #     { "type": "command", "command": "/Users/wadakatu/.claude/hooks/branch-guard.sh" } ] }]
+# Codex gets it from /etc/codex/hooks.json, which modules/codex.nix generates.
 
 PROTECTED="main master dev"
 

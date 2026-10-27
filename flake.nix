@@ -94,6 +94,7 @@
           home-manager.darwinModules.home-manager
           configuration
           ./modules/homebrew.nix
+          ./modules/codex.nix
           ./system/defaults.nix
           {
             # useGlobalPkgs: home-manager に独自の nixpkgs を持たせず、

@@ -22,7 +22,8 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 | CLI パッケージ | nixpkgs `home.packages` |
 | GUI アプリ | nix-darwin `homebrew.casks` |
 | Dock / Finder / キーボード / スクリーンショット | nix-darwin `system.defaults` |
-| Claude Code / Codex の設定 | `agents/` に実体を置き手動コピー（Nix 管理外） |
+| Claude Code の設定 | `agents/claude/` に実体を置き手動コピー（Nix 管理外） |
+| Codex の設定 | 手で書いた設定と branch-guard は nix-darwin `environment.etc` で `/etc/codex/`（system 層、`modules/codex.nix`）。`AGENTS.md` は Home Manager の out-of-store symlink。Codex が自分で書く状態は `~/.codex/config.toml` に残す |
 | Claude Code / Codex のスキル | `agents/` に実体を置き、Home Manager がスキルごとに out-of-store symlink（`home/agent-skills.nix`） |
 | Claude Code のエージェント定義 | `agents/claude/agents/` を `~/.claude/agents` へ out-of-store symlink（`home/agent-skills.nix`）。複数リポジトリの入口になる `orchestrator` は Orca の folder workspace で `claude --agent orchestrator` |
 | シークレット、アプリデータ、ブラウザデータ | Keychain / 1Password / バックアップ |
@@ -45,6 +46,7 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 │   │   └── hooks/        # branch-guard.sh question-guard.sh session-marker.sh herdr-agent-state.sh
 │   └── codex/
 │       ├── AGENTS.md     # Codex のグローバル指示
+│       ├── config.toml   # Codex の system 層 (/etc/codex/config.toml)
 │       └── skills/       # Codex だけ: frontend-live-verify, review-pr-comments
 ├── home/
 │   ├── default.nix
@@ -69,6 +71,7 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 │       ├── nvim/
 │       └── starship.toml
 ├── modules/homebrew.nix
+├── modules/codex.nix     # /etc/codex/{config.toml,hooks.json}
 ├── system/defaults.nix
 └── docs/migration-audit.md
 ```
@@ -171,10 +174,11 @@ Claude Code の設定を Nix の `home.file` でシンボリックリンクに�
 | `agents/claude/CLAUDE.md` | `~/.claude/CLAUDE.md` |
 | `agents/claude/statusline.py` | `~/.claude/statusline.py` |
 | `agents/claude/hooks/` | `~/.claude/hooks/` |
-| `agents/codex/AGENTS.md` | `~/.codex/AGENTS.md` |
+
+Codex の設定は手動コピーしない（「Codex の設定」を参照）。
 
 ```bash
-mkdir -p ~/.claude/hooks ~/.codex
+mkdir -p ~/.claude/hooks
 cp -f agents/claude/CLAUDE.md agents/claude/statusline.py ~/.claude/
 [ -f ~/.claude/settings.private.json ] || echo '{}' > ~/.claude/settings.private.json
 [ -f ~/.claude/settings.json ] || echo '{}' > ~/.claude/settings.json
@@ -190,7 +194,6 @@ orca agent hooks status --json | jq '.result.statuses[] | select(.agent == "clau
 chmod +x ~/.claude/statusline.py
 cp agents/claude/hooks/*.sh ~/.claude/hooks/
 chmod +x ~/.claude/hooks/*.sh
-cp -f agents/codex/AGENTS.md ~/.codex/
 ```
 
 ### スキル（Home Manager の symlink）
@@ -205,6 +208,7 @@ cp -f agents/codex/AGENTS.md ~/.codex/
 | `agents/claude/skills/<name>/` | `~/.claude/skills/<name>`（Claude Code だけ） |
 | `agents/claude/agents/` | `~/.claude/agents`（ディレクトリごと。Claude Code のエージェント定義） |
 | `agents/codex/skills/<name>/` | `~/.agents/skills/<name>`（Codex だけ） |
+| `agents/codex/AGENTS.md` | `~/.codex/AGENTS.md`（Codex のグローバル指示） |
 
 - Codex が読む個人用スキルの場所は `~/.agents/skills`（[Codex のスキル](https://learn.chatgpt.com/docs/build-skills.md)）。`~/.codex/skills` は使わない。
 - 同じ名前のスキルを Claude Code 用と Codex 用で分けたいときは、`agents/skills/` ではなく `agents/claude/skills/` と `agents/codex/skills/` に置く（例: review-pr-comments）。
@@ -230,6 +234,74 @@ Claude Code が自分で書き足したキー（例: `skipWorkflowUsageWarning`�
 
 home 側で直接編集した場合は同じ対応でリポジトリへ取り込み直す。ここにないスキル
 （herdr、hatch-pet など外部配布物や実験中のもの）はローカル管理のままとする。
+
+## Codex の設定
+
+Codex は設定を層で重ねる。優先度の高い順に CLI 引数 > プロジェクトの `.codex/config.toml` >
+profile > user（`~/.codex/config.toml`）> system（`/etc/codex/config.toml`）
+（[Configuration precedence](https://learn.chatgpt.com/docs/config-file/config-basic)）。
+`~/.codex/config.toml` には手で書いた設定と、Codex・Desktop が自分で書く状態（projects の trust、
+hooks.state、plugins、tui、desktop、`notify` など）が混ざるので、手で書いた部分だけを system 層に置く。
+
+| リポジトリ | 配置先 | 方法 |
+|---|---|---|
+| `agents/codex/config.toml` | `/etc/codex/config.toml` | nix-darwin `environment.etc`（`modules/codex.nix`） |
+| `agents/claude/hooks/branch-guard.sh` | `/etc/codex/hooks.json` の PreToolUse | 同上。スクリプトは store に固定 |
+| `agents/codex/AGENTS.md` | `~/.codex/AGENTS.md` | Home Manager の out-of-store symlink |
+
+- **user 層が勝つ**。system 層に置いたキーが `~/.codex/config.toml` にも残っていると、user 側の値が黙って使われる。
+  `/model` や Desktop の設定画面は user 層に書き戻すので、ときどき下の重複チェックを回す。
+- テーブルはキー単位でマージされ、system 層のエントリ（例: `network.domains`）は user 層から消せない。外すときはリポジトリを直して rebuild する。
+- `/etc/codex/config.toml` は誰でも読め、このリポジトリも公開なので、トークンや社内の値は置かない（user 層に書く）。
+- system 層の hook は managed 扱いで、`/hooks` の trust が要らず、`/hooks` から無効化もできない
+  （[Hooks](https://learn.chatgpt.com/docs/hooks)）。branch-guard を直したら rebuild で反映する。
+- 確認: `codex --strict-config doctor --summary` の `config` が ✓（知らないキーがあると ⚠）、TUI の `/status` と `/hooks`。
+
+重複チェック（何も出なければよい）:
+
+```bash
+python3 -I -c '
+import tomllib
+def flat(d, p=""):
+    for k, v in d.items():
+        q = f"{p}.{k}" if p else k
+        yield from flat(v, q) if isinstance(v, dict) else [q]
+sys_ = set(flat(tomllib.load(open("/etc/codex/config.toml", "rb"))))
+usr = set(flat(tomllib.load(open("'"$HOME"'/.codex/config.toml", "rb"))))
+print("\n".join(sorted(sys_ & usr)))'
+```
+
+### 現 Mac での移行（1 回だけ）
+
+`switch` の直後は、手で書いた設定が user 層にも残っているので挙動は変わらない。branch-guard だけは
+system 層と `~/.codex/hooks.json` の両方から 2 回実行される（どちらも止めるだけなので害はない）。
+
+1. Codex の書き込み元を止める: Desktop と TUI を終了し、Orca / herdr の中の Codex セッションを閉じ、
+   `codex app-server daemon stop`。
+2. バックアップを取る（上書きしないよう日時付き）。今の世代番号も控える。
+   ```bash
+   b=~/.codex/backups/system-layer-$(date +%Y%m%d-%H%M%S) && mkdir -p "$b" && \
+     cp -p ~/.codex/config.toml ~/.codex/hooks.json ~/.codex/AGENTS.md ~/.codex/hooks/branch-guard.sh "$b"/ && echo "$b"
+   darwin-rebuild --list-generations | tail -1
+   ```
+3. `sudo darwin-rebuild switch --flake .#mymac`。`ls -l /etc/codex/ ~/.codex/AGENTS.md` でリンクを確認する
+   （`~/.codex/AGENTS.md.before-hm` は Home Manager が退避した旧ファイル）。
+4. `~/.codex/config.toml` から `agents/codex/config.toml` にあるキーを消す（トップレベルの 7 キーと、
+   `[features]`、`[permissions.local-dev]` 以下、`[mcp_servers.openaiDeveloperDocs]`）。重複チェックが空になればよい。
+5. `~/.codex/hooks.json` の PreToolUse から branch-guard のグループ（`~/.codex/hooks/branch-guard.sh` を呼ぶもの）を消す。
+   後ろの Orca の hook の位置がずれて trust が外れるので、次の手順で trust し直す。
+6. `codex` を起動し、`/hooks` で branch-guard が managed と表示されること、Orca の PreToolUse を trust し直すこと、
+   `/status` でモデルと承認がリポジトリの値になっていることを確かめる。
+7. 使い捨てのリポジトリで branch-guard が止めることを確かめる。CLI、Desktop、Orca の中の Codex のそれぞれで、
+   次のリポジトリで「`git commit --allow-empty -m test` を実行して」と頼み、`branch-guard:` で拒否されればよい。
+   Orca のカードに Codex の状態（作業中・完了）が出ることも見る。
+   ```bash
+   git init -b main /tmp/guard-test
+   ```
+8. 全部通ったら完了。バックアップは数日使って問題がなければ消す。
+
+どれかが通らなければ戻す: `sudo darwin-rebuild switch --rollback`（手順 2 で控えた世代に戻る）のあと、
+手順 2 のバックアップから 4 ファイルを元の場所へ書き戻す（`AGENTS.md` は rollback で symlink が消えたあとに戻す）。
 
 ## herdr の設定
 
