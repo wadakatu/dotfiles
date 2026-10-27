@@ -28,6 +28,9 @@ jobs:
       - uses: DeterminateSystems/determinate-nix-action@v3
       - name: nix flake check
         run: nix flake check --show-trace
+      # 無人のエージェントの commit / push を止める hook なので、すり抜けを CI で見張る。
+      - name: branch-guard hook
+        run: sh tests/branch-guard.sh
 
   # ── 現 Mac と同系統の macOS 26 / arm64 で実ビルド ─────────
   build-darwin:
