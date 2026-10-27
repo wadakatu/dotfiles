@@ -285,7 +285,7 @@ system 層と `~/.codex/hooks.json` の両方から 2 回実行される（ど�
    ```bash
    b=~/.codex/backups/system-layer-$(date +%Y%m%d-%H%M%S) && mkdir -p "$b" && \
      cp -p ~/.codex/config.toml ~/.codex/hooks.json ~/.codex/AGENTS.md ~/.codex/hooks/branch-guard.sh "$b"/ && echo "$b"
-   darwin-rebuild --list-generations | tail -1
+   readlink /nix/var/nix/profiles/system   # 今の世代 (system-<番号>-link)。--list-generations は root でないと lock で失敗する
    ```
 3. `sudo darwin-rebuild switch --flake .#mymac`。`ls -l /etc/codex/ ~/.codex/AGENTS.md` でリンクを確認する
    （`~/.codex/AGENTS.md.before-hm` は Home Manager が退避した旧ファイル）。
