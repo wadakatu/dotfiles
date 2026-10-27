@@ -33,6 +33,8 @@ extends = ":workspace"
 enabled = true
 allow_local_binding = true
 
+# 注意: features.network_proxy が無効 (今の既定) の間、この許可リストは適用されず、通信は無制限になる
+# (https://learn.chatgpt.com/docs/permissions "Network permissions")。
 [permissions.local-dev.network.domains]
 "developers.openai.com" = "allow"
 "chatgpt.com" = "allow"
