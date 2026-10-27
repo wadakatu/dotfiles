@@ -24,7 +24,7 @@ macOS 用 dotfiles を **nix-darwin + home-manager + Nix flakes** に段階的�
 - **「動くコードを丸投げ」ではなく「なぜそう書くか」を簡潔に説明する**。新しい概念（flake、module、overlay、derivation、`mkIf` など）が初登場するときは1–3行の補足を入れる
 - **大きな変更を一気に投入しない**。Phase 単位（後述）で区切り、各 Phase の終わりに `darwin-rebuild switch` が通ることを確認してから次へ進む
 - **既存ファイルをいきなり消さない**。`init.sh` / `symlink.sh` / `brew.sh` / `Brewfile` は Phase 5 で deprecate するまで残す
-- **コマンドを実行する前にユーザーに見せる**。`darwin-rebuild switch` のような副作用のあるコマンドは、ユーザーが自分で実行できるようプロンプトに `! <command>` 形式で提示する
+- **コマンドを実行する前にユーザーに見せる**。`darwin-rebuild switch` のような副作用のあるコマンドは、ユーザーが自分のターミナルで実行できるよう提示する（sudo が要るものは `! <command>` だとパスワードを読めず失敗する）
 - **ユーザーから質問されたら、答える前に該当する公式ドキュメント or ソースを最低1つ提示する**
 - **憶測で実装を進めない**。Nix の API、オプション名、モジュール構成、慣習などで少しでも不確かな点があれば、必ず以下のいずれかを参照してから手を動かす：
   - 公式マニュアル（[nix-darwin](https://nix-darwin.github.io/nix-darwin/manual/) / [home-manager](https://nix-community.github.io/home-manager/) / [Nixpkgs](https://nixos.org/manual/nixpkgs/stable/) / [Nix](https://nix.dev/manual/nix/)）
