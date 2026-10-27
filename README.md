@@ -253,6 +253,9 @@ hooks.state、plugins、tui、desktop、`notify` など）が混ざるので、�
   `/model` や Desktop の設定画面は user 層に書き戻すので、ときどき下の重複チェックを回す。
 - テーブルはキー単位でマージされ、system 層のエントリ（例: `network.domains`）は user 層から消せない。外すときはリポジトリを直して rebuild する。
 - `/etc/codex/config.toml` は誰でも読め、このリポジトリも公開なので、トークンや社内の値は置かない（user 層に書く）。
+- サンドボックス内の通信は `network.domains` のドメインだけ（`features.network_proxy`）。それ以外は `CONNECT tunnel failed, response 403` で止まるので、
+  必要なら domains に足す。proxy は HTTP(S) だけなので、SSH の git remote はサンドボックス内では使えない（今の remote はすべて HTTPS）。
+  確認: `codex sandbox -P local-dev -- curl -sS -o /dev/null -w '%{http_code}' https://example.com` が 403 で失敗すればよい。
 - system 層の hook は managed 扱いで、`/hooks` の trust が要らず、`/hooks` から無効化もできない
   （[Hooks](https://learn.chatgpt.com/docs/hooks)）。branch-guard を直したら rebuild で反映する。
 - 確認: `codex --strict-config doctor --summary` の `config` が ✓（知らないキーがあると ⚠）、TUI の `/status` と `/hooks`。
