@@ -2,7 +2,7 @@
 #
 # worktree と、それに紐づく docker compose プロジェクトを掃除する。
 # 対象は work-api ($REPO) の worktree と、Orca が管理する全リポの worktree ($ORCA_ROOT 配下)。
-# launchd から 1 日 2 回 (12:00 / 21:00) 実行される。定義は home/worktree-gc.nix。
+# launchd から毎時 0 分に実行される。定義は home/worktree-gc.nix。
 #
 # 手で確認するとき:
 #   DRY_RUN=1 ~/www/personal/dotfiles/home/scripts/worktree-gc.sh
