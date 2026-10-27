@@ -32,5 +32,9 @@ in
     // {
       ".claude/agents".source =
         config.lib.file.mkOutOfStoreSymlink "${dotfilesDir}/agents/claude/agents";
+      # Codex のグローバル指示。Codex が AGENTS.md を書くのは他エージェントからの取り込み
+      # (external-agent-migration の import_agents_md) だけで、空でないファイルには書かない。
+      ".codex/AGENTS.md".source =
+        config.lib.file.mkOutOfStoreSymlink "${dotfilesDir}/agents/codex/AGENTS.md";
     };
 }

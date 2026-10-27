@@ -1,0 +1,55 @@
+# Codex の system 層 (/etc/codex/config.toml)。modules/codex.nix が配置する。
+# 優先順位は system < user (~/.codex/config.toml) なので、ここにあるキーを ~/.codex/config.toml に
+# 残すと user 側が黙って勝つ。テーブルはキー単位でマージされ、system 側のエントリを user 側から消すことはできない。
+# /etc 経由で誰でも読め、リポジトリも公開なので、トークンや社内の値は置かない (それらは ~/.codex/config.toml へ)。
+# 手で書いた設定だけを置く。Codex / Desktop / Orca が書くもの (projects, hooks.state, plugins, notify など) は置かない。
+
+model = "gpt-6-astra"
+model_reasoning_effort = "high"
+service_tier = "default"
+approval_policy = "on-request"
+approvals_reviewer = "auto_review"
+default_permissions = "local-dev"
+personality = "pragmatic"
+
+[features]
+hooks = true
+js_repl = false
+
+# default_permissions と必ず一緒に動かす (片方だけだと参照切れ)。
+[permissions.local-dev]
+description = "Trusted local development with scoped network and Docker access."
+extends = ":workspace"
+
+[permissions.local-dev.workspace_roots]
+"/Users/wadakatu/www/dev" = true
+"/Users/wadakatu/www/oss/gesso" = true
+"/Users/wadakatu/.herdr/worktrees" = true
+
+[permissions.local-dev.filesystem]
+"/Applications/Ghostty.app/Contents/Resources/terminfo" = "read"
+
+[permissions.local-dev.network]
+enabled = true
+allow_local_binding = true
+
+[permissions.local-dev.network.domains]
+"developers.openai.com" = "allow"
+"chatgpt.com" = "allow"
+"*.chatgpt.com" = "allow"
+"github.com" = "allow"
+"*.github.com" = "allow"
+"**.githubusercontent.com" = "allow"
+"registry.npmjs.org" = "allow"
+"repo.packagist.org" = "allow"
+"packagist.org" = "allow"
+"**.pkg.dev" = "allow"
+"**.googleapis.com" = "allow"
+"localhost" = "allow"
+"127.0.0.1" = "allow"
+
+[permissions.local-dev.network.unix_sockets]
+"/Users/wadakatu/.docker/run/docker.sock" = "allow"
+
+[mcp_servers.openaiDeveloperDocs]
+url = "https://developers.openai.com/mcp"
