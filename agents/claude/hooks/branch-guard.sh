@@ -24,7 +24,15 @@ else
   payload_cwd=""
 fi
 
-case $cmd in
+# Match on the command with git's global options removed, so that
+# `git -C repo push`, `git -c k=v commit` and `git --no-pager push` are
+# checked like `git push` / `git commit`.
+# ponytail: values are split on whitespace, so a quoted value with spaces
+# (`git -c "k=a b" commit`) still slips through; parse argv if that shows up.
+norm=$(printf '%s' "$cmd" \
+  | sed -E 's/git([[:space:]]+(-[Cc][[:space:]]+[^[:space:]]+|--[a-z-]+(=[^[:space:]]+)?))+/git/g')
+
+case $norm in
   *"git commit"*|*"git push"*) ;;
   *) exit 0 ;;
 esac
@@ -59,11 +67,11 @@ for p in $PROTECTED; do
     echo "Create a feature branch first (e.g. git switch -c feature/<topic>) and retry." >&2
     exit 2
   fi
-  case $cmd in
+  case $norm in
   *"git push"*)
     # Catch pushes naming a protected ref: `git push origin main`,
     # `git push origin HEAD:dev`, `git push origin feature:main`.
-    if printf '%s' "$cmd" | grep -Eq "git push[^&|;]*([[:space:]]|:)${p}([[:space:]]|:|\$)"; then
+    if printf '%s' "$norm" | grep -Eq "git push[^&|;]*([[:space:]]|:)${p}([[:space:]]|:|\$)"; then
       echo "branch-guard: this push explicitly targets protected branch '$p'. Open a PR instead." >&2
       exit 2
     fi
