@@ -1,6 +1,6 @@
 { config, dotfilesDir, ... }: {
   # work-api と Orca 管理下の全リポの worktree、それに紐づく docker compose プロジェクトを
-  # 1 日 2 回掃除する LaunchAgent。放置すると worktree ごとに nginx/php-fpm/redis の
+  # 1 時間ごとに掃除する LaunchAgent。放置すると worktree ごとに nginx/php-fpm/redis の
   # 3 コンテナと bridge network が積み上がり、docker のサブネットプールが枯れて
   # `make up` が落ちる (実測: worktree 20 個でコンテナ 102 個・ネットワーク 26 個)。
   #
@@ -19,11 +19,12 @@
         "${dotfilesDir}/home/scripts/worktree-gc.sh"
       ];
 
-      # 12:00 と 21:00。スリープ中に跨いだ分は起床後にまとめて 1 回実行される
+      # 毎時 0 分 (Hour を省くとワイルドカード)。マージ済みの worktree が Done 列に
+      # 半日残らないようにする。削除条件は中身で決まるので、回数を増やしても消しすぎない。
+      # スリープ中に跨いだ分は起床後にまとめて 1 回実行される
       # (launchd の仕様。掃除用途なので取りこぼしても次の回で拾える)。
       StartCalendarInterval = [
-        { Hour = 12; Minute = 0; }
-        { Hour = 21; Minute = 0; }
+        { Minute = 0; }
       ];
 
       # 無人で消す以上、何を消したかが後から読めることが唯一の歯止めになる。

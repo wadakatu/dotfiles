@@ -17,7 +17,7 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 | Neovim と設定 | Home Manager + `home/config/nvim` |
 | Ghostty と設定 | Homebrew cask + Home Manager |
 | herdr の設定 | `home/config/herdr/config.toml` を Home Manager が out-of-store symlink（本体は Nix 管理外） |
-| work-api の worktree / コンテナ掃除 | Home Manager `launchd.agents`（1 日 2 回、`home/scripts/worktree-gc.sh`） |
+| work-api の worktree / コンテナ掃除 | Home Manager `launchd.agents`（1 時間ごと、`home/scripts/worktree-gc.sh`） |
 | 再起動で止まった Claude の再開、Needs decision で会話が開いていないカードの開き直し（同じセッションには 1 回だけ。人が閉じたタブは開き直さない） | Home Manager `launchd.agents`（ログイン時と 3 分ごと、`home/scripts/agent-resume.sh`）＋ SessionStart hook `agents/claude/hooks/session-marker.sh` |
 | CLI パッケージ | nixpkgs `home.packages` |
 | GUI アプリ | nix-darwin `homebrew.casks` |
@@ -255,8 +255,8 @@ flake では相対パスを渡すと flake source の store コピーを指し�
 
 work-api（`~/www/<work>`）の worktree は放置すると 1 つにつき nginx / php-fpm /
 redis の 3 コンテナと bridge network を持ち続け、docker のサブネットプールが枯れて
-`make up` が落ちる。`home/worktree-gc.nix` が定義する LaunchAgent が毎日 12:00 と
-21:00 に `home/scripts/worktree-gc.sh` を回してこれを掃除する。
+`make up` が落ちる。`home/worktree-gc.nix` が定義する LaunchAgent が毎時 0 分に
+`home/scripts/worktree-gc.sh` を回してこれを掃除する。
 
 削除は次を **全て** 満たす worktree だけ。1 つでも欠ければ残す。
 

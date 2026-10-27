@@ -202,7 +202,7 @@ while IFS=$'\t' read -r slug branch num url head mergeable ci threads merge_stat
 done <<<"$prs"
 
 # ---- PR がマージ・クローズされた worktree のカードを Done に移す ----
-# worktree を消すのは worktree-gc (1 日 2 回) なので、それまでの間 In progress や In review に残って紛らわしい。
+# worktree を消すのは worktree-gc (1 時間ごと) なので、それまでの間 In progress や In review に残って紛らわしい。
 # GitHub Projects の既定の自動化 (マージされた PR を Done にする) と同じ形。
 # worktree-gc が消さないもの (エージェントが作業中・入力待ち) と、同じブランチで OPEN の PR があるものは動かさない。
 closed_since=$(date -v-14d +%Y-%m-%d)
