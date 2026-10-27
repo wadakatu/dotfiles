@@ -1,4 +1,4 @@
-{ ... }: {
+{ dotfilesDir, ... }: {
   programs.zsh = {
     enable = true;
     enableCompletion = true;
@@ -10,6 +10,8 @@
     # 現行 ~/.zshrc のエイリアス。
     shellAliases = {
       sail = "./vendor/bin/sail";
+      # どのディレクトリからでも同じ flake を反映する。dotfilesDir は home/default.nix の _module.args。
+      rebuild = "sudo darwin-rebuild switch --flake ${dotfilesDir}#mymac";
     };
 
     # 旧 .zshrc の Herd 注入分。手動メンテナンス方針 (CLAUDE.md 参照)。

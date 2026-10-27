@@ -40,12 +40,15 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 │   │   ├── settings.json # 権限・フック・ステータスライン
 │   │   ├── CLAUDE.md     # グローバル指示
 │   │   ├── statusline.py # 2行ステータスライン
+│   │   ├── agents/       # エージェント定義: orchestrator
 │   │   ├── skills/       # Claude Code だけ: review-pr-comments
-│   │   └── hooks/        # branch-guard.sh
+│   │   └── hooks/        # branch-guard.sh question-guard.sh session-marker.sh herdr-agent-state.sh
 │   └── codex/
+│       ├── AGENTS.md     # Codex のグローバル指示
 │       └── skills/       # Codex だけ: frontend-live-verify, review-pr-comments
 ├── home/
 │   ├── default.nix
+│   ├── agent-skills.nix  # スキルとエージェント定義の symlink
 │   ├── git.nix
 │   ├── ghostty.nix
 │   ├── herdr.nix
@@ -53,10 +56,12 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 │   ├── neovim.nix
 │   ├── packages.nix
 │   ├── worktree-gc.nix
+│   ├── pr-dispatch.nix
 │   ├── agent-resume.nix
 │   ├── zsh.nix
 │   ├── scripts/
 │   │   ├── worktree-gc.sh
+│   │   ├── pr-dispatch.sh
 │   │   └── agent-resume.sh
 │   └── config/
 │       ├── ghostty/config
@@ -172,7 +177,16 @@ Claude Code の設定を Nix の `home.file` でシンボリックリンクに�
 mkdir -p ~/.claude/hooks ~/.codex
 cp -f agents/claude/CLAUDE.md agents/claude/statusline.py ~/.claude/
 [ -f ~/.claude/settings.private.json ] || echo '{}' > ~/.claude/settings.private.json
-jq -s '.[0] * .[1]' agents/claude/settings.json ~/.claude/settings.private.json > ~/.claude/settings.json.new && mv ~/.claude/settings.json.new ~/.claude/settings.json
+[ -f ~/.claude/settings.json ] || echo '{}' > ~/.claude/settings.json
+# Orca が ~/.claude/settings.json に直接書く hook (~/.orca/agent-hooks/ を呼ぶもの) は
+# リポジトリに無い。jq の * は配列を置き換えるので、今のファイルから拾ってイベントごとに足し戻す。
+jq -s '
+  (.[2].hooks // {} | map_values(map(select(any(.hooks[]?; .command | test("\\.orca/agent-hooks/"))))) | with_entries(select(.value != []))) as $orca
+  | (.[0] * .[1])
+  | reduce ($orca | to_entries[]) as $e (.; .hooks[$e.key] += $e.value)
+' agents/claude/settings.json ~/.claude/settings.private.json ~/.claude/settings.json > ~/.claude/settings.json.new && mv ~/.claude/settings.json.new ~/.claude/settings.json
+# true になること。false なら `orca agent hooks on` で入れ直す
+orca agent hooks status --json | jq '.result.statuses[] | select(.agent == "claude") | .managedHooksPresent'
 chmod +x ~/.claude/statusline.py
 cp agents/claude/hooks/*.sh ~/.claude/hooks/
 chmod +x ~/.claude/hooks/*.sh
@@ -208,6 +222,8 @@ cp -f agents/codex/AGENTS.md ~/.codex/
 ルールや `skipDangerousModePermissionPrompt` のようなマシン固有の安全設定はここに書き、
 上の `jq` がリポジトリ側の `settings.json` に重ねて `~/.claude/settings.json` を作る
 （同じキーは overlay が勝つ）。リポジトリの `settings.json` には入れない。
+Claude Code が自分で書き足したキー（例: `skipWorkflowUsageWarning`）はコピーで消えるので、
+残したいものは overlay に移しておく。
 
 `~/.claude/settings.local.json` は Claude Code が権限の「常に許可」を書き込む
 ローカル専用ファイル。リポジトリには取り込まない。
@@ -266,6 +282,19 @@ redis の 3 コンテナと bridge network を持ち続け、docker のサブネ
 | `git status --porcelain` が空 | 未コミットの作業を消さない |
 | ディレクトリの mtime が 24 時間より古い | 稼働中のエージェントが作った直後のものを除外 |
 | upstream が remote から消えている（= PR が merge / close 済み）<br>または detached かつ `origin/dev` から辿れる | 固有のコミットを持たないものだけ消す |
+
+Orca の worktree（`~/orca/workspaces/` 配下、全リポジトリ）は上の表とは別に判定し、
+`orca worktree rm` で消す。こちらも次を **全て** 満たすものだけ。
+
+| 条件 | 意図 |
+|---|---|
+| ブランチ上にいる（detached ではない）、かつデフォルトブランチではない | PR で判定できないものは残す |
+| `git status --porcelain` が空 | 未コミットの作業を消さない |
+| 中のエージェントが全員 `done`（`orca worktree ps`） | 作業中・入力待ちのものを消さない |
+| ブランチの PR があり、OPEN が 1 本も無い（MERGED / CLOSED） | PR が終わったものだけ消す |
+| PR に入っていないローカルコミットが無い（件名で照合） | squash merge 後でも固有のコミットを消さない |
+
+Orca のボードの Done 列（pr-dispatch がマージ済みのカードを移す）は判定に使わない。
 
 ただし `~/.herdr/worktrees/` 配下は条件を満たしても**自動削除しない**。herdr が自前で
 workspace 状態を持っており `git worktree remove` を直接叩くと食い違うため、候補として
