@@ -49,7 +49,7 @@ dir=${CLAUDE_PROJECT_DIR:-$PWD}
 [ -n "$payload_cwd" ] && [ -d "$payload_cwd" ] && dir=$payload_cwd
 
 target=$(printf '%s' "$cmd" \
-  | sed -n "s/.*git[[:space:]][[:space:]]*-C[[:space:]][[:space:]]*\([^[:space:]]*\).*/\1/p" \
+  | sed -nE 's/.*git([[:space:]]+(-c[[:space:]]+[^[:space:]]+|--[a-z-]+(=[^[:space:]]+)?))*[[:space:]]+-C[[:space:]]+([^[:space:]]+).*/\4/p' \
   | head -n1 \
   | sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/")
 if [ -n "$target" ]; then

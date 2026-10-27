@@ -31,6 +31,10 @@ check 2 "$feat" 'git -c push.default=current push origin HEAD:dev'
 check 2 "$feat" 'git --no-pager push origin feature:master'
 check 0 "$feat" 'git commit -m x'
 check 0 "$feat" "git -C $feat push origin feature"
+# -C の前に別のオプションがあっても、cwd ではなく -C の先で判定する
+check 0 "$main" "git -c user.name=x -C $feat commit -m x"
+check 0 "$main" "git --no-pager -C $feat commit -m x"
+check 2 "$feat" "git --no-pager -c user.name=x -C $main commit -m x"
 check 0 "$main" 'git log --oneline'
 check 0 "$main" "git -C $main status"
 
