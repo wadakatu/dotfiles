@@ -7,6 +7,8 @@ description: Verify frontend UI and UX changes in the project's real local appli
 
 Validate user-visible frontend changes in the real local application. Automated tests remain required where appropriate, but do not replace browser verification.
 
+If a more specific verification skill covers this repository or local environment, use it instead of this workflow. Its browser tooling, login handling, and PR section take precedence.
+
 ## Workflow
 
 1. Read the project documentation, scripts, configuration, and current runtime state to identify:
