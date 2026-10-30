@@ -19,11 +19,9 @@
   home.username = username;
   home.homeDirectory = homeDirectory;
 
-  # このリポジトリのクローン先。mkOutOfStoreSymlink や launchd が /nix/store を経由せず
-  # チェックアウトを直接指すため、場所を変えるときはここだけ直して darwin-rebuild する。
-  # specialArgs ではなく _module.args にするのは、nixpkgs マニュアルが imports で
-  # 使う値以外は _module.args を推奨しているため (上書きできる)。
-  _module.args.dotfilesDir = "${homeDirectory}/www/personal/dotfiles";
+  # このリポジトリのクローン先 dotfilesDir は、マシンごとに違うため flake.nix の
+  # mkDarwin が extraSpecialArgs で渡す。mkOutOfStoreSymlink や launchd が
+  # /nix/store を経由せずチェックアウトを直接指すのに使う。
 
   # home.stateVersion: home-manager のデフォルト値の互換ベースライン。
   # 一度決めたら基本的には上げない (確認: home-manager release notes)。

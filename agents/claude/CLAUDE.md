@@ -18,9 +18,9 @@
 
 - **nix-darwin + home-manager 管理**。`~/.zshrc` `~/.config/git/config`
   `~/.config/ghostty/config` などは `/nix/store` への読み取り専用シンボリックリンク。
-  **直接編集しない**。実体は `~/www/personal/dotfiles` にあり、そこを直してから反映する。
+  **直接編集しない**。実体は dotfiles リポジトリ（場所は `flake.nix` の `mkDarwin` を参照）にあり、そこを直してから反映する。
 - 反映コマンドは副作用が大きいので、自分で実行せず、ユーザー自身のターミナルで `rebuild`
-  （`sudo darwin-rebuild switch --flake ~/www/personal/dotfiles#mymac` の alias）を実行してもらう。
+  （`sudo darwin-rebuild switch --flake <dotfiles>#<設定名>` の alias）を実行してもらう。
   `!` で提示しない。端末が無く sudo がパスワードを読めずに失敗する。
   sudo の要らないコマンドは `!` で提示してよい。
 - ランタイムは **mise**（node / bun / pnpm / yarn / python）。PHP は **Herd**（8.2〜8.5）。
