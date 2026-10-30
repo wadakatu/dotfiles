@@ -80,7 +80,7 @@ auto memory は書き足される一方で、重複・陳腐化・置き場所�
 - `cursor/<p>` には、最後に AI に渡した入力の snapshot（S1）を置く。適用後の HEAD ではない。
 - 対象ファイル = `git log --format= --name-only --invert-grep --grep='^maintenance:' <cursor>..HEAD` に出る topic ファイル。加えて、同じ範囲の snapshot コミットで `MEMORY.md` に追加・変更された行が指す `](<file>)`。
 - 保守中に対話セッションが書いた内容は (6) の S2 snapshot に入る。S2 は cursor（= S1）より後の snapshot コミットなので、翌日の対象になる。
-- lint で対象に足すもの: 壊れた `[[name]]`、frontmatter の欠落（`name` / `description` / `metadata.type`。`yq --front-matter=extract` で構造として読む）、索引に無いファイル、無いファイルを指す索引行。索引が 180 行超または 22KB 超（共有は 40 行超）なら「件数を減らす / 説明を短くする」を指示する。
+- lint で対象に足すもの: frontmatter の欠落（`name` / `description` / `metadata.type`。`yq --front-matter=extract` で構造として読む）、索引に無いファイル、無いファイルを指す索引行。まだ無いメモリへの `[[name]]` は「後で書く印」として許されているので指摘しない。索引が 180 行超または 22KB 超（共有は 40 行超）なら「件数を減らす / 説明を短くする」を指示する。
 - `cursor/<p>` が無い dir はオンボード前で、snapshot だけ行う。最初の full が終わると cursor ができる。
 
 memory dir とリポの対応: Claude Code は memory dir の `<p>` を git リポのパスから作る（memory「Storage location」）。そこで、`orca repo list --json` の path と `~/www/personal/dotfiles` を `sed 's/[^A-Za-z0-9]/-/g'` で符号化して突合する。`~/.claude/settings.json` に `autoMemoryDirectory` があれば、この前提が崩れるので止まって通知する。対応の取れない dir は保守するが、リポを根拠にした陳腐化削除とリポ rules への昇格はしない。
@@ -200,13 +200,13 @@ PR はスクリプトが決まった手順で作る。エージェントには�
 
 ### 4.9 月次の全件見直し
 
-`full <p> [--seed <file>]`。日次と同じ経路で、入力が全件になる・バッチに分ける・予算が大きい、の 3 点が違う。`--seed` は手動の分類結果を「前回の分類。根拠を確かめて使う。再分類しない」として渡す。完了したら `full-done/<p>` に日付を書き、`cursor/<p>` を作る。
+`full <p> [--seed <file>]`。日次と同じ経路で、入力が全件になる・バッチに分ける・予算が大きい、の 3 点が違う。`--seed` は手動の分類結果を「前回の分類。根拠を確かめて使う。再分類しない」として渡す。日次のローテーションは `seed/<p>.md` があればそれを使い、その dir を先に選ぶ。完了したら `full-done/<p>` に日付を書き、`cursor/<p>` を作り、seed を `.used` に改名する。
 
 ## 5. ファイル配置と launchd
 
 新規
 - `home/memory-maintenance.nix` — LaunchAgent。`StartCalendarInterval = [{ Hour = 4; Minute = 30; }]`、ログは `~/Library/Logs/memory-maintenance.log`、PATH は兄弟と同じものに `~/.local/bin`（`claude`）を足す。
-- `home/scripts/memory-maintenance.sh` — 本体。サブコマンド `daily`（既定）/ `full <p> [--seed <file>]` / `lint`。`DRY_RUN=1`、`VERBOSE=1`。
+- `home/scripts/memory-maintenance.sh` — 本体。サブコマンド `daily`（既定）/ `full <p> [--seed <file>]`。`DRY_RUN=1` は何も書かず AI も起動せず、対象と lint だけを出す。`VERBOSE=1`。共有メモリの dir が無ければ作る。
 - `home/scripts/memory-maintenance-prompt.md`、`home/scripts/memory-maintenance-schema.json`。
 - `agents/claude/rules/.keep` — グローバル昇格の受け皿。`home/agent-skills.nix` で `~/.claude/rules` へ symlink する（user スコープの rules は毎セッション読まれる。memory ドキュメント）。
 - `tests/memory-maintenance.sh`。
@@ -297,16 +297,16 @@ claude -p "$(cat prompt)" \
 11. `DRY_RUN=1` では何も書かない。
 
 実機の確認（実装後、`darwin-rebuild` の前に手で行う）:
-- `DRY_RUN=1 memory-maintenance.sh lint`。
+- `DRY_RUN=1 memory-maintenance.sh`。
 - 7 節のフラグで `--output-format stream-json --verbose` を 1 回流し、`system/init` の tools に Bash も MCP も無いことを見る。
 - `additionalDirectories` を入れたあと、Orca の worktree の対話セッションが `~/.claude-shared-memory/x.md` を prompt なしで編集できることを見る。
 
 ## 11. 導入順
 
 0. 済: 手動の分類結果を `~/Library/Application Support/memory-maintenance/seed/-Users-wadakatu-www-dev-auth.md` に退避した。
-1. 実装する。`nix flake check` と `sh tests/memory-maintenance.sh` を通す。ユーザーが `rebuild` と `~/.claude` へのコピーを行い、`~/.claude-shared-memory/` を作る。
+1. 実装する。`nix flake check` と `bash tests/memory-maintenance.sh` を通す。ユーザーが `rebuild` と `~/.claude` へのコピーを行う（共有メモリの dir はスクリプトが作る）。
 2. 実機の確認（10 節）。
-3. `DRY_RUN=1 memory-maintenance.sh full -Users-wadakatu-www-dev-auth --seed <seed>` → 本実行（`KEEP_SESSIONS=1`）。`git log` と `runs/*.json` で精度と費用を見る。
+3. `DRY_RUN=1 memory-maintenance.sh` で対象を確かめ、`memory-maintenance.sh full -Users-wadakatu-www-dev-auth`（seed は自動で使う）を本実行する（`KEEP_SESSIONS=1`）。`git log` と `runs/*.json` で精度と費用を見る。
 4. もう 1 つの大きい dir の full。残りは日次のローテーションに任せる。
 5. 1 か月の `runs/*.json` を見て予算と effort を調整し、`--no-session-persistence` に切り替える。
 
@@ -315,7 +315,7 @@ claude -p "$(cat prompt)" \
 - `MEMORY.md` の frontmatter からの再生成 → 行単位の編集に変えた（見出しが frontmatter の `name` と別の自由文で、作り直すと失われる）。
 - PR 作成エージェント（Orca の `--agent` 起動）、`launched` 状態、起動の期限切れ → スクリプトが PR を作るので不要。
 - transcript の参照数の集計 → 削除。未参照が不要の根拠にならず、費用だけかかる。
-- seed の専用ライフサイクル → `--seed <file>` 引数だけにした。
+- seed の専用ライフサイクル → `--seed <file>` 引数と、`seed/<p>.md` があれば使って `.used` に改名する、だけにした。
 - TSV と JSON の二重の状態 → 提案ごとの JSON 1 つにした。
 - AI からの `git` / `gh` → export と `refs.json` の事前取得に置き換えた。`git tag --contains` のように事前取得に無い根拠が要るものは、消さずに残す（保守的に倒す）。
 

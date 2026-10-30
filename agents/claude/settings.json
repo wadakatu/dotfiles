@@ -64,6 +64,10 @@
   "permissions": {
     "defaultMode": "auto",
 
+    "additionalDirectories": [
+      "/Users/wadakatu/.claude-shared-memory"
+    ],
+
     "deny": [
       "Read(//**/.env)",
       "Read(//**/.env.local)",
