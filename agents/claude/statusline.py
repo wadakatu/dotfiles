@@ -17,7 +17,10 @@ stdin にセッション情報の JSON が渡され、stdout に出したもの�
 
 表示:
   ◆ Opus 5 high · ~/www/personal/dotfiles · main ↑2 +2 ~5 ?1
-  ███████░░░ 68% · $1.24 · 12m · +156/-23
+  ███████░░░ 68% 136k · 5h 12% 7d 61% →11/04 09:00 · $1.24 · 12m · +156/-23
+
+  バーは auto-compact の窓 (settings の autoCompactWindow) に対する使用率。
+  5h / 7d は plan の使用率で、→ は 7 日枠がリセットされる日時。
 """
 
 from __future__ import annotations
@@ -49,6 +52,7 @@ SEP = f"{GRAY} · {RESET}"
 BAR_WIDTH = 10
 GIT_CACHE_TTL = 5.0
 GIT_TIMEOUT = 2.0
+SETTINGS_PATH = os.path.expanduser("~/.claude/settings.json")
 
 _ANSI_RE = re.compile(r"\033\[[0-9;]*m|\033\][^\a]*\a")
 
@@ -186,11 +190,41 @@ def pct_color(pct: float, warn: float, danger: float) -> str:
     return GREEN
 
 
-def context_bar(pct: float) -> str:
+def context_bar(pct: float, label: str = "") -> str:
     filled = max(0, min(BAR_WIDTH, int(round(pct / (100 / BAR_WIDTH)))))
     bar = "█" * filled + "░" * (BAR_WIDTH - filled)
     color = pct_color(pct, 70, 90)
-    return f"{paint(bar, color)} {paint(f'{pct:.0f}%', color)}"
+    text = f"{pct:.0f}%" + (f" {label}" if label else "")
+    return f"{paint(bar, color)} {paint(text, color)}"
+
+
+def compact_window(ctx: dict) -> int | None:
+    """auto-compact が走る窓。used_percentage はモデルの窓 (1M) 基準なので compact の目安にならない。"""
+    # ponytail: settings.json の top-level autoCompactWindow だけを見る。
+    # /autocompact で modelSettings に保存した値・env・--autocompact は反映しない。
+    size = ctx.get("context_window_size")
+    try:
+        with open(SETTINGS_PATH) as f:
+            window = json.load(f).get("autoCompactWindow")
+    except (OSError, ValueError, AttributeError):
+        window = None
+    if isinstance(window, (int, float)) and window > 0:
+        return int(min(window, size)) if size else int(window)
+    return size
+
+
+def plan_usage(data: dict) -> str:
+    """Pro/Max の 5 時間枠と 7 日枠の使用率。最初の API 応答までは rate_limits が無い。"""
+    limits = data.get("rate_limits") or {}
+    parts = []
+    for key, label in (("five_hour", "5h"), ("seven_day", "7d")):
+        pct = (limits.get(key) or {}).get("used_percentage")
+        if pct is not None:
+            parts.append(paint(f"{label} {float(pct):.0f}%", pct_color(float(pct), 70, 90)))
+    resets_at = (limits.get("seven_day") or {}).get("resets_at")
+    if resets_at:
+        parts.append(paint(time.strftime("→%m/%d %H:%M", time.localtime(float(resets_at))), DIM))
+    return " ".join(parts)
 
 
 def fit(segments: list[tuple[str, bool]], width: int) -> str:
@@ -255,10 +289,18 @@ def build(data: dict, width: int) -> list[str]:
     line2: list[tuple[str, bool]] = []
 
     used = ctx.get("used_percentage")
-    if used is None:
+    tokens = ctx.get("total_input_tokens")
+    window = compact_window(ctx)
+    if tokens is not None and window:
+        line2.append((context_bar(float(tokens) / window * 100, f"{int(tokens) // 1000}k"), True))
+    elif used is None:
         line2.append((f"{paint('░' * BAR_WIDTH, GRAY)} {paint('--%', GRAY)}", True))
     else:
         line2.append((context_bar(float(used)), True))
+
+    usage = plan_usage(data)
+    if usage:
+        line2.append((usage, True))
 
     total_cost = cost.get("total_cost_usd")
     if total_cost:
