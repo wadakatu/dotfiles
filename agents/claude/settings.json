@@ -1,9 +1,9 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "model": "opus",
-  "advisorModel": "fable",
   "env": {
-    "CLAUDE_CODE_THRIFTY_SONIC": "false"
+    "CLAUDE_CODE_THRIFTY_SONIC": "false",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet"
   },
 
   "enabledPlugins": {
@@ -31,21 +31,14 @@
     "create-aggregate": "name-only"
   },
 
-  "effortLevel": "xhigh",
+  "effortLevel": "medium",
   "modelSettings": {
     "claude-fable-5-1": {
       "effortLevel": "high"
-    },
-    "claude-fable-5": {
-      "effortLevel": "xhigh"
-    },
-    "claude-opus-5": {
-      "effortLevel": "xhigh"
-    },
-    "claude-opus-5-5": {
-      "effortLevel": "xhigh"
     }
   },
+  "autoCompactWindow": 200000,
+  "promptSuggestionEnabled": false,
   "showThinkingSummaries": true,
   "switchModelsOnFlag": false,
 

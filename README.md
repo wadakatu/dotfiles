@@ -41,6 +41,7 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 │   │   ├── settings.json # 権限・フック・ステータスライン
 │   │   ├── CLAUDE.md     # グローバル指示
 │   │   ├── statusline.py # 2行ステータスライン
+│   │   ├── usage-report.py # 直近 N 日のトークン消費を API 定価換算で集計 (python3 で直接実行)
 │   │   ├── agents/       # エージェント定義: orchestrator
 │   │   ├── skills/       # Claude Code だけ: review-pr-comments
 │   │   └── hooks/        # branch-guard.sh question-guard.sh session-marker.sh herdr-agent-state.sh
