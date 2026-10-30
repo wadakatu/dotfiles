@@ -132,7 +132,7 @@ memory dir とリポの対応: Claude Code は memory dir の `<p>` を git リ�
 }
 ```
 
-`after_merge` は `{"delete":true}` か `{"content":"<マージ後に元に残す本文>"}`。PR の title / body / commit_message は昇格先リポの規約（`repos/<p>/` にある AGENTS.md・PR テンプレート。チームのリポは日本語）に従って AI が書く。
+`after_merge` は `{"delete":true}` か `{"content":"<マージ後に元に残す本文>"}`。どちらでもない提案は受け入れない（マージ後に元を空にしないため）。PR の title / body / commit_message は昇格先リポの規約（`repos/<p>/` にある AGENTS.md・PR テンプレート。チームのリポは日本語）に従って AI が書く。
 
 ### 4.6 検証と適用
 
@@ -151,7 +151,7 @@ memory dir とリポの対応: Claude Code は memory dir の `<p>` を git リ�
    - 満たさないものは消さずに残し（重複が残る側に倒す）、ログに書く。
 5. 索引は行単位で編集する。
    - 消したファイルを指す行（`](<file>)` を含む行）を除く。
-   - `index_line` があれば、該当する 1 行だけを置き換える。0 行なら追記し、2 行以上なら見送る。
+   - `index_line` があれば、該当する 1 行だけを置き換える。0 行なら追記し、2 行以上なら見送る。その行が S1 の索引から変わっていたら（保守の間に対話セッションが直した）見送る。
    - 新規ファイルは `index_line`（無ければ `- [<name>](<file>) — <description>`）を追記する。
    - 見出し・自由文・並び・他の行には触れない。読み込んでから書き戻すまでに `MEMORY.md` が変わっていたら読み直してやり直す（`mv` で置き換える）。
 6. 触ったパスだけを `git commit -- <paths>` でコミットする。処理中に対話セッションが書いた別ファイルは、次の snapshot に入る。
@@ -173,13 +173,13 @@ PR はスクリプトが決まった手順で作る。エージェントには�
 
 起票（1 日 5 件。`pr_created_at` が今日の提案を数える。確信度 高 → 中 → 低、dotfiles → チームのリポの順）:
 1. 状態を `creating` にして保存する。
-2. worktree を作る。Orca に登録済みのリポは `orca worktree create --repo path:<repo> --name "memory: <title>" --branch chore/memory-<slug> --no-parent --json`（エージェントは付けない）、それ以外は `git worktree add -b`。実際のパスとブランチ名を保存する。
-3. worktree の `target_path` の blob が `base_blob` と違えば `stale` にする。AI に再提案させる。
+2. worktree を作る。Orca に登録済みのリポは `orca worktree create --repo path:<repo> --name "memory: <title>" --branch chore/memory-<id の先頭 12 桁> --no-parent --json`（エージェントは付けない。ブランチ名は push で公開されるので、メモリの名前から作らない）、それ以外は `git worktree add -b`。実際のパスとブランチ名を保存する。
+3. worktree の `target_path` の blob が `base_blob` と違えば、提案を取り下げ（ファイルを消して同じキーを空ける）、worktree を消し、元のメモリを申し送り（`notes/<p>`）に載せて翌日の AI に出し直させる。
 4. `new_content` を書き、`git diff --name-only` が `target_path` だけであることを確かめる。
-5. 公開リポ向けは、実際の diff の追加行・title・body・commit_message に公開前検査をもう一度かける。
+5. 公開リポ向けは、実際の diff の追加行・`target_path`・ブランチ名・title・body・commit_message に公開前検査をもう一度かける（受け入れ時の検査にも `target_path` を含める）。
 6. commit → `git push -u origin <branch>` → `gh pr create --title --body-file --base <default>`。状態を `open` にし、`pr_url` と `pr_created_at` を保存する。
 
-`creating` のまま止まっていたら、次の実行で `gh pr list -R <slug> --head <branch> --state all` を見る。PR があれば `open`、worktree だけあれば手順 3 から再開、どちらも無ければ `pending` に戻す。Orca に届かないときは `pending` のまま持ち越す。
+`creating` のまま止まっていたら、次の実行で `gh pr list -R <slug> --head <branch> --state all` を見る。PR があれば `open`、どちらも無ければ `pending` に戻す。worktree だけあるものは、1 日の上限の枠の中で、新規の起票より先に手順 3 から再開する。Orca に届かないときは `pending` のまま持ち越す。
 
 公開前検査（`grep -E`。1 つでも当たれば push しない）:
 - 対応表にあるリポの remote から取った GitHub の org / owner 名（自分のアカウントを除く）と、非公開リポの名前（6 文字以上のもの）。実行時に作るので、公開リポのスクリプトに社名は書かない。
@@ -197,7 +197,7 @@ PR はスクリプトが決まった手順で作る。エージェントには�
   - dotfiles は手動コピーや作業ブランチのため反映が遅れることがある。14 日見えなければ通知する。
 - 見えたら、元ファイルの blob を `source_blob` と比べる。
   - 同じなら `after_merge` どおり削除または縮小し、同じ dir と共有の `[[<source_name>]]` を `<source_name>（昇格済み → <target_path>）` に置き換え、索引行を編集し、`maintenance: cleanup` でコミットする。feedback 型でもこの削除は行う（ユーザーの決定）。
-  - 違えば（提案後に追記された）`after_merge` は使わず、翌日の対象に「<target_path> に昇格済み。そこで扱われた部分だけ削る」として渡す。
+  - 違えば（提案後に追記された）`after_merge` は使わず、申し送り（`notes/<p>`）に「<target_path> に昇格済み。そこで扱われた部分だけ削る」と載せて翌日の AI に渡す。申し送りは、そのファイルの処置を実際に適用できた回にだけ片付ける（見送ったら翌日に残す）。
 
 ### 4.9 月次の全件見直し
 
@@ -223,7 +223,8 @@ PR はスクリプトが決まった手順で作る。エージェントには�
 |---|---|
 | `cursor/<p>` | 最後に AI に渡した snapshot（S1） |
 | `full-done/<p>` | 最後に全件見直しを終えた日 |
-| `proposals/<id>.json` | 提案 1 件。`id` はキーの sha1。状態は pending / held / creating / open / merged / done / rejected / stale。書き込みは tmp + `mv` |
+| `proposals/<id>.json` | 提案 1 件。`id` はキーの sha1。状態は pending / held / creating / open / merged / retrim / done / rejected。書き込みは tmp + `mv` |
+| `notes/<p>` | 翌日の AI への申し送り（`<file>\t<提案 id>\t<内容>`）。削り直しと、取り下げた提案の出し直し |
 | `runs/<run-id>.json` | `claude -p` の出力（`total_cost_usd`、`num_turns`、`permission_denials`、`session_id`） |
 | `needs-human.md` | AI が自動にできないと判断したもの（改名など）の追記ログ |
 | `lock/` | 多重起動の防止（`mkdir`。pid を書き、死んだ pid のロックは外す） |
@@ -292,7 +293,7 @@ claude -p "$(cat prompt)" \
 5. 並行書き込み → 偽 `claude` の実行中に live のファイルを書き換えると、そのファイルは見送られ翌日の対象に入る。実行中に live の `MEMORY.md` に足した行は残る。
 6. 共有への移動 → 共有側が失敗すると元は消えない。
 7. 検証失敗 → `is_error`、`structured_output` なし、申告外の diff、の各場合に何も適用されず、cursor が動かず、作業領域が残る。
-8. 昇格 → キーの重複防止、2 回の実行にまたがる 1 日 5 件の上限、許可リスト外の `target_path`、公開前検査の各パターン（org 名・`#123`・メール・URL）で `held`、`base_blob` の不一致で `stale`、`creating` からの復旧。
+8. 昇格 → キーの重複防止、2 回の実行にまたがる 1 日 5 件の上限、許可リスト外の `target_path`、公開前検査の各パターン（org 名・`#123`・メール・URL）で `held`、`base_blob` の不一致で取り下げて申し送り、`creating` からの復旧と、その再開も上限に従うこと。
 9. 後片付け → マージ済みで見えて元が同じなら削除とリンクの書き換え、元が変わっていれば再処理に回す、`CLOSED` で `rejected`、見えなければ待つ。
 10. ロック → 2 つ目の実行はすぐ終わる。
 11. `DRY_RUN=1` では何も書かない。
@@ -349,7 +350,7 @@ claude -p "$(cat prompt)" \
 
 実装者の判断（異論があれば変える）
 - 共有メモリのパスは `~/.claude-shared-memory/`。
-- 昇格 PR のブランチ名は `chore/memory-<slug>`。PR の文面は昇格先リポの規約に従う。
+- 昇格 PR のブランチ名は `chore/memory-<提案 id の先頭 12 桁>`。PR の文面は昇格先リポの規約に従う。
 - 月次 full はローテーション（1 日 1 dir、28 日間隔）。
 - 日次の effort は `medium`、full は `high`。
 

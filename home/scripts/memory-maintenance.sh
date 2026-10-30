@@ -215,7 +215,7 @@ dir_targets() { # dir_targets <p> <cursor>: cursor 以降の snapshot で変わ�
         else
             topic_files "$d"
         fi
-        if [ -f "$STATE_DIR/retrim/$p" ]; then cut -f1 "$STATE_DIR/retrim/$p"; fi
+        if [ -f "$STATE_DIR/notes/$p" ]; then cut -f1 "$STATE_DIR/notes/$p"; fi
     } | { grep -vx 'MEMORY.md' || true; } | { grep -v / || true; } | sort -u | while IFS= read -r f; do
         if [ -n "$f" ] && [ -f "$d/$f" ]; then printf '%s\n' "$f"; fi
     done
@@ -298,9 +298,9 @@ render_prompt() { # render_prompt <mode> <note>
         awk -F'\t' '{ printf "- mem/%s: %s %s\n", $1, ($2 == "-" ? "" : $2), $3 }' "$META/lint.tsv"
     fi
     for p in $(scope); do
-        if [ -f "$STATE_DIR/retrim/$p" ]; then
-            printf '\n### 昇格済みとして削り直すもの (mem/%s)\n\n' "$p"
-            awk -F'\t' '{ printf "- %s: %s に昇格済み (%s)。昇格先で扱われた部分だけ削る\n", $1, $2, $3 }' "$STATE_DIR/retrim/$p"
+        if [ -s "$STATE_DIR/notes/$p" ]; then
+            printf '\n### 前回からの申し送り (mem/%s)\n\n' "$p"
+            awk -F'\t' '{ printf "- %s: %s\n", $1, $3 }' "$STATE_DIR/notes/$p"
         fi
     done
     printf '\n### 既存の提案 (この組は提案しない)\n\n'
@@ -392,12 +392,18 @@ index_edit() { # index_edit <p> <deleted> <copied> <created>: 索引を行単位
     done
     [ -s "$raw" ] || return 1
     [ -f "$idx" ] || printf '# Memory Index\n\n' >"$idx"
+    # AI は S1 の索引を見て index_line を書いた。保守の間に対話セッションがその行を変えていたら、上書きせず見送る。
+    mg "$live" show "$(s1_of "$p"):MEMORY.md" >"$META/index-s1" 2>/dev/null || : >"$META/index-s1"
     # ロックが無いので、読んでから書き戻すまでに対話セッションが索引を変えたら読み直す。
     # ponytail: 比較から mv までの一瞬の競合は残る。続くなら flock 相当の協調が要る
     for i in 1 2 3; do
         before=$(git hash-object "$idx")
         : >"$edits"
         while IFS=$'\t' read -r op f line; do
+            if [ "$(grep -F -- "]($f)" "$idx" || true)" != "$(grep -F -- "]($f)" "$META/index-s1" || true)" ]; then
+                skip "$p/$f" "索引の行が保守の間に変わった (翌日に回す)"
+                continue
+            fi
             c=$(grep -cF -- "]($f)" "$idx" || true)
             case "$op" in
                 set | add)
@@ -513,7 +519,7 @@ apply_all() { # apply_all <mode> [full の dir]: 共有を先に適用・コミ�
         if [ "$mode" = daily ] || [ "$p" = "$full_p" ]; then
             mkdir -p "$STATE_DIR/cursor"
             s1_of "$p" >"$STATE_DIR/cursor/$p"
-            finish_retrim "$p"
+            finish_notes "$p"
         fi
     done
     if [ -n "$full_p" ]; then
@@ -616,6 +622,11 @@ intake_proposals() { # AI の提案を検証して proposals/<id>.json に置く
         if [ -z "$exp" ]; then log "提案を捨てる ($name): $repo は今回 export していない"; continue; fi
         if ! allowed_target "$repo" "$path"; then log "提案を捨てる ($name): $path は許可リストに無い"; continue; fi
         if [ "$(jq '.new_content | utf8bytelength' <<<"$prop")" -gt 40000 ]; then log "提案を捨てる ($name): new_content が大きすぎる"; continue; fi
+        # マージ後に元を空にしないよう、消すか、frontmatter から始まる残す内容のどちらかを必須にする
+        if ! jq -e '.after_merge.delete == true or ((.after_merge.content // "") | startswith("---"))' <<<"$prop" >/dev/null; then
+            log "提案を捨てる ($name): after_merge が delete: true でも残す内容でもない"
+            continue
+        fi
         id=$(printf '%s\t%s\t%s' "$name" "$repo" "$path" | git hash-object --stdin)
         f=$(prop_file "$id")
         if [ -e "$f" ]; then vlog "提案は既にある ($name → $path)"; continue; fi
@@ -634,7 +645,7 @@ intake_proposals() { # AI の提案を検証して proposals/<id>.json に置く
             { git -C "$repo" show "$commit:$path" 2>/dev/null || true; } >"$META/base-content"
             {
                 diff "$META/base-content" <(jq -j .new_content <<<"$prop") | sed -n 's/^> //p' || true
-                jq -r '.title, .body, .commit_message' <<<"$prop"
+                jq -r '.target_path, .title, .body, .commit_message' <<<"$prop"
             } >"$scan"
             if [ "$(jq -r .public_safe <<<"$prop")" != true ]; then
                 status=held
@@ -668,8 +679,13 @@ pr_from_worktree() { # pr_from_worktree <id>: worktree に内容を書き、検�
     base=$(prop_get "$id" .base_blob)
     if [ "$cur" != "$(expected_blob "$id")" ]; then
         if [ "$cur" != "$base" ]; then
-            prop_set "$id" '.status = "stale"'
-            log "提案 $id: $path が提案のあとに変わった (stale)。AI に出し直させる"
+            # 昇格先が提案のあとに変わった。提案を取り下げ、元のメモリを翌日の AI に渡して今の内容で出し直させる。
+            # worktree はまだ何も書いていないので消してよい
+            note "$(prop_get "$id" .source_dir)" "$(prop_get "$id" .source_file)" "" \
+                "$path への昇格の提案は、提案のあとに昇格先が変わったので取り下げた。必要なら今の内容で提案し直す"
+            orca worktree rm --worktree "path:$wt" --json >/dev/null 2>&1 || log "WARN: worktree を消せない $wt"
+            rm -f "$(prop_file "$id")"
+            log "提案 $id: $path が提案のあとに変わった。取り下げて出し直させる"
             return 1
         fi
         mkdir -p "$(dirname "$wt/$path")"
@@ -687,7 +703,7 @@ pr_from_worktree() { # pr_from_worktree <id>: worktree に内容を書き、検�
     if [ "$(prop_get "$id" .visibility)" != PRIVATE ] && [ "$(prop_get "$id" .visibility)" != INTERNAL ]; then
         def=$(default_ref "$repo")
         { git -C "$wt" diff "$def...HEAD" -- "$path" | { grep -E '^\+' || true; } | { grep -vE '^\+\+\+' || true; }
-          prop_get "$id" '.title, .body, .commit_message'; } >"$scan"
+          prop_get "$id" '.target_path, .branch, .title, .body, .commit_message'; } >"$scan"
         hits=$(leak_hits "$scan")
         if [ -n "$hits" ]; then
             prop_set "$id" '.status = "held" | .held_reason = $r' --arg r "push 前の公開前検査に当たった: $(printf '%s' "$hits" | tr '\n' ' ')"
@@ -704,13 +720,13 @@ pr_from_worktree() { # pr_from_worktree <id>: worktree に内容を書き、検�
     log "昇格 PR: $url"
 }
 
-create_pr() { # create_pr <id>: 副作用の前に状態を保存する (途中で止まっても recover_creating が拾う)
-    local id=$1 repo name out wt short branch
+create_pr() { # create_pr <id>: 副作用の前に状態を保存する (途中で止まっても dispatch が再開する)
+    local id=$1 repo name out wt branch
     repo=$(prop_get "$id" .target_repo)
     name=$(prop_get "$id" .source_name)
-    short=$(printf '%s' "$name" | tr -c 'A-Za-z0-9-' '-' | tr -s '-' | cut -c1-40 | sed 's/^-//; s/-$//')
     prop_set "$id" '.status = "creating"'
-    if ! out=$(orca worktree create --repo "path:$repo" --name "memory: $(prop_get "$id" .title)" --branch "chore/memory-${short:-$id}" --no-parent --json 2>/dev/null); then
+    # ブランチ名は push した時点で公開される。メモリの名前 (社内の語を含みうる) ではなく提案の ID から作る
+    if ! out=$(orca worktree create --repo "path:$repo" --name "memory: $(prop_get "$id" .title)" --branch "chore/memory-${id:0:12}" --no-parent --json 2>/dev/null); then
         prop_set "$id" '.status = "pending"'
         log "Orca で worktree を作れない ($name)。次回に回す"
         return 1
@@ -726,7 +742,7 @@ create_pr() { # create_pr <id>: 副作用の前に状態を保存する (途中�
     pr_from_worktree "$id"
 }
 
-recover_creating() {
+recover_creating() { # creating で止まった提案のうち、PR が既にあるものを open にする (新しい PR は作らない)
     local id slug branch url wt
     for id in $(proposals_all | jq -r 'select(.status == "creating") | .id'); do
         slug=$(prop_get "$id" .slug)
@@ -740,26 +756,27 @@ recover_creating() {
             continue
         fi
         wt=$(prop_get "$id" '.worktree // ""')
-        if [ -n "$wt" ] && [ -d "$wt" ]; then
-            try pr_from_worktree "$id"
-        else
-            prop_set "$id" '.status = "pending"'
-        fi
+        if [ -z "$wt" ] || [ ! -d "$wt" ]; then prop_set "$id" '.status = "pending"'; fi
     done
 }
 
-dispatch() { # 1 日 MAX_PR_PER_DAY 件まで PR にする。確信度 高 → 中 → 低、dotfiles → チームのリポの順
+dispatch() { # 1 日 MAX_PR_PER_DAY 件まで PR にする。途中で止まったものの再開が先、次に確信度 高 → 中 → 低、dotfiles → チームのリポの順
     local made slots id
     recover_creating
     made=$(proposals_all | jq -s --arg t "$TODAY" '[.[] | select((.pr_created_at // "") == $t)] | length')
     slots=$((MAX_PR_PER_DAY - made))
     for id in $(proposals_all | jq -rs --arg dot "$DOTFILES_DIR" '
-            map(select(.status == "pending"))
-            | sort_by(({"高": 0, "中": 1, "低": 2}[.confidence] // 3), (if .target_repo == $dot then 0 else 1 end), .created_at)
+            (map(select(.status == "creating")) | sort_by(.created_at)) +
+            (map(select(.status == "pending"))
+             | sort_by(({"高": 0, "中": 1, "低": 2}[.confidence] // 3), (if .target_repo == $dot then 0 else 1 end), .created_at))
             | .[].id'); do
         [ "$slots" -gt 0 ] || break
-        if [ "$ORCA_OK" != 1 ]; then log "Orca に届かない。昇格 PR は次回に回す"; break; fi
-        try create_pr "$id"
+        if [ "$(prop_get "$id" .status)" = creating ]; then
+            try pr_from_worktree "$id"
+        else
+            if [ "$ORCA_OK" != 1 ]; then log "Orca に届かない。昇格 PR は次回に回す"; break; fi
+            try create_pr "$id"
+        fi
         if [ "$TRY_RC" = 0 ]; then slots=$((slots - 1)); fi
     done
 }
@@ -804,8 +821,7 @@ apply_after_merge() { # 元のメモリを after_merge どおりに縮小・削�
     fi
     if [ "$now" != "$(prop_get "$id" .source_blob)" ]; then
         # 提案のあとに追記された。after_merge は使わず、翌日の AI に削り直させる
-        mkdir -p "$STATE_DIR/retrim"
-        printf '%s\t%s\t%s\n' "$src_file" "$target" "$url" >>"$STATE_DIR/retrim/$src_dir"
+        note "$src_dir" "$src_file" "$id" "$target に昇格済み ($url)。昇格先で扱われた部分だけ削る"
         prop_set "$id" '.status = "retrim"'
         return 0
     fi
@@ -815,8 +831,13 @@ apply_after_merge() { # 元のメモリを after_merge どおりに縮小・削�
         if [ -f "$live/MEMORY.md" ]; then
             index_apply "$live/MEMORY.md" "$PMETA/index-edits" >"$live/MEMORY.md.mm-tmp" && mv "$live/MEMORY.md.mm-tmp" "$live/MEMORY.md"
         fi
+    elif [ "$(prop_get "$id" '.after_merge.content // "" | startswith("---")')" = true ]; then
+        prop_get "$id" '.after_merge.content' >"$live/.mm-tmp" && mv "$live/.mm-tmp" "$live/$src_file"
     else
-        prop_get "$id" '.after_merge.content // ""' >"$live/.mm-tmp" && mv "$live/.mm-tmp" "$live/$src_file"
+        # 受け入れ時に弾いているので通常は来ない。元を空にしないよう、何もせずに AI へ回す
+        note "$src_dir" "$src_file" "$id" "$target に昇格済み ($url)。昇格先で扱われた部分だけ削る"
+        prop_set "$id" '.status = "retrim"'
+        return 0
     fi
     for d in "$live" "$SHARED_DIR"; do
         [ -d "$d" ] || continue
@@ -837,13 +858,24 @@ apply_after_merge() { # 元のメモリを after_merge どおりに縮小・削�
     log "後片付け: $src_dir/$src_file ($url)"
 }
 
-finish_retrim() { # 削り直しを AI に渡した dir の retrim を片付ける
-    local id
-    [ -f "$STATE_DIR/retrim/$1" ] || return 0
-    rm -f "$STATE_DIR/retrim/$1"
-    for id in $(proposals_all | jq -r --arg p "$1" 'select(.status == "retrim" and .source_dir == $p) | .id'); do
-        prop_set "$id" '.status = "done"'
-    done
+# 翌日の AI への申し送り。notes/<p> に "<file>\t<提案 id>\t<内容>" で残し、そのファイルを対象に入れる。
+note() { # note <p> <file> <提案 id> <内容>
+    mkdir -p "$STATE_DIR/notes"
+    printf '%s\t%s\t%s\n' "$2" "$3" "$4" >>"$STATE_DIR/notes/$1"
+}
+
+finish_notes() { # finish_notes <p>: 適用できたファイルの申し送りだけ片付ける (見送ったファイルの分は翌日に残す)
+    local p=$1 f id note_text
+    [ -f "$STATE_DIR/notes/$p" ] || return 0
+    : >"$META/notes-keep"
+    while IFS=$'\t' read -r f id note_text; do
+        if awk -F'\t' -v k="$p/$f" '$1 == k { x = 1 } END { exit !x }' "$META/skipped.tsv"; then
+            printf '%s\t%s\t%s\n' "$f" "$id" "$note_text" >>"$META/notes-keep"
+        elif [ -n "$id" ] && [ -f "$(prop_file "$id")" ] && [ "$(prop_get "$id" .status)" = retrim ]; then
+            prop_set "$id" '.status = "done"'
+        fi
+    done <"$STATE_DIR/notes/$p"
+    if [ -s "$META/notes-keep" ]; then mv "$META/notes-keep" "$STATE_DIR/notes/$p"; else rm -f "$STATE_DIR/notes/$p"; fi
 }
 
 cleanup() {

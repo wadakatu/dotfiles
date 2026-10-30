@@ -32,7 +32,9 @@ case "$1 $2" in
     "repo view") case "$3" in me/*) echo PUBLIC ;; *) echo PRIVATE ;; esac ;;
     "pr create") echo "https://github.com/fake/pull/$(grep -c '^pr create' "$FAKE/gh-calls")" ;;
     "pr view") cat "$FAKE/pr-view" ;;
-    "pr list") cat "$FAKE/pr-list" 2>/dev/null || true ;;
+    "pr list") # $FAKE/pr-list は "<ブランチ> <URL>" の行
+        head=""; while [ $# -gt 0 ]; do [ "$1" = --head ] && head=$2; shift; done
+        awk -v b="$head" '$1 == b { print $2 }' "$FAKE/pr-list" 2>/dev/null || true ;;
     api\ repos/*) echo '{"state": "closed", "title": "t", "closed_at": "2026-01-01T00:00:00Z"}' ;;
 esac
 EOF
@@ -46,6 +48,10 @@ case "$1 $2" in
         wt="$FAKE/wt/$(printf '%s' "$br" | tr / -)"
         git -C "$repo" worktree add -q -b "$br" "$wt" origin/main >/dev/null 2>&1 || exit 1
         jq -n --arg p "$wt" '{result: {worktree: {path: $p}}}' ;;
+    "worktree rm")
+        wt=${4#path:}
+        common=$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir) || exit 1
+        git --git-dir="$common" worktree remove --force "$wt" && echo '{"ok": true}' ;;
     *) exit 1 ;;
 esac
 EOF
@@ -104,7 +110,7 @@ run_mm() { # run_mm [VAR=値...] [-- 引数...]
 }
 result() { cat >"$FAKE/result.json"; }
 cursor_is() { [ "$(cat "$T/state/cursor/$P")" = "$1" ]; }
-prop_status() { jq -r --arg n "$1" 'select(.source_name == $n) | .status' "$T/state/proposals/"*.json; }
+prop_status() { cat "$T"/state/proposals/*.json 2>/dev/null | jq -r --arg n "$1" 'select(.source_name == $n) | .status'; }
 
 # 1. 対象なし → claude を呼ばない
 setup no-change
@@ -172,13 +178,18 @@ check "見送りを通知する" grep -q 見送った "$FAKE/notify"
 # 5. 並行書き込み: 保守の間に live が変わったファイルは上書きせず、翌日の対象に残す
 setup concurrent
 printf '追記\n' >>"$M/alpha.md"
+printf '追記\n' >>"$M/old.md"
 cat >"$FAKE/claude.sh" <<'EOF'
 printf 'AI の編集\n' >>"mem/$P/alpha.md"
+printf 'AI の編集\n' >>"mem/$P/old.md"
 printf '対話セッションの追記\n' >>"$M/alpha.md"
 printf -- '- [Late](late.md) — 保守中に足された行\n' >>"$M/MEMORY.md"
+sed -i.bak 's/^- \[Old\](old.md) — 古い$/- [Old](old.md) — 対話セッションが直した/' "$M/MEMORY.md" && rm "$M/MEMORY.md.bak"
 EOF
 result <<EOF
-{"changes": [{"dir": "$P", "file": "alpha.md", "action": "update", "index_line": "- [Alpha の見出し](alpha.md) — 変更", "evidence": "x"}],
+{"changes": [
+  {"dir": "$P", "file": "alpha.md", "action": "update", "index_line": "- [Alpha の見出し](alpha.md) — 変更", "evidence": "x"},
+  {"dir": "$P", "file": "old.md", "action": "update", "index_line": "- [Old](old.md) — AI の説明", "evidence": "x"}],
  "proposals": [], "needs_human": []}
 EOF
 run_mm
@@ -186,6 +197,7 @@ check "対話セッションの書き込みが残る" grep -q 対話セッショ
 check "AI の編集で上書きしない" bash -c "! grep -q 'AI の編集' '$M/alpha.md'"
 check "保守中に足された索引の行が残る" grep -qF '(late.md)' "$M/MEMORY.md"
 check "写さなかったファイルの索引は変えない" grep -qxF -- '- [Alpha の見出し](alpha.md) — 長い説明' "$M/MEMORY.md"
+check "保守中に直された索引の行を上書きしない" grep -qxF -- '- [Old](old.md) — 対話セッションが直した' "$M/MEMORY.md"
 rm "$FAKE/claude.sh"
 printf '{"changes": [], "proposals": [], "needs_human": []}\n' >"$FAKE/result.json"
 run_mm
@@ -236,26 +248,33 @@ check "is_error でも cursor を進めない" cursor_is "$before"
 # 8. 昇格の提案と PR
 setup promote
 printf '追記\n' >>"$M/alpha.md"
-prop() { # prop <name> <repo> <path> <content> [confidence]
-    jq -nc --arg p "$P" --arg n "$1" --arg r "$2" --arg t "$3" --arg c "$4" --arg conf "${5:-高}" \
+prop() { # prop <name> <repo> <path> <content> [confidence] [after_merge]
+    local am=${6:-}
+    [ -n "$am" ] || am='{"delete": true}'
+    jq -nc --arg p "$P" --arg n "$1" --arg r "$2" --arg t "$3" --arg c "$4" --arg conf "${5:-高}" --argjson am "$am" \
         '{source_dir: $p, source_file: "alpha.md", source_name: $n, kind: "global", target_repo: $r, target_path: $t,
           new_content: $c, title: "Add a rule", body: "出典: alpha", commit_message: "Add a rule",
-          after_merge: {delete: true}, confidence: $conf, public_safe: true}'
+          after_merge: $am, confidence: $conf, public_safe: true}'
 }
 {
     printf '{"changes": [], "needs_human": [], "proposals": ['
     prop alpha "$FAKE_DOT" agents/claude/rules/git.md $'# git\n\n- rebase の前に fetch する\n'; printf ','
     prop beta "$FAKE_DOT" agents/claude/rules/leak.md $'- 詳細は #1234 を見る\n'; printf ','
+    prop zeta "$FAKE_DOT" agents/claude/rules/team-notes.md $'- 規則\n'; printf ','
     prop delta "$FAKE_DOT" home/zsh.nix 'x'; printf ','
+    prop epsilon "$FAKE_DOT" agents/claude/rules/e.md $'- 規則\n' 高 '{}'; printf ','
     prop gamma "$FAKE_APP" .claude/rules/app.md $'- app の規則\n' 中
     printf ']}\n'
 } >"$FAKE/result.json"
 run_mm MAX_PR_PER_DAY=1
-check "許可リスト外の target_path は捨てる" test "$(ls "$T/state/proposals" | wc -l | tr -d ' ')" = 3
+check "許可リスト外の target_path と不正な after_merge は捨てる" test "$(ls "$T/state/proposals" | wc -l | tr -d ' ')" = 4
 check "公開前検査に当たれば保留" test "$(prop_status beta)" = held
+check "target_path に社内の語があれば保留" test "$(prop_status zeta)" = held
 check "1 日の上限まで PR にする (dotfiles から)" test "$(prop_status alpha)" = open
 check "上限を超えた分は残す" test "$(prop_status gamma)" = pending
-check "ブランチが push される" git -C "$T/github.com/me/dotfiles.git" rev-parse --verify chore/memory-alpha
+branch=$(jq -r 'select(.source_name == "alpha") | .branch' "$T/state/proposals/"*.json)
+check "ブランチ名にメモリの名前を使わない" bash -c "case '$branch' in chore/memory-alpha*) exit 1 ;; chore/memory-*) exit 0 ;; *) exit 1 ;; esac"
+check "ブランチが push される" git -C "$T/github.com/me/dotfiles.git" rev-parse --verify "$branch"
 run_mm MAX_PR_PER_DAY=1
 check "上限は同じ日の 2 回目の実行にも効く" test "$(prop_status gamma)" = pending
 run_mm MAX_PR_PER_DAY=5
@@ -269,17 +288,30 @@ run_mm MAX_PR_PER_DAY=0
 mkdir -p "$FAKE_DOT/agents/claude/rules"
 printf -- '- 別の変更\n' >"$FAKE_DOT/agents/claude/rules/git.md"
 git -C "$FAKE_DOT" add -A && git -C "$FAKE_DOT" commit -q -m other && git -C "$FAKE_DOT" push -q origin HEAD:main
+printf '{"changes": [], "proposals": [], "needs_human": []}\n' >"$FAKE/result.json"
 run_mm MAX_PR_PER_DAY=5
-check "提案のあとに昇格先が変わったら stale" test "$(prop_status alpha)" = stale
+check "昇格先が変わった提案は取り下げる" test -z "$(prop_status alpha)"
+check "取り下げた提案の元を翌日の AI に申し送る" grep -q '^alpha.md' "$T/state/notes/$P"
+check "取り下げた提案の worktree を消す" test -z "$(ls "$FAKE/wt" 2>/dev/null)"
+run_mm
+check "申し送りがプロンプトに入る" grep -q '昇格先が変わったので取り下げた' "$FAKE/claude-calls"
+check "適用できたら申し送りを片付ける" test ! -f "$T/state/notes/$P"
 
 setup recover
 printf '{"changes": [], "proposals": [], "needs_human": []}\n' >"$FAKE/result.json"
 mkdir -p "$T/state/proposals"
 jq -n --arg r "$FAKE_DOT" '{id: "r1", status: "creating", source_name: "x", target_repo: $r, target_path: "agents/claude/rules/x.md",
     slug: "me/dotfiles", branch: "chore/memory-x", confidence: "高", created_at: "2026-01-01"}' >"$T/state/proposals/r1.json"
-echo "https://github.com/fake/pull/99" >"$FAKE/pr-list"
-run_mm
-check "creating で止まった提案を PR から復旧する" test "$(jq -r .pr_url "$T/state/proposals/r1.json")" = "https://github.com/fake/pull/99"
+git -C "$FAKE_DOT" worktree add -q -b chore/memory-y "$FAKE/wt/y" origin/main
+jq -n --arg r "$FAKE_DOT" --arg w "$FAKE/wt/y" '{id: "r2", status: "creating", source_name: "y", target_repo: $r, target_path: "agents/claude/rules/y.md",
+    slug: "me/dotfiles", branch: "chore/memory-y", worktree: $w, base_blob: "new", new_content: "- y の規則\n", title: "Add y",
+    body: "出典: y", commit_message: "Add y", visibility: "PUBLIC", confidence: "高", created_at: "2026-01-01"}' >"$T/state/proposals/r2.json"
+echo "chore/memory-x https://github.com/fake/pull/99" >"$FAKE/pr-list"
+run_mm MAX_PR_PER_DAY=0
+check "creating で止まった提案を既存の PR から復旧する" test "$(jq -r .pr_url "$T/state/proposals/r1.json")" = "https://github.com/fake/pull/99"
+check "新しい PR を作る再開は 1 日の上限に従う" test "$(jq -r .status "$T/state/proposals/r2.json")" = creating
+run_mm MAX_PR_PER_DAY=5
+check "上限が空けば worktree から再開する" test "$(jq -r .status "$T/state/proposals/r2.json")" = open
 
 # 9. マージ後の後片付け
 cleanup_case() { # cleanup_case <名前> <PR の状態>
@@ -312,7 +344,15 @@ cleanup_case cleanup-changed MERGED
 printf '提案のあとの追記\n' >>"$M/prom.md"
 run_mm
 check "元が変わっていたら消さない" test -f "$M/prom.md"
-check "削り直しに回す" test -f "$T/state/retrim/$P"
+check "削り直しを申し送る" grep -q "^prom.md"$'\t'"c1"$'\t' "$T/state/notes/$P"
+# 翌日: AI が削り直しを適用したら申し送りを片付け、提案を done にする
+printf 'sed -i.bak "s/提案のあとの追記//" "mem/$P/prom.md" && rm "mem/$P/prom.md.bak"\n' >"$FAKE/claude.sh"
+result <<EOF
+{"changes": [{"dir": "$P", "file": "prom.md", "action": "update", "evidence": "昇格先で扱われた部分を削った"}], "proposals": [], "needs_human": []}
+EOF
+run_mm
+check "削り直しを適用したら申し送りを片付ける" test ! -f "$T/state/notes/$P"
+check "削り直しが済んだ提案は done" test "$(prop_status prom)" = "done"
 
 cleanup_case cleanup-invisible MERGED
 rm "$T/claude-home/rules/x.md"
