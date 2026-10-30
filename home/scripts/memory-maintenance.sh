@@ -53,6 +53,7 @@ INDEX_LINT_BYTES="${INDEX_LINT_BYTES:-22000}"
 # 共有の索引は @import で毎セッション全文が載る (200 行 / 25KB の切り捨ての対象外)。
 SHARED_INDEX_MAX_LINES="${SHARED_INDEX_MAX_LINES:-40}"
 MAX_REFS="${MAX_REFS:-60}"
+EXCLUDE_DIRS_RE="${EXCLUDE_DIRS_RE:-^-(private-)?(tmp|var-folders)-}"
 # 最初の数回は保守のセッションを残し、transcript で何をしたか追えるようにする。定常運用では 0 にする。
 KEEP_SESSIONS="${KEEP_SESSIONS:-1}"
 DRY_RUN="${DRY_RUN:-0}"
@@ -101,6 +102,8 @@ discover_dirs() {
     for d in "$PROJECTS_DIR"/*/memory; do
         [ -d "$d" ] || continue
         p=$(basename "$(dirname "$d")")
+        # 一時ディレクトリ (サブエージェントの scratchpad など) で起動したセッションの memory は使い捨てなので扱わない
+        if printf '%s' "$p" | grep -qE -e "$EXCLUDE_DIRS_RE"; then continue; fi
         if [ -n "$(topic_files "$d")" ]; then printf '%s\n' "$p"; fi
     done
     # 共有はまだ topic ファイルが無くても scope に入れる (他の dir から移す先になる)
@@ -128,7 +131,7 @@ repo_for() { awk -F'\t' -v p="$1" '$1 == p { print $2; exit }' "$PMETA/repos.tsv
 ORCA_OK=0
 build_repo_map() {
     local paths r
-    if paths=$(orca repo list --json 2>/dev/null | jq -er '.result.repos[].path'); then
+    if paths=$(orca repo list --json 2>/dev/null | jq -er '.result.repos[].path' 2>/dev/null); then
         ORCA_OK=1
         { printf '%s\n' "$paths"; printf '%s\n' "$DOTFILES_DIR"; } | sort -u | while IFS= read -r r; do
             if [ -e "$r/.git" ]; then printf '%s\t%s\n' "$(encode "$r")" "$r"; fi

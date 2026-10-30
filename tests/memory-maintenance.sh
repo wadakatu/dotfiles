@@ -99,7 +99,7 @@ run_mm() { # run_mm [VAR=値...] [-- 引数...]
     [ $# -gt 0 ] && shift
     args=("$@")
     env PATH="$base/bin:$PATH" PROJECTS_DIR="$T/projects" SHARED_DIR="$T/shared" CLAUDE_HOME="$T/claude-home" \
-        DOTFILES_DIR="$FAKE_DOT" STATE_DIR="$T/state" CACHE_DIR="$T/cache" ${envs[@]+"${envs[@]}"} \
+        DOTFILES_DIR="$FAKE_DOT" STATE_DIR="$T/state" CACHE_DIR="$T/cache" EXCLUDE_DIRS_RE="-scratch$" ${envs[@]+"${envs[@]}"} \
         "${MM_BASH:-bash}" "$script" ${args[@]+"${args[@]}"} >>"$T/log" 2>&1
 }
 result() { cat >"$FAKE/result.json"; }
@@ -108,8 +108,11 @@ prop_status() { jq -r --arg n "$1" 'select(.source_name == $n) | .status' "$T/st
 
 # 1. 対象なし → claude を呼ばない
 setup no-change
+mkdir -p "$T/projects/-private-tmp-scratch/memory"
+printf -- '---\nname: a\ndescription: a\nmetadata:\n  type: project\n---\n' >"$T/projects/-private-tmp-scratch/memory/a.md"
 run_mm
 check "対象が無ければ claude を呼ばない" test ! -f "$FAKE/claude-calls"
+check "一時ディレクトリの memory は扱わない" test ! -e "$T/projects/-private-tmp-scratch/memory/.git"
 check "共有メモリが作られる" test -f "$T/shared/MEMORY.md"
 
 # 2, 3. 変更を写す・索引は行単位・cursor = S1
