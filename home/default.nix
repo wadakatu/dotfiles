@@ -12,6 +12,7 @@
     ./worktree-gc.nix
     ./pr-dispatch.nix
     ./agent-resume.nix
+    ./memory-maintenance.nix
     ./agent-skills.nix
   ];
 

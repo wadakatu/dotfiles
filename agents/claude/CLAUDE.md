@@ -43,6 +43,16 @@ Codex の設定を変えるときは `~/.codex/config.toml` ではなくこち�
 `~/.claude/skills/<name>` と `~/.agents/skills/<name>` はそこへの symlink（Home Manager が張る）。直すときは dotfiles 側を編集する。
 skill を足したり消したりしたら、`darwin-rebuild switch` でリンクを張り直す。
 
+## メモリ
+
+- 特定のリポに依存しない学び（ツールの使い方、Orca / worktree / Codex / zsh / gh の挙動、ユーザーの好み）は、
+  プロジェクトの auto memory ではなく共有メモリ `~/.claude-shared-memory/` に書き、その `MEMORY.md` に 1 行足す。
+  リポ固有のことは従来どおり auto memory に書く。
+- 索引の 1 行は 120 バイト以内にし、詳細は本文に書く。メモリのファイル名は変えない（`[[name]]` のリンクが切れる）。
+- 毎日 04:30 に `home/scripts/memory-maintenance.sh` が重複・陳腐化・置き場所を整理し、昇格は 1 件ずつ PR にする。
+
+@~/.claude-shared-memory/MEMORY.md
+
 ## 作業のしかた
 
 - テストが落ちたら落ちたと報告する。通っていない状態を「完了」と言わない。

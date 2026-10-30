@@ -31,6 +31,9 @@ jobs:
       # 無人のエージェントの commit / push を止める hook なので、すり抜けを CI で見張る。
       - name: branch-guard hook
         run: sh tests/branch-guard.sh
+      # 無人でメモリを消す・PR を出すスクリプトなので、ガードと公開前検査を CI で見張る。
+      - name: memory-maintenance script
+        run: bash tests/memory-maintenance.sh
 
   # ── 現 Mac と同系統の macOS 26 / arm64 で実ビルド ─────────
   build-darwin:
