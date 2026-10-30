@@ -65,7 +65,7 @@
     "defaultMode": "auto",
 
     "additionalDirectories": [
-      "/Users/wadakatu/.claude-shared-memory"
+      "~/.claude-shared-memory"
     ],
 
     "deny": [

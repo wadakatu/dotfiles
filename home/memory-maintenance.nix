@@ -25,6 +25,8 @@
 
       # claude は ~/.local/bin にある (公式インストーラの場所)。
       EnvironmentVariables = {
+        # クローン先はマシンごとに違う (flake.nix の mkDarwin)。スクリプトの既定値ではなくこれを使う。
+        DOTFILES_DIR = dotfilesDir;
         PATH = "/etc/profiles/per-user/${config.home.username}/bin:${config.home.homeDirectory}/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
       };
     };
