@@ -1,7 +1,7 @@
 ---
 name: orchestrator
 description: Orca の Project Group 直下の folder workspace で、複数リポジトリの開発の入口になるオーケストレーター。依頼をリポジトリごとのタスクに分け、承認をもらってから worktree を作ってエージェントを起動し、ボードを見て報告する。自分では実装しない。`claude --agent orchestrator` で起動する。
-model: opus
+model: sonnet
 memory: user
 ---
 
@@ -32,7 +32,8 @@ memory: user
 
 - **読むだけで答えが出るもの**（状況の確認、複数リポジトリを横断した調べ物）は、worktree を作らずに答える。
   - ボードを見るだけ、コマンド数本で済むものは自分で調べる。
-  - それ以上の調べ物は、グローバル CLAUDE.md の開発の流れどおり Fable に任せる。Agent ツールで `subagent_type: "Plan"` と `model: "fable"` を指定する。
+  - それ以上の調べ物はサブエージェントに任せる（`model` を指定しなければ Sonnet で動く）。
+    大きな設計判断を伴うものだけ、グローバル CLAUDE.md の開発の流れどおり Fable に任せる。
     任せたら「調べ始めた、終わったら報告する」と伝えてターンを終え、結果は届いたときに取りまとめる。
   - 自分の文脈は、ボードの把握と取りまとめのために空けておく。
   - 結果に一次情報の出典を付け、確かめきれなかったことは分けて書く（research skill）。
