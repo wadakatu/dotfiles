@@ -82,6 +82,7 @@ auto memory は書き足される一方で、重複・陳腐化・置き場所�
 - 保守中に対話セッションが書いた内容は (6) の S2 snapshot に入る。S2 は cursor（= S1）より後の snapshot コミットなので、翌日の対象になる。
 - lint で対象に足すもの: frontmatter の欠落（`name` / `description` / `metadata.type`。`yq --front-matter=extract` で構造として読む）、索引に無いファイル、無いファイルを指す索引行。まだ無いメモリへの `[[name]]` は「後で書く印」として許されているので指摘しない。索引が 180 行超または 22KB 超（共有は 40 行超）なら「件数を減らす / 説明を短くする」を指示する。
 - `cursor/<p>` が無い dir はオンボード前で、snapshot だけ行う。最初の full が終わると cursor ができる。
+- `/tmp` や `/var/folders` の下で起動したセッション（サブエージェントの scratchpad など）の memory dir は使い捨てなので扱わない（`EXCLUDE_DIRS_RE`）。
 
 memory dir とリポの対応: Claude Code は memory dir の `<p>` を git リポのパスから作る（memory「Storage location」）。そこで、`orca repo list --json` の path と `~/www/personal/dotfiles` を `sed 's/[^A-Za-z0-9]/-/g'` で符号化して突合する。`~/.claude/settings.json` に `autoMemoryDirectory` があれば、この前提が崩れるので止まって通知する。対応の取れない dir は保守するが、リポを根拠にした陳腐化削除とリポ rules への昇格はしない。
 
