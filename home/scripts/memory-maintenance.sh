@@ -16,6 +16,7 @@
 #   ~/www/personal/dotfiles/home/scripts/memory-maintenance.sh full <p> [--seed <file>]
 #
 set -euo pipefail
+# shellcheck disable=SC2016  # '...' の中の $x は jq の変数 (シェルに展開させない)
 
 # launchd の PATH には nix のパッケージ (jq, yq, gh, orca) も claude も入らない。呼び出し元の PATH は前に残す (テストの偽コマンド用)。
 PATH="$PATH:/etc/profiles/per-user/${USER}/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
@@ -369,7 +370,7 @@ index_edit() { # index_edit <p> <deleted> <copied> <created>: 索引を行単位
     : >"$raw"
     for f in $deleted; do printf 'del\t%s\t\n' "$f" >>"$raw"; done
     while IFS=$'\t' read -r f line; do
-        printf '%s\n' $deleted | grep -qxF -- "$f" && continue
+        printf "%s" "$deleted" | grep -qxF -- "$f" && continue
         if [ -z "$line" ]; then
             printf 'del\t%s\t\n' "$f" >>"$raw"
         else
@@ -398,7 +399,7 @@ index_edit() { # index_edit <p> <deleted> <copied> <created>: 索引を行単位
             case "$op" in
                 set | add)
                     if [ "$c" -gt 1 ]; then skip "$p/$f" "索引に同じファイルの行が $c 行ある"; continue; fi
-                    if [ "$c" = 0 ]; then op=add; else op=set; fi ;;
+                    if [ "$c" = 0 ]; then op="add"; else op="set"; fi ;;
             esac
             printf '%s\t%s\t%s\n' "$op" "$f" "$line" >>"$edits"
         done <"$raw"
@@ -843,12 +844,12 @@ finish_retrim() { # 削り直しを AI に渡した dir の retrim を片付け�
 }
 
 cleanup() {
-    local id url st mc merged_at age
+    local id url st mc age
     for id in $(proposals_all | jq -r 'select(.status == "open" or .status == "merged") | .id'); do
         if [ "$(prop_get "$id" .status)" = open ]; then
             url=$(prop_get "$id" .pr_url)
             st=$(gh pr view "$url" --json state,mergeCommit,mergedAt -q '[.state, (.mergeCommit.oid // ""), (.mergedAt // "")] | @tsv' 2>/dev/null) || continue
-            IFS=$'\t' read -r st mc merged_at <<<"$st"
+            IFS=$'\t' read -r st mc _ <<<"$st"
             case "$st" in
                 CLOSED) prop_set "$id" '.status = "rejected"'; log "却下: $url"; continue ;;
                 MERGED) prop_set "$id" '.status = "merged" | .merge_commit = $m | .merged_epoch = $e' --arg m "$mc" --argjson e "$NOW" ;;

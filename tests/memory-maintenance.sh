@@ -3,6 +3,7 @@
 #   bash tests/memory-maintenance.sh
 # claude / gh / orca / osascript は偽物に置き換える。AI の実際の権限は試走で確かめる (docs/memory-maintenance-design.md 10 節)。
 set -u
+# shellcheck disable=SC2016,SC2329  # '...' の中の $x は偽コマンドや jq の変数。check に渡す関数は間接的に呼ぶ
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 script="$root/home/scripts/memory-maintenance.sh"
@@ -301,7 +302,7 @@ run_mm
 check "マージされて見えたら元を消す" test ! -f "$M/prom.md"
 check "[[name]] を書き換える" grep -qF 'prom（昇格済み → agents/claude/rules/x.md）' "$M/link.md"
 check "索引の行を消す" bash -c "! grep -qF '(prom.md)' '$M/MEMORY.md'"
-check "提案は done" test "$(prop_status prom)" = done
+check "提案は done" test "$(prop_status prom)" = "done"
 check "後片付けの変更をコミットする" test -z "$(git -C "$M" status --porcelain)"
 
 cleanup_case cleanup-changed MERGED
