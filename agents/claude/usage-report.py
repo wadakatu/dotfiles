@@ -41,7 +41,8 @@ def main() -> None:
     since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
     by_model, by_kind, by_sess = (collections.Counter() for _ in range(3))
     ctx_buckets = collections.Counter()
-    seen = set()
+    # 同じリクエストが複数行に記録され、後の行で usage が確定することがあるので最後の行を採る
+    requests = {}
     for path in glob.glob(f"{ROOT}/**/*.jsonl", recursive=True):
         if os.path.getmtime(path) < since.timestamp():
             continue
@@ -67,27 +68,26 @@ def main() -> None:
                 continue
             if datetime.datetime.fromisoformat(ts.replace("Z", "+00:00")) < since:
                 continue
-            key = (m.get("id"), e.get("requestId"))
-            if key in seen:
-                continue
-            seen.add(key)
-            for it in u.get("iterations") or [u]:
-                advisor = it.get("type") == "advisor_message"
-                model = it.get("model", m.get("model")) if advisor else m.get("model", "?")
-                cost = usd(model, it)
-                by_model[model] += cost
-                by_kind["advisor" if advisor else kind] += cost
-                by_sess[sess] += cost
-                if not advisor:
-                    ctx = it.get("input_tokens", 0) + it.get("cache_read_input_tokens", 0) + it.get("cache_creation_input_tokens", 0)
-                    ctx_buckets["<200k" if ctx < 200_000 else "200-400k" if ctx < 400_000 else ">=400k"] += 1
+            requests[(m.get("id"), e.get("requestId"))] = (u, m.get("model", "?"), kind, sess)
 
-    total = sum(by_model.values()) or 1
+    for u, main_model, kind, sess in requests.values():
+        for it in u.get("iterations") or [u]:
+            advisor = it.get("type") == "advisor_message"
+            model = it.get("model", main_model) if advisor else main_model
+            cost = usd(model, it)
+            by_model[model] += cost
+            by_kind["advisor" if advisor else kind] += cost
+            by_sess[sess] += cost
+            if not advisor:
+                ctx = it.get("input_tokens", 0) + it.get("cache_read_input_tokens", 0) + it.get("cache_creation_input_tokens", 0)
+                ctx_buckets["<200k" if ctx < 200_000 else "200-400k" if ctx < 400_000 else ">=400k"] += 1
+
+    total = sum(by_model.values())
     print(f"直近 {days} 日: API 定価換算 ${total:,.0f}")
     for title, d, n in (("モデル別", by_model, 6), ("用途別", by_kind, 8), ("セッション別", by_sess, 8)):
         print(f"\n== {title}")
         for k, v in d.most_common(n):
-            print(f"  {k[:60]:60} ${v:8,.0f} {v / total:4.0%}")
+            print(f"  {k[:60]:60} ${v:8,.0f} {v / (total or 1):4.0%}")
     print("\n== リクエストあたりの文脈 (件数)")
     for k in ("<200k", "200-400k", ">=400k"):
         print(f"  {k:9} {ctx_buckets[k]}")
