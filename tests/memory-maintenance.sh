@@ -72,7 +72,7 @@ mem() { # mem <file> <type> <name> [本文]
 }
 idx() { printf -- '- [%s](%s) — %s\n' "$2" "$1" "$3" >>"$M/MEMORY.md"; }
 commit_mem() { git -C "$M" add -A && git -C "$M" commit -q -m "snapshot test"; }
-mark_onboarded() { git -C "$M" rev-parse HEAD >"$T/state/cursor/$P"; date +%s >"$T/state/full-done/$P"; }
+mark_onboarded() { git -C "$M" rev-parse HEAD >"$T/state/cursor/$P"; date +%s >"$T/state/full-done/$P"; date +%s >"$T/state/full-done/shared"; }
 setup() { # setup <名前>: オンボード済みの memory dir (alpha / fb / old) とリポ 2 つ
     CASE=$1
     T="$base/$1"
@@ -132,7 +132,8 @@ EOF
 result <<EOF
 {"changes": [
   {"dir": "$P", "file": "alpha.md", "action": "update", "index_line": "- [Alpha の見出し](alpha.md) — 短い説明", "evidence": "短縮"},
-  {"dir": "$P", "file": "new.md", "action": "create", "evidence": "新規"},
+  {"dir": "$P", "file": "new.md", "action": "create", "index_line": "- [New](new.md) — 新しい", "evidence": "新規"},
+  {"dir": "$P", "file": "new.md", "action": "update", "index_line": "- [New](new.md) — 新しい", "evidence": "別のバッチも同じ行を返した"},
   {"dir": "$P", "file": "old.md", "action": "delete", "evidence": "前提が消えた"}],
  "proposals": [], "needs_human": []}
 EOF
@@ -145,7 +146,7 @@ check "索引の自由文が残る" grep -qx '注意: 索引の自由文は残�
 check "index_line で行が置き換わる" grep -qxF -- '- [Alpha の見出し](alpha.md) — 短い説明' "$M/MEMORY.md"
 check "触らない行は残る" grep -qxF -- '- [FB](fb.md) — feedback' "$M/MEMORY.md"
 check "消したファイルの行が消える" bash -c "! grep -qF '(old.md)' '$M/MEMORY.md'"
-check "新規ファイルの行が足される" grep -qF '(new.md)' "$M/MEMORY.md"
+check "新規ファイルの行が 1 行だけ足される" test "$(grep -cF '(new.md)' "$M/MEMORY.md")" = 1
 check "maintenance コミットができる" bash -c "git -C '$M' log -1 --format=%s | grep -q '^maintenance: daily'"
 check "cursor は AI に渡した S1" cursor_is "$(git -C "$M" rev-parse HEAD~1)"
 check "成功したら作業領域を消す" bash -c "! ls -d '$T'/cache/runs/*/daily"
@@ -263,11 +264,12 @@ prop() { # prop <name> <repo> <path> <content> [confidence] [after_merge]
     prop zeta "$FAKE_DOT" agents/claude/rules/team-notes.md $'- 規則\n'; printf ','
     prop delta "$FAKE_DOT" home/zsh.nix 'x'; printf ','
     prop epsilon "$FAKE_DOT" agents/claude/rules/e.md $'- 規則\n' 高 '{}'; printf ','
+    prop iota "$FAKE_DOT" agents/claude/rules/i.md $'- 規則\n' | jq -c '.source_file = "MEMORY.md"'; printf ','
     prop gamma "$FAKE_APP" .claude/rules/app.md $'- app の規則\n' 中
     printf ']}\n'
 } >"$FAKE/result.json"
 run_mm MAX_PR_PER_DAY=1
-check "許可リスト外の target_path と不正な after_merge は捨てる" test "$(ls "$T/state/proposals" | wc -l | tr -d ' ')" = 4
+check "許可リスト外の target_path・不正な after_merge・topic でない昇格元は捨てる" test "$(ls "$T/state/proposals" | wc -l | tr -d ' ')" = 4
 check "公開前検査に当たれば保留" test "$(prop_status beta)" = held
 check "target_path に社内の語があれば保留" test "$(prop_status zeta)" = held
 check "1 日の上限まで PR にする (dotfiles から)" test "$(prop_status alpha)" = open
@@ -295,7 +297,12 @@ check "取り下げた提案の元を翌日の AI に申し送る" grep -q '^alp
 check "取り下げた提案の worktree を消す" test -z "$(ls "$FAKE/wt" 2>/dev/null)"
 run_mm
 check "申し送りがプロンプトに入る" grep -q '昇格先が変わったので取り下げた' "$FAKE/claude-calls"
-check "適用できたら申し送りを片付ける" test ! -f "$T/state/notes/$P"
+check "AI が処置を申告しなければ申し送りを残す" grep -q '^alpha.md' "$T/state/notes/$P"
+result <<EOF
+{"changes": [{"dir": "$P", "file": "alpha.md", "action": "update", "evidence": "昇格先に既にあるので提案し直さない"}], "proposals": [], "needs_human": []}
+EOF
+run_mm
+check "処置を申告したら申し送りを片付ける" test ! -f "$T/state/notes/$P"
 
 setup recover
 printf '{"changes": [], "proposals": [], "needs_human": []}\n' >"$FAKE/result.json"
@@ -360,6 +367,11 @@ run_mm
 check "live に見えなければ消さない" test -f "$M/prom.md"
 check "マージ済みのまま待つ" test "$(prop_status prom)" = merged
 
+cleanup_case cleanup-reverted MERGED
+git -C "$FAKE_DOT" rm -q agents/claude/rules/x.md && git -C "$FAKE_DOT" commit -q -m revert && git -C "$FAKE_DOT" push -q origin HEAD:main
+run_mm
+check "マージ後に revert されたら元を消さない" test -f "$M/prom.md"
+
 cleanup_case cleanup-closed CLOSED
 run_mm
 check "閉じられた PR は rejected" test "$(prop_status prom)" = rejected
@@ -392,6 +404,15 @@ check "seed を渡す" grep -q seed.md "$FAKE/claude-calls"
 check "全件の見直しで full-done ができる" test -f "$T/state/full-done/$P"
 check "全件の見直しで cursor ができる" test -f "$T/state/cursor/$P"
 check "使った seed を片付ける" test -f "$T/state/seed/$P.md.used"
+
+setup shared-full
+rm "$T/state/full-done/shared"
+mkdir -p "$T/shared"
+printf '# Shared memory\n\n- [Moved](moved.md) — 移されてきた\n' >"$T/shared/MEMORY.md"
+printf -- '---\nname: moved\ndescription: 移されてきた\nmetadata:\n  type: reference\n---\n\n他の dir から移された\n' >"$T/shared/moved.md"
+run_mm
+check "共有メモリも全件見直しに入る" grep -q "mem/shared/moved.md" "$FAKE/claude-calls"
+check "共有の全件見直しで full-done ができる" test -f "$T/state/full-done/shared"
 
 [ "$fail" = 0 ] && echo "memory-maintenance: all checks passed"
 if [ "$fail" != 0 ]; then echo "ログ: 各ケースの log を見るには trap を外して再実行する"; fi

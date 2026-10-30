@@ -361,7 +361,7 @@ skip() { log "見送り $1: $2"; printf '%s\t%s\n' "$1" "$2" >>"$META/skipped.ts
 
 # index_apply <MEMORY.md> <edits>: edits は "del|set|add<TAB>file<TAB>行"。該当しない行・見出し・並びには触れない。
 index_apply() {
-    awk -F'\t' 'NR == FNR { op[$2] = $1; txt[$2] = substr($0, length($1) + length($2) + 3); ord[++n] = $2; next }
+    awk -F'\t' 'NR == FNR { if (!($2 in op)) ord[++n] = $2; op[$2] = $1; txt[$2] = substr($0, length($1) + length($2) + 3); next }
         { for (f in op) if (index($0, "](" f ")")) { if (op[f] == "del") next; if (op[f] == "set") { print txt[f]; done[f] = 1; next } } print }
         END { for (i = 1; i <= n; i++) { f = ord[i]; if (op[f] == "add" || (op[f] == "set" && !done[f])) print txt[f] } }' "$2" "$1"
 }
@@ -618,6 +618,16 @@ intake_proposals() { # AI の提案を検証して proposals/<id>.json に置く
         src_file=$(jq -r .source_file <<<"$prop")
         repo=$(jq -r .target_repo <<<"$prop")
         path=$(jq -r .target_path <<<"$prop")
+        # 昇格元は今回 AI に渡した scope の topic ファイルに限る (MEMORY.md や他所のファイルをマージ後に消さないため)
+        case "$src_file" in
+            */* | MEMORY.md | *[!A-Za-z0-9._-]*) log "提案を捨てる ($name): 昇格元 $src_file が topic ファイルではない"; continue ;;
+            *.md) ;;
+            *) log "提案を捨てる ($name): 昇格元 $src_file が topic ファイルではない"; continue ;;
+        esac
+        if [ -z "$(s1_of "$src_dir")" ] || [ "$(blob_at "$(mem_path "$src_dir")" "$(s1_of "$src_dir")" "$src_file")" = none ]; then
+            log "提案を捨てる ($name): 昇格元 $src_dir/$src_file が今回の scope に無い"
+            continue
+        fi
         exp=$(awk -F'\t' -v r="$repo" '$2 == r { print; exit }' "$META/exports.tsv")
         if [ -z "$exp" ]; then log "提案を捨てる ($name): $repo は今回 export していない"; continue; fi
         if ! allowed_target "$repo" "$path"; then log "提案を捨てる ($name): $path は許可リストに無い"; continue; fi
@@ -791,18 +801,21 @@ live_path() { # dotfiles の target_path が実際に読まれる場所
     esac
 }
 
-visible() { # visible <id>: マージが既定ブランチにあり、dotfiles なら live 側にも追加行が見える
-    local id=$1 repo path mc marker lp
+visible() { # visible <id>: マージが既定ブランチにあり、追加した行が今の既定ブランチにも残っている (revert されていない)。dotfiles なら live 側にも見える
+    local id=$1 repo path mc marker lp def
     repo=$(prop_get "$id" .target_repo)
     path=$(prop_get "$id" .target_path)
     mc=$(prop_get "$id" .merge_commit)
     fetch_once "$repo"
-    git -C "$repo" merge-base --is-ancestor "$mc" "$(default_ref "$repo")" 2>/dev/null || return 1
-    [ "$repo" = "$DOTFILES_DIR" ] || return 0
+    def=$(default_ref "$repo")
+    git -C "$repo" merge-base --is-ancestor "$mc" "$def" 2>/dev/null || return 1
     marker=$(git -C "$repo" diff "$mc^1" "$mc" -- "$path" | { grep -E '^\+' || true; } | { grep -vE '^\+\+\+' || true; } | sed 's/^+//' |
         awk '{ if (length($0) > length(m)) m = $0 } END { print m }')
+    [ -n "$marker" ] || return 1
+    { git -C "$repo" show "$def:$path" 2>/dev/null || true; } | grep -qF -- "$marker" || return 1
+    [ "$repo" = "$DOTFILES_DIR" ] || return 0
     lp=$(live_path "$path")
-    [ -n "$marker" ] && [ -n "$lp" ] && grep -qF -- "$marker" "$lp"
+    [ -n "$lp" ] && grep -qF -- "$marker" "$lp"
 }
 
 apply_after_merge() { # 元のメモリを after_merge どおりに縮小・削除し、[[name]] を書き換える
@@ -864,15 +877,22 @@ note() { # note <p> <file> <提案 id> <内容>
     printf '%s\t%s\t%s\n' "$2" "$3" "$4" >>"$STATE_DIR/notes/$1"
 }
 
-finish_notes() { # finish_notes <p>: 適用できたファイルの申し送りだけ片付ける (見送ったファイルの分は翌日に残す)
-    local p=$1 f id note_text
+finish_notes() { # finish_notes <p>: AI がそのファイルに処置を申告し、見送られなかった申し送りだけ片付ける
+    local p=$1 f id note_text n
     [ -f "$STATE_DIR/notes/$p" ] || return 0
     : >"$META/notes-keep"
-    while IFS=$'\t' read -r f id note_text; do
+    while IFS=$'\t' read -r f id note_text n; do
+        n=${n:-0}
         if awk -F'\t' -v k="$p/$f" '$1 == k { x = 1 } END { exit !x }' "$META/skipped.tsv"; then
-            printf '%s\t%s\t%s\n' "$f" "$id" "$note_text" >>"$META/notes-keep"
-        elif [ -n "$id" ] && [ -f "$(prop_file "$id")" ] && [ "$(prop_get "$id" .status)" = retrim ]; then
-            prop_set "$id" '.status = "done"'
+            # 保守の間に live が変わって見送った。AI のせいではないので回数は数えない
+            printf '%s\t%s\t%s\t%s\n' "$f" "$id" "$note_text" "$n" >>"$META/notes-keep"
+        elif jq -e --arg p "$p" --arg f "$f" 'any(.changes[]; .dir == $p and .file == $f)' "$META/result.json" >/dev/null; then
+            if [ -n "$id" ] && [ -f "$(prop_file "$id")" ] && [ "$(prop_get "$id" .status)" = retrim ]; then prop_set "$id" '.status = "done"'; fi
+        elif [ $((n + 1)) -ge 3 ]; then
+            printf '%s - %s/%s: 申し送りを 3 回渡しても処置されなかった (%s)\n' "$TODAY" "$p" "$f" "$note_text" >>"$STATE_DIR/needs-human.md"
+            notify "申し送りを 3 回渡しても処置されなかった: $p/$f"
+        else
+            printf '%s\t%s\t%s\t%s\n' "$f" "$id" "$note_text" "$((n + 1))" >>"$META/notes-keep"
         fi
     done <"$STATE_DIR/notes/$p"
     if [ -s "$META/notes-keep" ]; then mv "$META/notes-keep" "$STATE_DIR/notes/$p"; else rm -f "$STATE_DIR/notes/$p"; fi
@@ -988,12 +1008,14 @@ run_full() { # run_full <p> [seed]
 }
 
 pick_full() { # 全件の見直しが FULL_INTERVAL_DAYS 以上前 (か、まだ) の dir を 1 つ。seed のあるもの、メモリの多いものから
-    local p last
+    # 共有も含める。他の dir から移されたメモリは maintenance コミットでしか入らず、日次の対象にならないため
+    local p last n
     for p in $(discover_dirs); do
-        [ "$p" = shared ] && continue
+        n=$(topic_files "$(mem_path "$p")" | wc -l | tr -d ' ')
+        [ "$n" -gt 0 ] || continue
         last=$(cat "$STATE_DIR/full-done/$p" 2>/dev/null || echo 0)
         [ $(( (NOW - last) / 86400 )) -ge "$FULL_INTERVAL_DAYS" ] || continue
-        printf '%s\t%s\t%s\n' "$([ -f "$STATE_DIR/seed/$p.md" ] && echo 1 || echo 0)" "$(topic_files "$(mem_path "$p")" | wc -l | tr -d ' ')" "$p"
+        printf '%s\t%s\t%s\n' "$([ -f "$STATE_DIR/seed/$p.md" ] && echo 1 || echo 0)" "$n" "$p"
     done | sort -t$'\t' -k1,1nr -k2,2nr | head -n 1 | cut -f3
 }
 

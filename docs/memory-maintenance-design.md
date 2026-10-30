@@ -169,6 +169,7 @@ PR はスクリプトが決まった手順で作る。エージェントには�
   - チームのリポ: `.claude/rules/*.md`、`AGENTS.md`、`CLAUDE.md`。
 - `new_content` は 40KB 以下で、現在の内容と違う。
 - `base_blob` = export した commit の `target_path` の blob（無ければ `new`）と、`source_blob` = live の S1 での元ファイルの blob を記録する。
+- 昇格元は、今回の scope にある `MEMORY.md` 以外の topic ファイルであること（マージ後に索引ごと消さないため）。
 - 公開リポ向け（`gh repo view --json visibility` が PUBLIC）なら、`public_safe: true` と公開前検査（後述）を通す。外れたら `held` にして通知する。
 
 起票（1 日 5 件。`pr_created_at` が今日の提案を数える。確信度 高 → 中 → 低、dotfiles → チームのリポの順）:
@@ -193,15 +194,15 @@ PR はスクリプトが決まった手順で作る。エージェントには�
 
 - `CLOSED`（マージされずに閉じた）なら `rejected`。
 - `MERGED` なら、昇格先に見えるまで待つ。
-  - 見える条件: `git merge-base --is-ancestor <mergeCommit> origin/<default>`。dotfiles 向けはさらに、live 側（`~/.claude/CLAUDE.md`、`~/.claude/rules/`、`~/.claude/skills/`）に diff の追加行のうち最長の 1 行がある。
+  - 見える条件: `git merge-base --is-ancestor <mergeCommit> origin/<default>`。 diff の追加行のうち最長の 1 行が、今の `origin/<default>:<target_path>` にも残っていること（マージ後に revert されていない）。dotfiles 向けはさらに、live 側（`~/.claude/CLAUDE.md`、`~/.claude/rules/`、`~/.claude/skills/`）に diff の追加行のうち最長の 1 行がある。
   - dotfiles は手動コピーや作業ブランチのため反映が遅れることがある。14 日見えなければ通知する。
 - 見えたら、元ファイルの blob を `source_blob` と比べる。
   - 同じなら `after_merge` どおり削除または縮小し、同じ dir と共有の `[[<source_name>]]` を `<source_name>（昇格済み → <target_path>）` に置き換え、索引行を編集し、`maintenance: cleanup` でコミットする。feedback 型でもこの削除は行う（ユーザーの決定）。
-  - 違えば（提案後に追記された）`after_merge` は使わず、申し送り（`notes/<p>`）に「<target_path> に昇格済み。そこで扱われた部分だけ削る」と載せて翌日の AI に渡す。申し送りは、そのファイルの処置を実際に適用できた回にだけ片付ける（見送ったら翌日に残す）。
+  - 違えば（提案後に追記された）`after_merge` は使わず、申し送り（`notes/<p>`）に「<target_path> に昇格済み。そこで扱われた部分だけ削る」と載せて翌日の AI に渡す。申し送りは、AI がそのファイルに処置を申告し、見送られなかった回にだけ片付ける（直すものが無ければ AI は `update` で理由を書く）。3 回渡しても申告が無ければ `needs-human.md` に回す。
 
 ### 4.9 月次の全件見直し
 
-`full <p> [--seed <file>]`。日次と同じ経路で、入力が全件になる・バッチに分ける・予算が大きい、の 3 点が違う。`--seed` は手動の分類結果を「前回の分類。根拠を確かめて使う。再分類しない」として渡す。日次のローテーションは `seed/<p>.md` があればそれを使い、その dir を先に選ぶ。完了したら `full-done/<p>` に日付を書き、`cursor/<p>` を作り、seed を `.used` に改名する。
+`full <p> [--seed <file>]`。共有メモリもローテーションに入る（他の dir から移されたメモリは maintenance コミットでしか入らず、日次の対象にならないため）。日次と同じ経路で、入力が全件になる・バッチに分ける・予算が大きい、の 3 点が違う。`--seed` は手動の分類結果を「前回の分類。根拠を確かめて使う。再分類しない」として渡す。日次のローテーションは `seed/<p>.md` があればそれを使い、その dir を先に選ぶ。完了したら `full-done/<p>` に日付を書き、`cursor/<p>` を作り、seed を `.used` に改名する。
 
 ## 5. ファイル配置と launchd
 
