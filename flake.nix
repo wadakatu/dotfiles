@@ -36,17 +36,13 @@
 
   outputs = inputs@{ self, nix-darwin, nixpkgs, nixpkgs-unstable, determinate, home-manager }:
     let
-      # macOS の short user name。ユーザー名とホームパスを各モジュールへ
-      # 重複記述せず、新しい Mac でもここだけを確認すればよいようにする。
-      username = "wadakatu";
-      homeDirectory = "/Users/${username}";
-
       # Apple Silicon。Intel Mac なら "x86_64-darwin"。
       system = "aarch64-darwin";
       pkgsUnstable = nixpkgs-unstable.legacyPackages.${system};
 
       # configuration: 1台のホストに適用する設定モジュール。
-      configuration = { ... }: {
+      # username / homeDirectory は mkDarwin が specialArgs で渡す。
+      configuration = { username, homeDirectory, ... }: {
         # Determinate にインストールされた Nix を使う宣言。
         # これを true にすることで nix-darwin 側の nix.* 系オプションは無効化される。
         # customSettings = {} は /etc/nix/nix.custom.conf (Determinate が作成するファイル) の
@@ -80,37 +76,64 @@
 
         nixpkgs.hostPlatform = system;
       };
+
+      # mkDarwin: マシンごとに違う値だけを引数で受け取り、darwinSystem を返す関数。
+      # flake は純粋評価なので $USER を実行時に読めない (--impure が必要になる)。
+      # そのためマシンごとの差分は名前付きの設定として明示的に並べる。
+      #   name        : darwinConfigurations の属性名 (--flake .#<name>)
+      #   username    : macOS の short user name
+      #   dotfilesPath: ホームから見たこのリポジトリのクローン先
+      mkDarwin = { name, username, dotfilesPath }:
+        let
+          homeDirectory = "/Users/${username}";
+          dotfilesDir = "${homeDirectory}/${dotfilesPath}";
+        in
+        nix-darwin.lib.darwinSystem {
+          # nix-darwin モジュールへユーザー情報を渡す。
+          specialArgs = { inherit username homeDirectory; };
+
+          modules = [
+            determinate.darwinModules.default
+            home-manager.darwinModules.home-manager
+            configuration
+            ./modules/homebrew.nix
+            ./modules/codex.nix
+            ./system/defaults.nix
+            {
+              # useGlobalPkgs: home-manager に独自の nixpkgs を持たせず、
+              # nix-darwin と同じ nixpkgs を共有。ストア肥大化を防ぐ。
+              home-manager.useGlobalPkgs = true;
+              # useUserPackages: home.packages を ~/.nix-profile 配下に置く。
+              # 副作用として nix-env でインストールしたものと衝突しなくなる。
+              home-manager.useUserPackages = true;
+              # Home Manager モジュールへも同じユーザー情報を渡す。
+              # darwinConfigName は zsh の rebuild alias が自分の設定名を知るため。
+              home-manager.extraSpecialArgs = {
+                inherit username homeDirectory dotfilesDir pkgsUnstable;
+                darwinConfigName = name;
+              };
+              # 既存 ~/.zshrc 等と衝突した場合は .before-hm を付けてバックアップ。
+              # 初回 activation で既存 dotfiles symlink を自動退避できる。
+              home-manager.backupFileExtension = "before-hm";
+              home-manager.users.${username} = import ./home/default.nix;
+            }
+          ];
+        };
     in
     {
       # darwinConfigurations.<name>: nix-darwin が読むホスト設定の集合。
-      # 名前 "mymac" は hostname に依存しない論理名。新しい Mac でも使い回せる。
-      # ビルド: darwin-rebuild switch --flake .#mymac
-      darwinConfigurations."mymac" = nix-darwin.lib.darwinSystem {
-        # nix-darwin モジュールへユーザー情報を渡す。
-        specialArgs = { inherit username homeDirectory; };
-
-        modules = [
-          determinate.darwinModules.default
-          home-manager.darwinModules.home-manager
-          configuration
-          ./modules/homebrew.nix
-          ./modules/codex.nix
-          ./system/defaults.nix
-          {
-            # useGlobalPkgs: home-manager に独自の nixpkgs を持たせず、
-            # nix-darwin と同じ nixpkgs を共有。ストア肥大化を防ぐ。
-            home-manager.useGlobalPkgs = true;
-            # useUserPackages: home.packages を ~/.nix-profile 配下に置く。
-            # 副作用として nix-env でインストールしたものと衝突しなくなる。
-            home-manager.useUserPackages = true;
-            # Home Manager モジュールへも同じユーザー情報を渡す。
-            home-manager.extraSpecialArgs = { inherit username homeDirectory pkgsUnstable; };
-            # 既存 ~/.zshrc 等と衝突した場合は .before-hm を付けてバックアップ。
-            # 初回 activation で既存 dotfiles symlink を自動退避できる。
-            home-manager.backupFileExtension = "before-hm";
-            home-manager.users.${username} = import ./home/default.nix;
-          }
-        ];
+      # ビルド: darwin-rebuild switch --flake .#<name>
+      darwinConfigurations = {
+        work = mkDarwin {
+          name = "work";
+          username = "wadakatu";
+          dotfilesPath = "www/personal/dotfiles";
+        };
+        personal = mkDarwin {
+          name = "personal";
+          username = "koyoisono";
+          dotfilesPath = "Documents/Programming/dotfiles";
+        };
       };
     };
 }

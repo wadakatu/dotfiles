@@ -16,7 +16,7 @@
 
 ### 継続利用
 
-- ユーザー名: `wadakatu`
+- ユーザー名: マシンごとに `flake.nix` の `mkDarwin` で指定（`work` = `wadakatu`、`personal` = `koyoisono`）
 - Apple Silicon (`aarch64-darwin`)
 - zsh
 - mise（Bun / Node.js / pnpm / Python / Yarn）
@@ -200,6 +200,6 @@ App Store由来として確認できたGarageBand、Keynote、Numbers、Pages、
 - [x] `GITHUB_TOKEN=$(gh auth token)` をシェル起動処理から除外する
 - [x] GUI アプリと Homebrew formula の採否を確定する
 - [x] `nix flake check` を通す
-- [ ] macOS runner で `darwinConfigurations.mymac.system` をビルドする
-- [x] 現 Mac で `darwinConfigurations.mymac.system` をビルドする
+- [ ] macOS runner で `darwinConfigurations.{work,personal}.system` をビルドする
+- [x] 現 Mac で `darwinConfigurations.<name>.system` をビルドする（当時の設定名は `mymac`）
 - [x] ビルド結果を確認してから初回 `switch` を実行する

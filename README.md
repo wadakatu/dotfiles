@@ -77,8 +77,16 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 └── docs/migration-audit.md
 ```
 
-ユーザー名は `flake.nix` の `username` 1か所を正とし、現在は `wadakatu` を指定している。
-新しい Mac のアカウント short name と一致させること。
+マシンごとの差分（設定名・macOS の short user name・クローン先）は `flake.nix` の
+`darwinConfigurations` に `mkDarwin` の引数として並べる。
+
+| 設定名 | ユーザー名 | クローン先 |
+|---|---|---|
+| `work` | `wadakatu` | `~/www/personal/dotfiles` |
+| `personal` | `koyoisono` | `~/Documents/Programming/dotfiles` |
+
+新しい Mac を足すときは `mkDarwin { ... }` を1つ追加する。以下の `<name>` は該当する設定名に読み替える。
+flake は純粋評価なので `$USER` を実行時に読んで切り替えることはしない（`--impure` が必要になるため）。
 
 ## 前提
 
@@ -93,12 +101,13 @@ nix-darwinはHomebrew本体をインストールしないため、Homebrewは先
 ## 新しい Mac の初回セットアップ
 
 ```bash
+# クローン先は flake.nix の dotfilesPath と一致させる
 git clone https://github.com/wadakatu/dotfiles.git ~/www/personal/dotfiles
 cd ~/www/personal/dotfiles
 
 # 評価とビルド。ユーザー環境にはまだ適用しない
 nix flake check --no-update-lock-file path:. --show-trace
-nix build path:.#darwinConfigurations.mymac.system --no-link --show-trace
+nix build path:.#darwinConfigurations.<name>.system --no-link --show-trace
 ```
 
 Determinate NixのmacOSパッケージは、インストール時に
@@ -126,7 +135,7 @@ sudo mv /etc/nix/nix.custom.conf /etc/nix/nix.custom.conf.before-nix-darwin
 
 ```bash
 sudo -H /nix/var/nix/profiles/default/bin/nix run nix-darwin/master#darwin-rebuild -- \
-  switch --flake .#mymac
+  switch --flake .#<name>
 ```
 
 初回適用後はターミナルを開き直す。
@@ -144,15 +153,15 @@ sudo -H /nix/var/nix/profiles/default/bin/nix run nix-darwin/master#darwin-rebui
 
 ```bash
 # 副作用なしのビルド確認
-darwin-rebuild build --flake .#mymac
+darwin-rebuild build --flake .#<name>
 
 # 確認後に適用
-sudo darwin-rebuild switch --flake .#mymac
+sudo darwin-rebuild switch --flake .#<name>
 
 # input更新。lockfile差分とビルド結果を確認してから適用する
 nix flake update
 nix flake check --show-trace
-darwin-rebuild build --flake .#mymac
+darwin-rebuild build --flake .#<name>
 ```
 
 新しいNixファイルはGitの追跡対象でないとflakeから見えない。追加後はビルド前に
@@ -288,7 +297,7 @@ system 層と `~/.codex/hooks.json` の両方から 2 回実行される（ど�
      cp -p ~/.codex/config.toml ~/.codex/hooks.json ~/.codex/AGENTS.md ~/.codex/hooks/branch-guard.sh "$b"/ && echo "$b"
    readlink /nix/var/nix/profiles/system   # 今の世代 (system-<番号>-link)。--list-generations は root でないと lock で失敗する
    ```
-3. `sudo darwin-rebuild switch --flake .#mymac`。`ls -l /etc/codex/ ~/.codex/AGENTS.md` でリンクを確認する
+3. `sudo darwin-rebuild switch --flake .#<name>`。`ls -l /etc/codex/ ~/.codex/AGENTS.md` でリンクを確認する
    （`~/.codex/AGENTS.md.before-hm` は Home Manager が退避した旧ファイル）。
 4. `~/.codex/config.toml` から `agents/codex/config.toml` にあるキーを消す（トップレベルの 7 キーと、
    `[features]`、`[permissions.local-dev]` 以下、`[mcp_servers.openaiDeveloperDocs]`）。重複チェックが空になればよい。
@@ -329,10 +338,10 @@ Ghostty のように `.source = ./config/...` としないのは、herdr が con
 flake では相対パスを渡すと flake source の store コピーを指してしまうため、
 絶対パスの文字列を渡している
 （[home-manager#2085](https://github.com/nix-community/home-manager/issues/2085)）。
-このため、このリポジトリのクローン先は `home/default.nix` の `dotfilesDir`
-（既定は `~/www/personal/dotfiles`）と一致させる。launchd のスクリプト
-（worktree-gc / pr-dispatch）も同じ値を見るので、クローン先を変えるときは
-`dotfilesDir` を直して `darwin-rebuild switch` する。
+このため、このリポジトリのクローン先は `flake.nix` の `mkDarwin` に渡す
+`dotfilesPath` と一致させる。launchd のスクリプト（worktree-gc / pr-dispatch）も
+同じ値を見るので、クローン先を変えるときは `dotfilesPath` を直して
+`darwin-rebuild switch` する。
 
 なお、herdr が書き換え時に「一時ファイル + rename」方式を使う場合は
 `~/.config/herdr/config.toml` の symlink 自体が実ファイルに置き換わり、リポジトリから
