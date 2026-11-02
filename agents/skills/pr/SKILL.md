@@ -16,15 +16,20 @@ description: 実装が一区切りつき、変更をレビューに出す段階�
 2. **適切な粒度でのコミット作成**
     - `/commit` と同じ規約でコミットを作成する（既定=英語 Conventional Commits、プロジェクト側の明示規約が優先、`Co-Authored-By` トレーラー禁止）
 
-3. **ブランチのプッシュ**
+3. **動かして確かめる**
+    - 変更を動かして確かめる skill があれば（Studio のリポジトリなら `/vasari:verify`）、push の前に実行する。この変更ですでに確かめていれば省く
+    - 確かめるケースと期待する結果は、diff・issue・依頼から自分で決める。正常系に加え、境界のケースと、バグ修正なら修正前の再現も入れる
+    - 動かす対象が無い変更（ドキュメント・CI・設定だけ）や、環境の都合でできないときは、本文の「検証」にその旨を 1 行書く
+
+4. **ブランチのプッシュ**
     - `git push -u origin <current-branch>` でリモートにプッシュ
 
-4. **PR 作成**
+5. **PR 作成**
     - `gh pr create` で作成
     - **リポジトリに `.github/PULL_REQUEST_TEMPLATE.md` や直近 PR から読み取れるタイトル規約がある場合はそちらが最優先**で、下記の既定は使わない。テンプレートの条件付きセクション（migration チェックリスト等）は該当時に必ず埋める
     - タイトルは既定でプロジェクト指定の言語 + 種別プレフィックス: `Bugfix:` / `Refactoring:` / `New Feature:` / `Incident:` / `Document:`
 
-5. **Orca への書き戻し**（Orca が管理する worktree のときだけ）
+6. **Orca への書き戻し**（Orca が管理する worktree のときだけ）
     - `orca worktree current --json` が `"ok": true` のときに、次の 2 つを実行する
         - `orca reference add <PR の URL> --worktree current --json`
         - `orca worktree set --worktree current --workspace-status in-review --comment "PR #<番号>" --json`
