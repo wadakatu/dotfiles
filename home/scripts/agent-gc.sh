@@ -107,7 +107,8 @@ collect() {
             f="$HOME/.claude/sessions/$pid.json"
             if [ -f "$f" ]; then
                 # claude -p などは対象外
-                [ "$(jq -r '.kind // empty' "$f" 2>/dev/null)" = interactive ] || continue
+                # 読めて非対話と分かったものだけ外す。読めないものは unreadable として残し、形式の警告に数える。
+                jq -e '(.kind | type) == "string" and .kind != "interactive"' "$f" >/dev/null 2>&1 && continue
                 if jq -e --argjson pid "$pid" --arg ls "$lstart" '
                     .pid == $pid and (.procStart | gsub(" +"; " ")) == $ls and (.status | type) == "string"
                     and ((.statusUpdatedAt // .updatedAt) | type) == "number"' "$f" >/dev/null 2>&1; then
