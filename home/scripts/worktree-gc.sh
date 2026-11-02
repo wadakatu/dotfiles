@@ -22,8 +22,9 @@ ORCA_ROOT="${ORCA_ROOT:-$HOME/orca/workspaces}"
 # 「detached・clean・origin/dev と同一」で内容ベースの判定を全部すり抜けるため、
 # 新しいものは一律で見送る (次の実行で拾える)。
 MIN_AGE_HOURS="${MIN_AGE_HOURS:-24}"
-# down / remove の対象にする compose プロジェクト名の接頭辞。共有インフラ (mysql,
+# working_dir が消えた孤児の compose プロジェクトを落とす対象にする名前の接頭辞。共有インフラ (mysql,
 # traefik...) や他リポジトリ (docker-*, studio-*) と、本体の `app` を巻き込まないための境界。
+# このスクリプトが消した worktree に属するプロジェクトは、名前を問わず working_dir で拾う。
 PROJECT_PREFIXES="app-app- app-worktree-"
 # build cache はここより古いものだけ捨てる。image は dangling のみ (-a を付けると
 # api-base が毎日消えて make build のたびに再 pull になる)。
@@ -45,8 +46,17 @@ mark_stale() {
             return 0
             ;;
     esac
-    log "STALE $wt ($why)"
+    log "STALE $wt ($why$(ignored_note "$wt"))"
     removable+=("$wt")
+}
+
+# .env などの ignore されたファイルは「未コミット変更なし」扱いで worktree ごと消える。
+# 判定は変えず、消えるものがあることだけログに残す (ディレクトリは 1 件に数える)。
+ignored_note() {
+    local n
+    n=$(git -C "$1" status --porcelain --ignored 2>/dev/null | grep -c '^!! ' || true)
+    [ "$n" -gt 0 ] && printf ' / ignored %s 件も消える' "$n"
+    return 0
 }
 
 # 実行するコマンドの出力はここで捨てる。呼び出し側に >/dev/null を書くと
@@ -100,8 +110,9 @@ fi
 
 # upstream が消えたか (= PR が merge/close された) を見るために必要。
 # オフライン時はこの判定だけ諦めて、孤児の掃除は続ける。
+# upstream が fork 元 (origin 以外) を指すブランチもあるので、全 remote を取る。
 fetch_ok=1
-git -C "$REPO" fetch --prune --quiet 2>/dev/null || { fetch_ok=0; log "WARN: fetch 失敗。upstream-gone 判定はスキップする"; }
+git -C "$REPO" fetch --prune --all --quiet 2>/dev/null || { fetch_ok=0; log "WARN: fetch 失敗。upstream-gone 判定はスキップする"; }
 
 # ---- 削除してよい worktree を選ぶ ----
 removable=()
@@ -193,10 +204,6 @@ else
     fetched=""
     while IFS=$'\t' read -r wt branch; do
         [ -d "$wt" ] || continue
-        if [ -z "$branch" ]; then
-            log "keep  $wt (detached)"
-            continue
-        fi
         if is_dirty "$wt"; then
             log "keep  $wt (未コミットの変更あり、または git status 失敗)"
             continue
@@ -212,11 +219,30 @@ else
         case "$fetched" in
             *"|$common|"*) ;;
             *)
-                git -C "$wt" fetch --quiet --prune origin 2>/dev/null || log "WARN: fetch 失敗 $common"
+                git -C "$wt" fetch --quiet --prune --all 2>/dev/null || log "WARN: fetch 失敗 $common"
+                # clone 以外で作ったリポには origin/HEAD が無く、デフォルトブランチとの比較が全部「判定不能」になる。
+                git -C "$wt" symbolic-ref --quiet refs/remotes/origin/HEAD >/dev/null 2>&1 \
+                    || git -C "$wt" remote set-head origin --auto >/dev/null 2>&1 \
+                    || log "WARN: origin/HEAD を設定できない $common"
                 fetched="$fetched|$common|"
                 ;;
         esac
         def=$(git -C "$wt" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+        created=$(jq -r --arg p "$wt" '.result.worktrees[]? | select(.path == $p) | .createdAt // empty' <<<"$ps_json")
+
+        # detached はブランチが無く PR を引けない。$REPO の detached と同じく、固有のコミットを持たない
+        # 使い捨てだけを消す。作った直後のエージェントの worktree も同じ形なので、MIN_AGE_HOURS で見送る。
+        if [ -z "$branch" ]; then
+            if [ -z "$created" ] || [ "$created" -gt $((($(date +%s) - MIN_AGE_HOURS * 3600) * 1000)) ]; then
+                log "keep  $wt (detached: 作成から ${MIN_AGE_HOURS}h 以内、または作成日時が取れない)"
+            elif [ -n "$def" ] && git -C "$wt" merge-base --is-ancestor HEAD "$def" 2>/dev/null; then
+                log "STALE $wt (detached: $def に含まれる$(ignored_note "$wt"))"
+                orca_removable+=("$wt")
+            else
+                log "keep  $wt (detached: デフォルトブランチに無いコミットを持つ、または判定不能)"
+            fi
+            continue
+        fi
         if [ "$branch" = "${def#origin/}" ]; then
             log "keep  $wt ($branch: デフォルトブランチ)"
             continue
@@ -238,7 +264,6 @@ else
         num=$(jq -r 'max_by(.number) | .number' <<<"$prs")
         # 閉じた PR と同名のブランチで作り直した worktree (決まった名前のブランチ、`--pr` で切り直したもの) は、
         # 作業前だと clean・固有コミット無しで旧 PR の判定を通ってしまう。作成より後に閉じた PR だけを根拠にする。
-        created=$(jq -r --arg p "$wt" '.result.worktrees[]? | select(.path == $p) | .createdAt // empty' <<<"$ps_json")
         closed=$(jq -r 'max_by(.number) | .closedAt // empty | fromdateiso8601 * 1000 | floor' <<<"$prs")
         if [ -z "$created" ] || [ -z "$closed" ] || [ "$closed" -lt "$created" ]; then
             log "keep  $wt ($branch: PR #$num が worktree の作成より前に閉じている、または日時が取れない)"
@@ -248,7 +273,7 @@ else
             log "keep  $wt ($branch: PR #$num に無いコミットあり)"
             continue
         fi
-        log "STALE $wt ($branch: PR #$num が $(jq -r 'max_by(.number) | .state' <<<"$prs"))"
+        log "STALE $wt ($branch: PR #$num が $(jq -r 'max_by(.number) | .state' <<<"$prs")$(ignored_note "$wt"))"
         orca_removable+=("$wt")
     done < <(orca worktree list --json 2>/dev/null | jq -r --arg root "$ORCA_ROOT" '
         .result.worktrees[]?
@@ -308,8 +333,23 @@ done
 if docker info >/dev/null 2>&1; then
     docker ps -a --format '{{.Label "com.docker.compose.project"}}	{{.Label "com.docker.compose.project.working_dir"}}' \
         | sort -u | while IFS=$'\t' read -r proj dir; do
-        [ -n "$proj" ] || continue
+        [ -n "$proj" ] && [ -n "$dir" ] || continue
 
+        # 消した worktree のプロジェクトは名前を問わず、名前付きボリュームごと落とす
+        # (`docker volume prune` は匿名ボリュームしか消さず、worktree ごとに積み上がる)。
+        reason=""
+        for wt in ${removed[@]+"${removed[@]}"}; do
+            case "$dir" in "$wt"|"$wt"/*) reason="削除した worktree $wt に属する" ;; esac
+        done
+        if [ -n "$reason" ]; then
+            log "down  $proj — $reason (ボリュームも削除)"
+            run docker compose -p "$proj" down --remove-orphans --volumes || log "WARN: down 失敗 $proj"
+            continue
+        fi
+
+        # 孤児はどの worktree のものか確かめようがないので、名前か場所で app の worktree と分かるものだけ。
+        # ボリュームは残す (手で移動したディレクトリのデータを消さないため)。
+        [ ! -d "$dir" ] || continue
         matched=0
         for prefix in $PROJECT_PREFIXES; do
             case "$proj" in "$prefix"*) matched=1 ;; esac
@@ -318,16 +358,7 @@ if docker info >/dev/null 2>&1; then
         case "$dir" in "$ORCA_ROOT"/*) matched=1 ;; esac
         [ "$matched" = "1" ] || continue
 
-        reason=""
-        for wt in ${removed[@]+"${removed[@]}"}; do
-            case "$dir" in "$wt"|"$wt"/*) reason="削除した worktree $wt に属する" ;; esac
-        done
-        if [ -z "$reason" ] && [ ! -d "$dir" ]; then
-            reason="working_dir が既に無い (孤児)"
-        fi
-        [ -n "$reason" ] || continue
-
-        log "down  $proj — $reason"
+        log "down  $proj — working_dir が既に無い (孤児)"
         run docker compose -p "$proj" down --remove-orphans || log "WARN: down 失敗 $proj"
     done
 else

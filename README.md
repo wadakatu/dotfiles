@@ -386,12 +386,16 @@ Orca の worktree（`~/orca/workspaces/` 配下、全リポジトリ）は上の
 
 | 条件 | 意図 |
 |---|---|
-| ブランチ上にいる（detached ではない）、かつデフォルトブランチではない | PR で判定できないものは残す |
+| デフォルトブランチではない | 本体相当のブランチは対象外 |
 | `git status --porcelain` が空（失敗したら変更ありとみなす） | 未コミットの作業を消さない |
 | 中のエージェントが全員 `done`（`orca worktree ps`。取れない・打ち切られたら Orca の節は全部残す。削除の直前にも取り直す） | 作業中・入力待ちのものを消さない |
 | ブランチの PR があり、OPEN が 1 本も無い（MERGED / CLOSED） | PR が終わったものだけ消す |
 | PR が worktree の作成より後に閉じている | 同名ブランチの古い PR で、作り直したばかりの worktree を消さない |
 | PR に入っていないローカルコミットが無い（`git patch-id` で照合） | squash merge 後でも固有のコミットを消さない |
+
+detached の Orca worktree は PR を引けないので、PR の 3 行の代わりに「作成から 24 時間より古く、
+デフォルトブランチ（`origin/HEAD`）から辿れる」で判定する。`origin/HEAD` が無いリポは fetch の後に
+`git remote set-head origin --auto` で補う。fetch は fork 元の remote も含めて `--all` で取る。
 
 Orca のボードの Done 列（pr-dispatch がマージ済みのカードを移す）は判定に使わない。
 
@@ -399,11 +403,18 @@ Orca のボードの Done 列（pr-dispatch がマージ済みのカードを移
 workspace 状態を持っており `git worktree remove` を直接叩くと食い違うため、候補として
 ログに出すだけに留める（削除は `herdr worktree remove --workspace <ID> --force`）。
 
-`git worktree remove` はブランチを消さないので、コミットは常に残る。コンテナ側は
-`app-app-` / `app-worktree-` で始まる compose プロジェクトだけを対象にし、共有インフラ
-（mysql、traefik、grafana…）や他リポジトリ（`docker-*`、`studio-*`）、本体の `app` には
-触らない。落とすのは削除できた worktree のプロジェクトと、working_dir が既に消えている孤児だけ
-（削除を拒否された worktree の環境は壊さない）。判定は `tests/worktree-gc.sh` で CI が見張る。
+`git worktree remove` はブランチを消さないので、コミットは常に残る。ただし ignore された
+ファイル（`.env` など）は worktree と一緒に消える。判定には使わず、件数を STALE のログに出す。
+
+コンテナ側で落とすのは次の 2 種類だけ（削除を拒否された worktree の環境は壊さない）。
+
+- 削除できた worktree のプロジェクト: `com.docker.compose.project.working_dir` ラベルで突き合わせ、
+  名前を問わず `down --volumes` で名前付きボリュームごと消す。
+- working_dir が既に消えている孤児: どこの worktree か分からないので、`app-app-` / `app-worktree-`
+  で始まる名前か Orca 配下の working_dir のものだけ。ボリュームは残す。
+
+共有インフラ（mysql、traefik、grafana…）や他リポジトリ（`docker-*`、`studio-*`）、本体の `app` は
+working_dir が健在なので触らない。判定は `tests/worktree-gc.sh` で CI が見張る。
 
 ディスク回収は dangling image / volume と 168 時間より古い build cache のみ。
 `docker image prune -a` を毎日回すと `api-base` が消えて `make build` のたびに
