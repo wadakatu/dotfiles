@@ -163,8 +163,10 @@ DRY_RUN=1 agent-gc stop …  判定し直して、止める対象を表示する
 
 1. 材料を取り直して judge に通す。候補でなければ `skip <pid>: <理由>` とする。`--listed` のときは、鍵が listed.tsv と違えば `skip <pid>: changed since list` とする。
 2. `ORCA_TERMINAL_HANDLE` が `orca terminal list` にあり、その `agentIdentity` がこのエージェント（claude / codex）であることを確かめる。そうでなければ skip する。
-3. `orca terminal read` の末尾から、入力欄が空であることを確かめる。書きかけの文字があるところに `/exit` を送ると、それが続けて送信されてしまうため。
-   - Claude：最後の `❯` で始まる行が、`❯` だけである。
+3. `orca terminal read --screen` の末尾から、入力欄が空であることを確かめる。書きかけの文字があるところに `/exit` を送ると、それが続けて送信されてしまうため。
+   - `--screen` を付けないと、描画された画面ではなく出力の履歴が返る。そうすると、後から差分で描かれた書きかけを見落とす。応答の `source` が `screen` でなければ、止めない。
+   - `draft`（Orca の入力欄に書きかけの文字）があるときも、止めない。
+   - Claude：最後の `❯` の行が `❯` だけで、その次の行が入力欄の下の罫線である。複数行の書きかけは、2 行目以降に出るため。
    - Codex：最後の `› ` で始まる行が、`› Ask Codex to do anything` である。
      - 実測では、空の入力欄にこの placeholder が出ていた。
      - 書きかけの文字と placeholder は文字だけでは見分けられないので、この文言のときだけを空とみなす。

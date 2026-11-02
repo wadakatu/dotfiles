@@ -33,7 +33,7 @@ notify() {
 judge() {
     jq -c --argjson idle_h "$IDLE_H" --argjson warn_h "$IDLE_WARN_H" --arg exclude "$EXCLUDE_RE" '
         (if (.pressure // 0) >= 2 then $warn_h else $idle_h end) as $th
-        | ([.orca.sub_states[]? | select(. != "done" and . != "idle")] | first) as $sub
+        | [.orca.sub_states[]? | select(. != "done" and . != "idle")] as $sub
         | .reason = (
             if .readable != true then "unreadable"
             elif .status != "idle" then "status=\(.status)"
@@ -41,7 +41,7 @@ judge() {
             elif .orca.ok != true then "orca-unreachable"
             elif .orca.found != true then "not-in-orca"
             elif .orca.state != "done" then "orca \(.orca.state)"
-            elif $sub != null then "orca-sub \($sub)"
+            elif ($sub | length) > 0 then "orca-sub \($sub[0])"
             elif (.orca.workspace_status | type) != "string" then "orca-incomplete"
             elif .orca.workspace_status == "needs-decision" then "needs-decision"
             elif $exclude != "" and ((.path // "") | test($exclude)) then "excluded"
@@ -202,10 +202,16 @@ stop() {
         if [ -n "$reason" ]; then log "skip $agent pid=$pid: $reason"; continue; fi
         if [ -n "$want" ] && [ "$want" != "$(jq -r .key <<<"$row")" ]; then log "skip $agent pid=$pid: changed since list"; continue; fi
         term=$(jq -r .term <<<"$row")
-        if [ -z "$term" ] || [ "$(jq -r --arg h "$term" '.result.terminals[]? | select(.handle == $h) | .agentIdentity' <<<"$terms")" != "$agent" ]; then
+        # agentIdentity は時々 null で返る (実測)。別のエージェントと出たときだけ止めない。入力欄は画面で確かめる。
+        if [ -z "$term" ] || ! jq -e --arg h "$term" --arg a "$agent" \
+            'any(.result.terminals[]?; .handle == $h and (.agentIdentity == null or .agentIdentity == $a))' <<<"$terms" >/dev/null 2>&1; then
             log "skip $agent pid=$pid: Orca の端末が見つからない"; continue
         fi
-        if ! orca terminal read --terminal "$term" --json 2>/dev/null | jq -r '.result.terminal.tail[]?' | prompt_empty "$agent"; then
+        # 既定の read は出力の履歴なので、差分で描いた書きかけを見落とす。今の描画 (--screen) で見る。
+        # draft は Orca の入力欄に書きかけの文字。あれば使うつもりなので止めない。
+        if ! orca terminal read --terminal "$term" --screen --json 2>/dev/null |
+            jq -r '.result.terminal | if .source == "screen" and ((.draft // "") == "") then .tail[] else empty end' |
+            prompt_empty "$agent"; then
             log "skip $agent pid=$pid: input not empty"; continue
         fi
         if [ "${DRY_RUN:-0}" = 1 ]; then echo "would stop $agent pid=$pid $(jq -r .path <<<"$row")"; continue; fi
