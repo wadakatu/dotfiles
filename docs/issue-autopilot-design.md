@@ -64,7 +64,7 @@ orca agent launch --agent claude --worktree "id:<worktreeId>" --model opus --eff
 ```
 
 - `path:~/…` は展開されず `repo_not_found`（`orca repo show` で確認）。`--branch` が無いと接頭辞 `wadakatu/` が付く（`orca worktree create --help` 行 49）。取られた名前には数字の接尾辞が付くので、戻り値の実ブランチ名と worktree id を保存する。
-- `--agent` は付けない。repo の `setupAgentStartupPolicy: start-immediately` のため、付けると setup 完了前に動く（`orca repo show --json` の `hookSettings`）。
+- `--agent` は付けない。repo の `setupAgentStartupPolicy: start-immediately` のため、付けると setup 完了前に動く（`orca repo show --json` の `.result.repo.hookSettings`）。
 - 起動の返事が失われたら、エラーの `--retry-launch <operationId>` 付きで同じコマンドを再発行し、新規起動として再試行しない（`worktree create --help` 行 53、`agent launch --help` 行 27）。
 - `--surface chat` は開けないと terminal に fallback する（`agent launch --help` 行 23）。`result.launch.outcome.kind` と `handle` を保存する（`worktree create --help` 行 54）。
 
@@ -205,7 +205,7 @@ PR は `gh pr create --draft` で終わり。本文は `/pr` skill の形（`age
 ## 7. 失敗時と観測
 
 **setup 完了待ち（worker の最初の手順）**: 完了の印は setup script 自身が最後に出す `Orca setup done:` の行（`orca repo show --json` の `hookSettings.scripts.setup`。`set -euo pipefail` なので全工程成功時だけ出る）。`orca terminal list --worktree current --json` で Setup タブを見つけ、出力末尾にこの行が出るまで 60 秒おきに最長 20 分待つ。`openapi/bundled/` の存在は使わない（`bundle:api` は 5 本を順に作る、`~/www/dev/app/openapi/package.json:13`）。
-再試行: 印が無く、Setup タブの `lastOutputAt` が 5 分以上動かない（推測: 終了の代わり）ときだけ 1 回、**同じ script をそのまま** 流す: `orca repo show --repo "path:$HOME/www/dev/app" --json | jq -r '.result.hookSettings.scripts.setup' | ORCA_WORKTREE_PATH="$PWD" bash`。出力が動いている間は重ねない。それでも印が出なければ `fail <N> setup` と末尾の行を note に。
+再試行: 印が無く、Setup タブの `lastOutputAt` が 5 分以上動かない（推測: 終了の代わり）ときだけ 1 回、**同じ script をそのまま** 流す: `orca repo show --repo "path:$HOME/www/dev/app" --json | jq -r '.result.repo.hookSettings.scripts.setup' | ORCA_WORKTREE_PATH="$PWD" bash`。出力が動いている間は重ねない。それでも印が出なければ `fail <N> setup` と末尾の行を note に。
 
 **sweep（`candidates` の中、Orca の情報だけ、ロック内）**:
 
