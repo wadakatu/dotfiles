@@ -367,7 +367,8 @@ redis の 3 コンテナと bridge network を持ち続け、docker のサブネ
 | 条件 | 意図 |
 |---|---|
 | main worktree ではない | 本体は対象外 |
-| `git status --porcelain` が空 | 未コミットの作業を消さない |
+| `git status --porcelain` が空（失敗したら変更ありとみなす） | 未コミットの作業を消さない |
+| cwd がその中にあるプロセスが居ない（`lsof`。取れなければこの節は全部残す） | サブディレクトリで作業中のシェル・エージェントを消さない |
 | ディレクトリの mtime が 24 時間より古い | 稼働中のエージェントが作った直後のものを除外 |
 | upstream が remote から消えている（= PR が merge / close 済み）<br>または detached かつ `origin/dev` から辿れる | 固有のコミットを持たないものだけ消す |
 
@@ -377,10 +378,11 @@ Orca の worktree（`~/orca/workspaces/` 配下、全リポジトリ）は上の
 | 条件 | 意図 |
 |---|---|
 | ブランチ上にいる（detached ではない）、かつデフォルトブランチではない | PR で判定できないものは残す |
-| `git status --porcelain` が空 | 未コミットの作業を消さない |
-| 中のエージェントが全員 `done`（`orca worktree ps`） | 作業中・入力待ちのものを消さない |
+| `git status --porcelain` が空（失敗したら変更ありとみなす） | 未コミットの作業を消さない |
+| 中のエージェントが全員 `done`（`orca worktree ps`。取れない・打ち切られたら Orca の節は全部残す。削除の直前にも取り直す） | 作業中・入力待ちのものを消さない |
 | ブランチの PR があり、OPEN が 1 本も無い（MERGED / CLOSED） | PR が終わったものだけ消す |
-| PR に入っていないローカルコミットが無い（件名で照合） | squash merge 後でも固有のコミットを消さない |
+| PR が worktree の作成より後に閉じている | 同名ブランチの古い PR で、作り直したばかりの worktree を消さない |
+| PR に入っていないローカルコミットが無い（`git patch-id` で照合） | squash merge 後でも固有のコミットを消さない |
 
 Orca のボードの Done 列（pr-dispatch がマージ済みのカードを移す）は判定に使わない。
 
@@ -391,7 +393,8 @@ workspace 状態を持っており `git worktree remove` を直接叩くと食�
 `git worktree remove` はブランチを消さないので、コミットは常に残る。コンテナ側は
 `app-app-` / `app-worktree-` で始まる compose プロジェクトだけを対象にし、共有インフラ
 （mysql、traefik、grafana…）や他リポジトリ（`docker-*`、`studio-*`）、本体の `app` には
-触らない。working_dir が既に消えている孤児プロジェクトも同時に落とす。
+触らない。落とすのは削除できた worktree のプロジェクトと、working_dir が既に消えている孤児だけ
+（削除を拒否された worktree の環境は壊さない）。判定は `tests/worktree-gc.sh` で CI が見張る。
 
 ディスク回収は dangling image / volume と 168 時間より古い build cache のみ。
 `docker image prune -a` を毎日回すと `api-base` が消えて `make build` のたびに

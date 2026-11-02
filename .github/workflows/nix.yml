@@ -34,6 +34,9 @@ jobs:
       # 無人でメモリを消す・PR を出すスクリプトなので、ガードと公開前検査を CI で見張る。
       - name: memory-maintenance script
         run: bash tests/memory-maintenance.sh
+      # 無人で worktree を消すスクリプトなので、作業中のものを消さないことを CI で見張る。
+      - name: worktree-gc script
+        run: bash tests/worktree-gc.sh
 
   # ── 現 Mac と同系統の macOS 26 / arm64 で実ビルド ─────────
   build-darwin:
