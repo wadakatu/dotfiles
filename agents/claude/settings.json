@@ -64,6 +64,10 @@
   "permissions": {
     "defaultMode": "auto",
 
+    "additionalDirectories": [
+      "~/.claude-shared-memory"
+    ],
+
     "deny": [
       "Read(//**/.env)",
       "Read(//**/.env.local)",

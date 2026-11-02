@@ -32,6 +32,10 @@ in
     // {
       ".claude/agents".source =
         config.lib.file.mkOutOfStoreSymlink "${dotfilesDir}/agents/claude/agents";
+      # user スコープの rules。毎セッション読まれる。auto memory からのグローバル昇格の受け皿
+      # (home/scripts/memory-maintenance.sh が PR にする)。rules を足しても rebuild は要らない。
+      ".claude/rules".source =
+        config.lib.file.mkOutOfStoreSymlink "${dotfilesDir}/agents/claude/rules";
       # Codex のグローバル指示。Codex が AGENTS.md を書くのは他エージェントからの取り込み
       # (external-agent-migration の import_agents_md) だけで、空でないファイルには書かない。
       ".codex/AGENTS.md".source =

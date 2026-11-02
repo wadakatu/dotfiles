@@ -19,6 +19,7 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 | herdr の設定 | `home/config/herdr/config.toml` を Home Manager が out-of-store symlink（本体は Nix 管理外） |
 | work-api の worktree / コンテナ掃除 | Home Manager `launchd.agents`（1 時間ごと、`home/scripts/worktree-gc.sh`） |
 | 再起動で止まった Claude の再開、Needs decision で会話が開いていないカードの開き直し（同じセッションには 1 回だけ。人が閉じたタブは開き直さない） | Home Manager `launchd.agents`（ログイン時と 3 分ごと、`home/scripts/agent-resume.sh`）＋ SessionStart hook `agents/claude/hooks/session-marker.sh` |
+| Claude Code の auto memory の整理（重複・陳腐化・共有への移動、昇格は 1 件ずつ PR） | Home Manager `launchd.agents`（毎日 04:30、`home/scripts/memory-maintenance.sh`）。設計は `docs/memory-maintenance-design.md` |
 | CLI パッケージ | nixpkgs `home.packages` |
 | GUI アプリ | nix-darwin `homebrew.casks` |
 | Dock / Finder / キーボード / スクリーンショット | nix-darwin `system.defaults` |
@@ -61,11 +62,13 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 │   ├── worktree-gc.nix
 │   ├── pr-dispatch.nix
 │   ├── agent-resume.nix
+│   ├── memory-maintenance.nix
 │   ├── zsh.nix
 │   ├── scripts/
 │   │   ├── worktree-gc.sh
 │   │   ├── pr-dispatch.sh
-│   │   └── agent-resume.sh
+│   │   ├── agent-resume.sh
+│   │   └── memory-maintenance.sh  (+ -prompt.md, -schema.json)
 │   └── config/
 │       ├── ghostty/config
 │       ├── herdr/config.toml
@@ -404,6 +407,39 @@ launchctl kickstart -k gui/$(id -u)/org.nix-community.home.worktree-gc  # 即時
 
 閾値や除外を変えるだけなら `darwin-rebuild` は不要（plist はリポジトリの絶対パスを
 直接叩いているため）。実行時刻を変えるときだけ `worktree-gc.nix` を直して rebuild する。
+
+## auto memory の自動整理
+
+Claude Code の auto memory（`~/.claude/projects/<p>/memory/`）と、全リポ共通の共有メモリ
+（`~/.claude-shared-memory/`、`agents/claude/CLAUDE.md` が `@import` する）を、`home/memory-maintenance.nix`
+の LaunchAgent が毎日 04:30 に `home/scripts/memory-maintenance.sh` で整理する。設計と判断の経緯は
+`docs/memory-maintenance-design.md`。
+
+- 各 memory dir を git で snapshot し、前回以降に変わったファイルだけを `claude -p --restricted` に整理させる。
+  変化が無ければ AI は起動しない。AI ができるのは作業領域の読み取りと、memory の写しの編集だけ。
+- 自動で行うのは、説明の短縮・重複の統合・根拠のある事実の更新・根拠のある陳腐化の削除・共有への移動。
+  feedback 型は単独では消さない。保守の間に対話セッションが書き換えたファイルは写さず翌日に回す。
+- グローバル（dotfiles）やリポの rules への昇格は、1 日 5 件まで 1 件ずつ PR にする（Orca に worktree を作るので、
+  その後の CI・レビュー対応は pr-dispatch が行う）。dotfiles は公開リポなので、push の前に社内情報を検査する。
+- PR がマージされて昇格先に見えたら、元のメモリを縮小・削除し、`[[name]]` のリンクを書き換える。
+- 全件の見直しが 28 日以上前の dir を、1 日 1 つ全件見直す。
+
+```bash
+DRY_RUN=1 ~/www/personal/dotfiles/home/scripts/memory-maintenance.sh    # 何も書かず、対象と lint だけ出す
+~/www/personal/dotfiles/home/scripts/memory-maintenance.sh full <p> [--seed <file>]  # 1 つの dir を今すぐ全件見直す
+tail -50 ~/Library/Logs/memory-maintenance.log
+launchctl kickstart -k gui/$(id -u)/org.nix-community.home.memory-maintenance   # 即時実行
+```
+
+状態は `~/Library/Application Support/memory-maintenance/`（`cursor/`、`full-done/`、`proposals/<id>.json`、
+`runs/`、`needs-human.md`）。
+
+戻し方:
+
+- 保守の変更は memory dir ごとに `maintenance: ...` のコミットになっている。
+  `git -C <memory dir> log --oneline` で探し、`git -C <memory dir> revert --no-edit <sha>` で戻す。
+- 共有への移動は、共有側と元の dir の 2 つのコミットになっている。元側だけ戻すと重複が残るだけで、内容は失われない。
+- 提案を取り下げるには `proposals/<id>.json` を消す。
 
 ## シークレットと移行対象外データ
 
