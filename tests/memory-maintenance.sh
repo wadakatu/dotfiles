@@ -269,8 +269,13 @@ prop() { # prop <name> <repo> <path> <content> [confidence] [after_merge]
     prop gamma "$FAKE_APP" .claude/rules/app.md $'- app の規則\n' 中
     printf ']}\n'
 } >"$FAKE/result.json"
-echo 'cp -R conventions "$FAKE/conventions"' >"$FAKE/claude.sh"
+mkdir -p "$FAKE_APP/.github"
+printf '/.github export-ignore\n' >"$FAKE_APP/.gitattributes"
+printf '## Summary\n' >"$FAKE_APP/.github/PULL_REQUEST_TEMPLATE.md"
+git -C "$FAKE_APP" add -A && git -C "$FAKE_APP" commit -q -m "add template" && git -C "$FAKE_APP" push -q origin HEAD:main
+printf '%s\n' 'cp -R conventions "$FAKE/conventions"' 'cp "repos/$P/.github/PULL_REQUEST_TEMPLATE.md" "$FAKE/" || true' >"$FAKE/claude.sh"
 run_mm MAX_PR_PER_DAY=1
+check "export-ignore で落ちる PR テンプレートも写しに入る" test -f "$FAKE/PULL_REQUEST_TEMPLATE.md"
 check "昇格先のリポの PR とコミットを書き方の見本として渡す" grep -q 'Fake merged title' "$FAKE/conventions/$P.md"
 check "見本にコミットの件名が入る" grep -qx -- '- init' "$FAKE/conventions/$P.md"
 check "dotfiles の見本も渡す" test -f "$FAKE/conventions/$(printf '%s' "$FAKE_DOT" | sed 's/[^A-Za-z0-9]/-/g').md"

@@ -163,6 +163,16 @@ export_repo() { # export_repo <p> <repo>: origin の既定ブランチを $WORK/
     fi
     mkdir -p "$WORK/repos/$p"
     git -C "$repo" archive --format=tar "$commit" | tar -x -C "$WORK/repos/$p"
+    # export-ignore (Laravel の雛形にある /.github など) で落ちたファイルを blob から足す。PR テンプレートや CI の定義も根拠に要る。
+    # git --attr-source では archive の export-ignore を外せない (archive は対象の tree の .gitattributes を読む)
+    git -C "$repo" ls-tree -r -z "$commit" | while IFS= read -r -d '' entry; do
+        meta=${entry%%$'\t'*}
+        f="$WORK/repos/$p/${entry#*$'\t'}"
+        rest=${meta#* }
+        if [ "${meta%% *}" = 120000 ] || [ "${rest%% *}" != blob ] || [ -e "$f" ]; then continue; fi
+        mkdir -p "$(dirname "$f")"
+        git -C "$repo" cat-file blob "${rest#* }" >"$f"
+    done
     printf '%s\t%s\t%s\t%s\n' "$p" "$repo" "$ref" "$commit" >>"$META/exports.tsv"
     conventions "$p" "$repo" "$commit"
 }

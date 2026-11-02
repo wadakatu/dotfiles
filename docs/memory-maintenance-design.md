@@ -91,7 +91,7 @@ memory dir とリポの対応: Claude Code は memory dir の `<p>` を git リ�
 | パス | 中身 | AI |
 |---|---|---|
 | `mem/<p>/` | 各 memory dir の worktree（`git worktree add --detach <path> S1`）。オンボード済みの全 dir（full では対象 dir）と `mem/shared/` | 編集可 |
-| `repos/<p>/` | 対応リポの `git archive origin/<default>` を展開したもの | 読むだけ |
+| `repos/<p>/` | 対応リポの `git archive origin/<default>` を展開したもの。export-ignore で落ちるファイル（`/.github` など）は blob から足す | 読むだけ |
 | `refs.json` | 対象ファイルに出る issue / PR の状態 | 読むだけ |
 | `conventions/<p>.md` | export したリポの最近のマージ済み PR 6 件（本文は 40 行まで）とコミットの件名 10 件。昇格の PR の書き方の見本 | 読むだけ |
 | `index/<p>.md` | 各 live `MEMORY.md` の写し | 読むだけ |
