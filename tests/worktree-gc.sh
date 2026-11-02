@@ -21,12 +21,19 @@ check() { # check <説明> <コマンド...>
 logged() { grep -qF -- "$1" "$T/log"; }
 exists() { [ -d "$1" ]; }
 gone() { [ ! -d "$1" ]; }
+not_called() { ! grep -q -- "-p $1 " "$T/docker-calls"; }
 
 # ---- 偽のコマンド ----
 mkdir -p "$base/bin"
+# docker は docker-ps.tsv (project<TAB>working_dir) があるときだけ動いているふりをし、compose の呼び出しを記録する。
 cat >"$base/bin/docker" <<'EOF'
 #!/usr/bin/env bash
-exit 1
+[ -f "$FAKE/docker-ps.tsv" ] || exit 1
+case "$1" in
+    ps) cat "$FAKE/docker-ps.tsv" ;;
+    compose) echo "$*" >>"$FAKE/docker-calls" ;;
+esac
+exit 0
 EOF
 cat >"$base/bin/gh" <<'EOF'
 #!/usr/bin/env bash
@@ -166,6 +173,73 @@ ps_json "$T/orca/wt" "$CREATED" working >"$T/ps.2.json"
 run_gc
 check "orca rm が呼ばれない" test ! -e "$T/rm-calls"
 check "理由がログに出る" logged "削除直前にエージェントが working"
+
+# ---- compose: 消した worktree のものは名前を問わずボリュームごと、孤児は名前で絞ってボリュームを残す ----
+setup compose
+merged_repo_wt "$T/repo-wt" feat-a
+mkdir -p "$T/infra"
+printf '%s\t%s\n' custom-name "$T/repo-wt/docker" app-app-old "$T/gone" other-old "$T/gone2" mysql "$T/infra" >"$T/docker-ps.tsv"
+run_gc
+check "消した worktree のプロジェクトは --volumes で落とす" grep -qxF "compose -p custom-name down --remove-orphans --volumes" "$T/docker-calls"
+check "接頭辞の合う孤児はボリュームを残して落とす" grep -qxF "compose -p app-app-old down --remove-orphans" "$T/docker-calls"
+check "接頭辞の合わない孤児は触らない" not_called other-old
+check "working_dir が健在のものは触らない" not_called mysql
+
+# ---- $REPO: upstream が origin 以外の remote でも、消えたら拾う ----
+setup repo-fork-upstream
+git init -q --bare -b main "$T/upstream.git"
+git -C "$T/repo" remote add upstream "$T/upstream.git"
+git -C "$T/repo" worktree add -q -b feat-u "$T/repo-wt" origin/main
+git -C "$T/repo-wt" push -q -u upstream feat-u 2>/dev/null
+git -C "$T/upstream.git" branch -q -D feat-u
+touch -t 202601010000 "$T/repo-wt"
+run_gc
+check "削除される" gone "$T/repo-wt"
+
+# ---- $REPO: ignore されたファイルの件数をログに出す ----
+setup repo-ignored
+merged_repo_wt "$T/repo-wt" feat-a
+echo .env >>"$T/repo/.git/info/exclude"
+touch "$T/repo-wt/.env"
+touch -t 202601010000 "$T/repo-wt"
+run_gc
+check "削除される" gone "$T/repo-wt"
+check "件数がログに出る" logged "ignored 1 件も消える"
+
+# ---- Orca: origin/HEAD が無くても、デフォルトブランチを補って判定する ----
+setup orca-no-origin-head
+orca_wt "$T/orca/wt" feat-o "$AFTER" "$CREATED"
+# git 2.48 以降の fetch は origin/HEAD を自動で作る (remote.<name>.followRemoteHEAD=create)。それより古い git を再現する。
+git -C "$T/repo" config remote.origin.followRemoteHEAD never
+git -C "$T/repo" remote set-head origin --delete
+run_gc
+check "orca rm が呼ばれる" grep -qxF "$T/orca/wt" "$T/rm-calls"
+
+# ---- Orca: detached で固有コミットが無く、作成から時間が経っていれば消す ----
+setup orca-detached
+git -C "$T/repo" worktree add -q --detach "$T/orca/wt" origin/main
+jq -n --arg p "$T/orca/wt" '{result: {worktrees: [{path: $p, branch: null, isMainWorktree: false}]}}' >"$T/list.json"
+ps_json "$T/orca/wt" "$CREATED" done >"$T/ps.json"
+run_gc
+check "orca rm が呼ばれる" grep -qxF "$T/orca/wt" "$T/rm-calls"
+
+# ---- Orca: detached でもデフォルトブランチに無いコミットを持てば残す ----
+setup orca-detached-commit
+git -C "$T/repo" worktree add -q --detach "$T/orca/wt" origin/main
+git -C "$T/orca/wt" commit -q --allow-empty -m local
+jq -n --arg p "$T/orca/wt" '{result: {worktrees: [{path: $p, branch: null, isMainWorktree: false}]}}' >"$T/list.json"
+ps_json "$T/orca/wt" "$CREATED" done >"$T/ps.json"
+run_gc
+check "orca rm が呼ばれない" test ! -e "$T/rm-calls"
+check "理由がログに出る" logged "detached: デフォルトブランチに無いコミット"
+
+# ---- Orca: detached でも作ったばかりなら残す ----
+setup orca-detached-new
+git -C "$T/repo" worktree add -q --detach "$T/orca/wt" origin/main
+jq -n --arg p "$T/orca/wt" '{result: {worktrees: [{path: $p, branch: null, isMainWorktree: false}]}}' >"$T/list.json"
+ps_json "$T/orca/wt" "$(($(date +%s) * 1000))" done >"$T/ps.json"
+run_gc
+check "orca rm が呼ばれない" test ! -e "$T/rm-calls"
 
 for f in "$base"/*/log; do grep -q '^exit=0$' "$f" || { echo "FAIL [$(basename "$(dirname "$f")")] exit が 0 でない"; fail=1; }; done
 [ "$fail" = 0 ] && echo "ok: worktree-gc"
