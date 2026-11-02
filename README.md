@@ -38,7 +38,7 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 ├── flake.lock
 ├── agents/
 │   ├── skills/           # Claude Code と Codex の両方: commit pr next fix-ci sync-pr
-│   │                     # close-issue verify-no-regression defer-to-issue research memory-triage
+│   │                     # close-issue verify-no-regression defer-to-issue research memory-triage root-cause
 │   ├── claude/
 │   │   ├── settings.json # 権限・フック・ステータスライン
 │   │   ├── CLAUDE.md     # グローバル指示

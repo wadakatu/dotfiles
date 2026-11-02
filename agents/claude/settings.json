@@ -8,7 +8,7 @@
 
   "enabledPlugins": {
     "frontend-design@claude-plugins-official": false,
-    "superpowers@claude-plugins-official": true,
+    "superpowers@claude-plugins-official": false,
     "chrome-devtools-mcp@claude-plugins-official": true,
     "ponytail@ponytail": true,
     "web-quality-skills@addy-web-quality-skills": false,
