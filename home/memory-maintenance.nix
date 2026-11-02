@@ -1,4 +1,20 @@
-{ config, dotfilesDir, ... }: {
+{ config, pkgs, dotfilesDir, ... }:
+let
+  # 作業ツリーのスクリプトは直接叩かない。dotfiles の checkout でブランチ作業をしていると、
+  # レビュー前のスクリプトが無人で動いてしまう。毎回 origin/main の home/scripts を取り出し、その写しを実行する。
+  # (prompt と schema はスクリプトと同じディレクトリから読まれるので、ディレクトリごと取り出す)
+  launcher = pkgs.writeShellScript "memory-maintenance-launcher" ''
+    set -euo pipefail
+    dir="$HOME/Library/Caches/memory-maintenance-script"
+    git -C "$DOTFILES_DIR" fetch --quiet origin main ||
+      echo "WARN: dotfiles の fetch に失敗。手元の origin/main で続ける" >&2
+    rm -rf "$dir"
+    mkdir -p "$dir"
+    git -C "$DOTFILES_DIR" archive origin/main home/scripts | tar -x -C "$dir"
+    exec /bin/bash "$dir/home/scripts/memory-maintenance.sh" "$@"
+  '';
+in
+{
   # Claude Code の auto memory (~/.claude/projects/*/memory) と共有メモリ (~/.claude-shared-memory) を
   # 毎日整理する LaunchAgent。設計は docs/memory-maintenance-design.md。
   #
@@ -8,11 +24,8 @@
   launchd.agents.memory-maintenance = {
     enable = true;
     config = {
-      # スクリプト実体はリポジトリの絶対パスを直接叩く (worktree-gc.nix と同じ判断)。
-      ProgramArguments = [
-        "/bin/bash"
-        "${dotfilesDir}/home/scripts/memory-maintenance.sh"
-      ];
+      # スクリプトの変更はマージだけで次の実行から効く (pull も rebuild も要らない)。
+      ProgramArguments = [ "${launcher}" ];
 
       # 毎日 04:30。対話セッションと重なりにくい時間にする (重なっても、保守の間に変わったファイルは写さずに翌日へ回す)。
       # スリープ中に跨いだ分は起床後にまとめて 1 回実行される (launchd の仕様)。

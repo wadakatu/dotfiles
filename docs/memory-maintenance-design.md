@@ -208,7 +208,7 @@ PR はスクリプトが決まった手順で作る。エージェントには�
 ## 5. ファイル配置と launchd
 
 新規
-- `home/memory-maintenance.nix` — LaunchAgent。`StartCalendarInterval = [{ Hour = 4; Minute = 30; }]`、ログは `~/Library/Logs/memory-maintenance.log`、PATH は兄弟と同じものに `~/.local/bin`（`claude`）を足す。
+- `home/memory-maintenance.nix` — LaunchAgent。`StartCalendarInterval = [{ Hour = 4; Minute = 30; }]`、ログは `~/Library/Logs/memory-maintenance.log`、PATH は兄弟と同じものに `~/.local/bin`（`claude`）を足す。作業ツリーのスクリプトは直接叩かず、起動スクリプト（nix store に置く）が毎回 `origin/main` を fetch して `home/scripts` を `~/Library/Caches/memory-maintenance-script/` に取り出し、その写しを実行する。checkout でブランチ作業をしていても、無人で動くのはマージ済みのスクリプトだけになる。
 - `home/scripts/memory-maintenance.sh` — 本体。サブコマンド `daily`（既定）/ `full <p> [--seed <file>]`。`DRY_RUN=1` は何も書かず AI も起動せず、対象と lint だけを出す。`VERBOSE=1`。共有メモリの dir が無ければ作る。
 - `home/scripts/memory-maintenance-prompt.md`、`home/scripts/memory-maintenance-schema.json`。
 - `agents/claude/rules/.keep` — グローバル昇格の受け皿。`home/agent-skills.nix` で `~/.claude/rules` へ symlink する（user スコープの rules は毎セッション読まれる。memory ドキュメント）。

@@ -415,6 +415,8 @@ Claude Code の auto memory（`~/.claude/projects/<p>/memory/`）と、全リポ
 の LaunchAgent が毎日 04:30 に `home/scripts/memory-maintenance.sh` で整理する。設計と判断の経緯は
 `docs/memory-maintenance-design.md`。
 
+- LaunchAgent が動かすのは、毎回 `origin/main` から取り出したスクリプトの写し。手元の checkout のブランチには左右されず、
+  スクリプトの変更はマージすれば次の実行から効く。下の手動実行は作業ツリーのスクリプトを動かす。
 - 各 memory dir を git で snapshot し、前回以降に変わったファイルだけを `claude -p --restricted` に整理させる。
   変化が無ければ AI は起動しない。AI ができるのは作業領域の読み取りと、memory の写しの編集だけ。
 - 自動で行うのは、説明の短縮・重複の統合・根拠のある事実の更新・根拠のある陳腐化の削除・共有への移動。
