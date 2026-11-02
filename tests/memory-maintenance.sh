@@ -32,7 +32,8 @@ case "$1 $2" in
     "repo view") case "$3" in me/*) echo PUBLIC ;; *) echo PRIVATE ;; esac ;;
     "pr create") echo "https://github.com/fake/pull/$(grep -c '^pr create' "$FAKE/gh-calls")" ;;
     "pr view") cat "$FAKE/pr-view" ;;
-    "pr list") # $FAKE/pr-list は "<ブランチ> <URL>" の行
+    "pr list") # --state merged は書き方の見本。それ以外は $FAKE/pr-list の "<ブランチ> <URL>" の行
+        case " $* " in *" --state merged "*) echo '[{"title": "Fake merged title", "body": null}]'; exit 0 ;; esac
         head=""; while [ $# -gt 0 ]; do [ "$1" = --head ] && head=$2; shift; done
         awk -v b="$head" '$1 == b { print $2 }' "$FAKE/pr-list" 2>/dev/null || true ;;
     api\ repos/*) echo '{"state": "closed", "title": "t", "closed_at": "2026-01-01T00:00:00Z"}' ;;
@@ -268,7 +269,16 @@ prop() { # prop <name> <repo> <path> <content> [confidence] [after_merge]
     prop gamma "$FAKE_APP" .claude/rules/app.md $'- app の規則\n' 中
     printf ']}\n'
 } >"$FAKE/result.json"
+mkdir -p "$FAKE_APP/.github"
+printf '/.github export-ignore\n' >"$FAKE_APP/.gitattributes"
+printf '## Summary\n' >"$FAKE_APP/.github/PULL_REQUEST_TEMPLATE.md"
+git -C "$FAKE_APP" add -A && git -C "$FAKE_APP" commit -q -m "add template" && git -C "$FAKE_APP" push -q origin HEAD:main
+printf '%s\n' 'cp -R conventions "$FAKE/conventions"' 'cp "repos/$P/.github/PULL_REQUEST_TEMPLATE.md" "$FAKE/" || true' >"$FAKE/claude.sh"
 run_mm MAX_PR_PER_DAY=1
+check "export-ignore で落ちる PR テンプレートも写しに入る" test -f "$FAKE/PULL_REQUEST_TEMPLATE.md"
+check "昇格先のリポの PR とコミットを書き方の見本として渡す" grep -q 'Fake merged title' "$FAKE/conventions/$P.md"
+check "見本にコミットの件名が入る" grep -qx -- '- init' "$FAKE/conventions/$P.md"
+check "dotfiles の見本も渡す" test -f "$FAKE/conventions/$(printf '%s' "$FAKE_DOT" | sed 's/[^A-Za-z0-9]/-/g').md"
 check "許可リスト外の target_path・不正な after_merge・topic でない昇格元は捨てる" test "$(ls "$T/state/proposals" | wc -l | tr -d ' ')" = 4
 check "公開前検査に当たれば保留" test "$(prop_status beta)" = held
 check "target_path に社内の語があれば保留" test "$(prop_status zeta)" = held
