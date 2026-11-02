@@ -164,6 +164,24 @@ export_repo() { # export_repo <p> <repo>: origin の既定ブランチを $WORK/
     mkdir -p "$WORK/repos/$p"
     git -C "$repo" archive --format=tar "$commit" | tar -x -C "$WORK/repos/$p"
     printf '%s\t%s\t%s\t%s\n' "$p" "$repo" "$ref" "$commit" >>"$META/exports.tsv"
+    conventions "$p" "$repo" "$commit"
+}
+
+# 昇格の PR を昇格先のリポの書き方に揃えるための見本。無いと AI は dotfiles の写しにある pr skill を規約と取り違える。
+conventions() { # conventions <p> <repo> <commit>: 最近のマージ済み PR とコミットの件名を $WORK/conventions/<p>.md に書く
+    local slug prs
+    slug=$(slug_of "$2")
+    mkdir -p "$WORK/conventions"
+    {
+        printf '# %s の最近の書き方\n\n## マージ済み PR (新しい順)\n\n' "${slug:-$2}"
+        if [ -n "$slug" ] && prs=$(gh pr list -R "$slug" --state merged -L 6 --json title,body 2>/dev/null); then
+            printf '%s' "$prs" | jq -r '.[] | "### \(.title)\n\n\((.body // "") | split("\n") | .[:40] | join("\n"))\n"' 2>/dev/null || echo "(取得できず)"
+        else
+            echo "(取得できず)"
+        fi
+        printf '\n## コミットの件名 (merge を除く、新しい順)\n\n'
+        git -C "$2" log --no-merges -10 --format='- %s' "$3"
+    } >"$WORK/conventions/$1.md"
 }
 
 # 対象ファイルに出る issue / PR の状態を $WORK/refs.json に書く。AI に gh を持たせないための事前取得。
