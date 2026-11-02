@@ -1,4 +1,4 @@
-{ config, dotfilesDir, ... }: {
+{ config, pkgs, dotfilesDir, ... }: {
   # 自分の OPEN な PR を数分ごとに見て、conflict / CI 失敗 / 未対応のレビューがあれば
   # Orca のタブでエージェントを起動する LaunchAgent。対象は Orca に worktree がある非 draft の PR。
   # あわせて、人の判断待ち (マージ判断、自動対応の上限超え、入力待ちや質問で止まったエージェント) を
@@ -9,11 +9,8 @@
   launchd.agents.pr-dispatch = {
     enable = true;
     config = {
-      # スクリプト実体はリポジトリの絶対パスを直接叩く (worktree-gc.nix と同じ判断)。
-      ProgramArguments = [
-        "/bin/bash"
-        "${dotfilesDir}/home/scripts/pr-dispatch.sh"
-      ];
+      # origin/main から取り出したスクリプトの写しを動かす (worktree-gc.nix と同じ)。
+      ProgramArguments = [ "${import ./run-from-main.nix { inherit pkgs dotfilesDir; } "pr-dispatch"}" ];
 
       # 3 分ごと。人の判断待ちをボードに出す役も兼ねるので、30 分では遅すぎた。
       # 1 回の GitHub 問い合わせは GraphQL 1〜2 ポイントで、上限 (1 時間 5,000) に対して十分小さい。

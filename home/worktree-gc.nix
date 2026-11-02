@@ -1,4 +1,4 @@
-{ config, dotfilesDir, ... }: {
+{ config, pkgs, dotfilesDir, ... }: {
   # work-api と Orca 管理下の全リポの worktree、それに紐づく docker compose プロジェクトを
   # 1 時間ごとに掃除する LaunchAgent。放置すると worktree ごとに nginx/php-fpm/redis の
   # 3 コンテナと bridge network が積み上がり、docker のサブネットプールが枯れて
@@ -11,13 +11,9 @@
   launchd.agents.worktree-gc = {
     enable = true;
     config = {
-      # スクリプト実体は /nix/store に焼かず、リポジトリの絶対パスを直接叩く。
-      # herdr.nix と同じ判断で、閾値や除外を触るたびに darwin-rebuild を回したくないため。
-      # 実行ビットはリポジトリ側で立てておくこと (chmod +x)。
-      ProgramArguments = [
-        "/bin/bash"
-        "${dotfilesDir}/home/scripts/worktree-gc.sh"
-      ];
+      # 作業ツリーではなく、origin/main から取り出したスクリプトの写しを動かす (run-from-main.nix)。
+      # 閾値や除外を変えても、マージすれば次の実行から効く (darwin-rebuild は要らない)。
+      ProgramArguments = [ "${import ./run-from-main.nix { inherit pkgs dotfilesDir; } "worktree-gc"}" ];
 
       # 毎時 0 分 (Hour を省くとワイルドカード)。マージ済みの worktree が Done 列に
       # 半日残らないようにする。削除条件は中身で決まるので、回数を増やしても消しすぎない。
