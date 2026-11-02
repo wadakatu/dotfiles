@@ -65,6 +65,7 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 │   ├── agent-resume.nix
 │   ├── agent-gc.nix
 │   ├── memory-maintenance.nix
+│   ├── run-from-main.nix  # LaunchAgent が origin/main のスクリプトを動かす起動スクリプト
 │   ├── zsh.nix
 │   ├── scripts/
 │   │   ├── worktree-gc.sh
@@ -345,9 +346,14 @@ flake では相対パスを渡すと flake source の store コピーを指し�
 絶対パスの文字列を渡している
 （[home-manager#2085](https://github.com/nix-community/home-manager/issues/2085)）。
 このため、このリポジトリのクローン先は `flake.nix` の `mkDarwin` に渡す
-`dotfilesPath` と一致させる。launchd のスクリプト（worktree-gc / pr-dispatch）も
-同じ値を見るので、クローン先を変えるときは `dotfilesPath` を直して
+`dotfilesPath` と一致させる。LaunchAgent（worktree-gc / pr-dispatch / agent-resume /
+memory-maintenance）も同じ値を見るので、クローン先を変えるときは `dotfilesPath` を直して
 `darwin-rebuild switch` する。
+
+これらの LaunchAgent は作業ツリーのスクリプトを直接は動かさない。`home/run-from-main.nix` の起動スクリプトが
+`origin/main` の `home/scripts` を `~/Library/Caches/<名前>-script/` に取り出し、その写しを実行する
+（fetch は 15 分に 1 回まで）。checkout でブランチ作業をしていても無人で動くのはマージ済みのスクリプトだけで、
+スクリプトの変更はマージすれば次の実行から効く。`DRY_RUN=1 .../home/scripts/<名前>.sh` の手動実行は作業ツリーのスクリプトを動かす。
 
 なお、herdr が書き換え時に「一時ファイル + rename」方式を使う場合は
 `~/.config/herdr/config.toml` の symlink 自体が実ファイルに置き換わり、リポジトリから
@@ -411,8 +417,8 @@ tail -50 ~/Library/Logs/worktree-gc.log                # 直近の実行ログ
 launchctl kickstart -k gui/$(id -u)/org.nix-community.home.worktree-gc  # 即時実行
 ```
 
-閾値や除外を変えるだけなら `darwin-rebuild` は不要（plist はリポジトリの絶対パスを
-直接叩いているため）。実行時刻を変えるときだけ `worktree-gc.nix` を直して rebuild する。
+閾値や除外を変えるだけなら `darwin-rebuild` は不要（LaunchAgent は `origin/main` のスクリプトを動かすので、
+マージすれば次の実行から効く）。実行時刻を変えるときだけ `worktree-gc.nix` を直して rebuild する。
 
 ## 放置セッションの検出と停止
 
@@ -438,8 +444,8 @@ Claude Code の auto memory（`~/.claude/projects/<p>/memory/`）と、全リポ
 の LaunchAgent が毎日 04:30 に `home/scripts/memory-maintenance.sh` で整理する。設計と判断の経緯は
 `docs/memory-maintenance-design.md`。
 
-- LaunchAgent が動かすのは、毎回 `origin/main` から取り出したスクリプトの写し。手元の checkout のブランチには左右されず、
-  スクリプトの変更はマージすれば次の実行から効く。下の手動実行は作業ツリーのスクリプトを動かす。
+- LaunchAgent が動かすのは `origin/main` から取り出したスクリプトの写し（`home/run-from-main.nix`）。
+  手元の checkout のブランチには左右されず、スクリプトの変更はマージすれば次の実行から効く。下の手動実行は作業ツリーのスクリプトを動かす。
 - 各 memory dir を git で snapshot し、前回以降に変わったファイルだけを `claude -p --restricted` に整理させる。
   変化が無ければ AI は起動しない。AI ができるのは作業領域の読み取りと、memory の写しの編集だけ。
 - 自動で行うのは、説明の短縮・重複の統合・根拠のある事実の更新・根拠のある陳腐化の削除・共有への移動。

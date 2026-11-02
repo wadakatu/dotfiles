@@ -1,4 +1,4 @@
-{ config, dotfilesDir, ... }: {
+{ config, pkgs, dotfilesDir, ... }: {
   # Mac の再起動で止まった Claude のセッションを、Orca のタブで再開する LaunchAgent。
   # Orca は再起動でエージェントのプロセスを失うので (docs `model/session-restore.mdx`)、
   # 止まる直前まで生きていたセッションを SessionStart hook の印から見つけて `claude -r` で開き直す。
@@ -7,11 +7,8 @@
   launchd.agents.agent-resume = {
     enable = true;
     config = {
-      # スクリプト実体はリポジトリの絶対パスを直接叩く (worktree-gc.nix と同じ判断)。
-      ProgramArguments = [
-        "/bin/bash"
-        "${dotfilesDir}/home/scripts/agent-resume.sh"
-      ];
+      # origin/main から取り出したスクリプトの写しを動かす (worktree-gc.nix と同じ)。
+      ProgramArguments = [ "${import ./run-from-main.nix { inherit pkgs dotfilesDir; } "agent-resume"}" ];
 
       # ログイン時に 1 回。Orca がまだ立ち上がっていなければ、スクリプトは何もせずに終わり、次の回で再開する。
       RunAtLoad = true;
