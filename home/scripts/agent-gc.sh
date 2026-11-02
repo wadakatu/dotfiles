@@ -52,7 +52,8 @@ judge() {
 prompt_empty() {
     local agent=$1 line
     case $agent in
-        claude) line=$(grep '^❯' | tail -1) && [ "$(printf '%s' "$line" | sed 's/[[:space:]]*$//')" = "❯" ] ;;
+        # 最後の ❯ の行が ❯ だけで、次の行が入力欄の下の罫線であること。複数行の書きかけは 2 行目以降に出る。
+        claude) awk '/^❯/ { p = $0; n = ""; getline n; last = p "\n" n } END { exit !(last ~ /^❯[[:space:]]*\n─/) }' ;;
         # 空の入力欄には placeholder が出る。書きかけと文字では見分けられないので、この文言だけを空とみなす。
         codex) line=$(grep '^› ' | tail -1) && [ "$(printf '%s' "$line" | sed 's/[[:space:]]*$//')" = "› Ask Codex to do anything" ] ;;
         *) return 1 ;;
@@ -81,8 +82,9 @@ codex_state() {
     [ "$n" -gt 0 ] && echo "idle $max"
 }
 
-# 1 セッション 1 行の JSON を出す。macOS 専用。
+# 1 セッション 1 行の JSON を出す。pid を渡せばその 1 本だけ。macOS 専用。
 collect() {
+    local only=${1:-}
     local now pressure orca_json orca_ok pid comm envs lstart pane term wt f readable status ts path key st
     now=$(date +%s)
     pressure=$(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null || echo 0)
@@ -94,7 +96,7 @@ collect() {
         orca_json='{}'
     fi
 
-    ps -axo pid=,comm= | awk '$2 == "claude" || $2 == "codex" { print $1, $2 }' | while read -r pid comm; do
+    ps -axo pid=,comm= | awk -v only="$only" '($2 == "claude" || $2 == "codex") && (only == "" || $1 == only) { print $1, $2 }' | while read -r pid comm; do
         envs=$(ps eww -o command= -p "$pid" 2>/dev/null) || continue
         lstart=$(lstart_of "$pid")
         pane=$(env_of "$envs" ORCA_PANE_KEY)
@@ -188,11 +190,12 @@ stop() {
         [ $# -gt 0 ] || { echo "usage: agent-gc stop <pid>... | --listed" >&2; return 1; }
         targets=$(printf '%s\t\n' "$@")
     fi
-    rows=$(collect | judge)
-    terms=$(orca terminal list --json 2>/dev/null)
     while IFS=$'\t' read -r pid want; do
         [ -n "$pid" ] || continue
-        row=$(jq -c --argjson pid "$pid" 'select(.pid == $pid)' <<<"$rows" 2>/dev/null)
+        # 前の 1 本の終了待ちの間に再開されることがあるので、送る直前に 1 本ずつ取り直す
+        [[ "$pid" =~ ^[0-9]+$ ]] || { log "skip pid=$pid: not a pid"; continue; }
+        row=$(collect "$pid" | judge)
+        terms=$(orca terminal list --json 2>/dev/null)
         agent=$(jq -r '.agent // "?"' <<<"$row" 2>/dev/null)
         if [ -z "$row" ]; then log "skip pid=$pid: not running"; continue; fi
         reason=$(jq -r '.reason // empty' <<<"$row")

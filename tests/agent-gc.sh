@@ -42,6 +42,8 @@ prompt() { # prompt <説明> <agent> <0=空 / 1=空でない> <端末の末尾>
 
 prompt "Claude 空" claude 0 $'❯ 前の依頼\n✻ Worked for 3m\n────\n❯ \n────\n  ◆ Opus'
 prompt "Claude 書きかけ" claude 1 $'────\n❯ あとでこれを\n────'
+prompt "Claude 2 行目に書きかけ" claude 1 $'────\n❯ \n  あとでこれを\n────'
+prompt "Claude 罫線が無い" claude 1 $'❯'
 prompt "Claude シェルに戻った" claude 1 $'Resume this session with:\n~/www/dev [ master]'
 prompt "Codex 空" codex 0 $'  Worked for 3m\n› Ask Codex to do anything\n  ? for shortcuts'
 prompt "Codex 書きかけ" codex 1 $'› Ask Codex to do anything\n› 次はテストを'
