@@ -5,7 +5,7 @@
   # `make up` が落ちる (実測: worktree 20 個でコンテナ 102 個・ネットワーク 26 個)。
   #
   # AI エージェントではなくスクリプトで回すのは、判定が全て機械的に決まるため。
-  # 「upstream が remote から消えた」「origin/dev から辿れる」「未コミットが無い」、
+  # 「upstream が remote から消えた」「origin/dev から辿れる」「未コミットが無い」「中に cwd を持つプロセスが居ない」、
   # Orca の worktree なら「PR の状態」「PR に無いコミットの有無」「エージェントの状態」
   # 以外の材料を使わないので、モデルに投げる理由が無い。
   launchd.agents.worktree-gc = {

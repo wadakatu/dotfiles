@@ -10,8 +10,9 @@
 set -euo pipefail
 
 # launchd の PATH は /usr/sbin:/usr/bin:/sbin:/bin だけで、docker も nix の git も入らない。
-# ここで通さないとジョブが黙って何もせず終わる。
-PATH="/etc/profiles/per-user/${USER}/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+# ここで通さないとジョブが黙って何もせず終わる。launchd 側 (worktree-gc.nix) でも同じ順で渡しているので、
+# 上書きせず後ろに足す (tests/worktree-gc.sh が偽のコマンドを前に差し込めるように)。
+PATH="$PATH:/etc/profiles/per-user/${USER}/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 export PATH
 
 REPO="${REPO:-$HOME/www/dev/app}"
@@ -58,6 +59,27 @@ run() {
     "$@" >/dev/null 2>&1
 }
 
+# git status が失敗したとき (index.lock、壊れた worktree) も「変更あり」に倒す。
+# 出力だけを見ると、失敗が clean に見えてそのまま削除候補になる。
+is_dirty() {
+    local out
+    out=$(git -C "$1" status --porcelain 2>/dev/null) || return 0
+    [ -n "$out" ]
+}
+
+# Orca の worktree ごとのエージェント状態。取れない・行数上限で打ち切られたときは失敗を返す。
+# 失敗を '{}' で埋めると全 worktree が「エージェント無し」に見えて、作業中のものが消える。
+orca_ps() {
+    local out
+    out=$(orca worktree ps --json 2>/dev/null) || return 1
+    jq -e '.ok == true and .result.truncated == false' >/dev/null 2>&1 <<<"$out" || return 1
+    printf '%s' "$out"
+}
+
+agents_busy() {
+    jq -r --arg p "$1" '[.result.worktrees[]? | select(.path == $p) | .agents[]?.state | select(. != "done")] | join(",")' <<<"$2"
+}
+
 [ -d "$REPO" ] || { log "repo が無い: $REPO"; exit 0; }
 
 log "=== worktree-gc 開始 (repo=$REPO dry_run=$DRY_RUN) ==="
@@ -83,13 +105,30 @@ git -C "$REPO" fetch --prune --quiet 2>/dev/null || { fetch_ok=0; log "WARN: fet
 
 # ---- 削除してよい worktree を選ぶ ----
 removable=()
+# cwd が worktree の中にあるプロセス (シェル、エージェント、テスト) が居れば使用中とみなす。
+# ルートの mtime はサブディレクトリの編集では変わらないので、それだけでは見逃す。
+# lsof が使えないときは誰が使っているか分からないので、この節の削除を全部見送る。
+cwds_ok=1
+cwds=$(lsof -a -d cwd -Fn -u "$USER" 2>/dev/null | sed -n 's/^n//p') || cwds_ok=0
+[ -n "$cwds" ] || cwds_ok=0
+in_use() { awk -v p="$1" '$0 == p || index($0, p "/") == 1 { f = 1; exit } END { exit !f }' <<<"$cwds"; }
+
 while read -r wt; do
     [ "$wt" = "$REPO" ] && continue
     # Orca の worktree は下の Orca の節で判定する。ここで `git worktree remove` すると Orca の状態とずれる。
     case "$wt" in "$ORCA_ROOT"/*) continue ;; esac
 
-    if [ -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ]; then
-        log "keep  $wt (未コミットの変更あり)"
+    if is_dirty "$wt"; then
+        log "keep  $wt (未コミットの変更あり、または git status 失敗)"
+        continue
+    fi
+
+    if [ "$cwds_ok" = "0" ]; then
+        log "keep  $wt (lsof でプロセスの cwd を取れず、使用中か判定できない)"
+        continue
+    fi
+    if in_use "$wt"; then
+        log "keep  $wt (cwd がこの中にあるプロセスが居る)"
         continue
     fi
 
@@ -121,32 +160,36 @@ done < <(git -C "$REPO" worktree list --porcelain | awk '/^worktree /{print $2}'
 
 # ---- Orca の worktree (全リポ) から削除してよいものを選ぶ ----
 # 条件はグローバル CLAUDE.md「委任の線引き」と同じ: PR が MERGED / CLOSED、未コミット変更なし、
-# PR に入っていないコミットなし、中のエージェントが作業中でない。PR の有無で判定するので、
-# 作った直後の worktree は対象にならない (MIN_AGE_HOURS は使わない)。
+# PR に入っていないコミットなし、中のエージェントが作業中でない。PR の有無で判定し、
+# PR が worktree の作成より前に閉じていれば同名ブランチの別作業とみなす (MIN_AGE_HOURS は使わない)。
 # 削除は orca worktree rm に任せる。マージ済みと証明できないブランチは Orca が残す。
 orca_removable=()
 
 # PR に入っていないローカルコミットがあれば 0 を返す。squash merge で ancestry が切れるので、
-# デフォルトブランチにも PR の head にも無いコミットを、件名で PR のコミットと照合する
-# (push 前に rebase した旧版は件名が一致する)。判定できないときは「ある」に倒す。
+# デフォルトブランチにも PR の head にも無いコミットを、patch-id で PR のコミットと照合する
+# (push 前に rebase した旧版は差分が同じなので一致する。件名だと amend 後の未 push 版や
+# "fix tests" のような汎用件名を取り違える)。判定できないときは「ある」に倒す。
 has_commits_outside_pr() {
-    local wt="$1" num="$2" base head mb subjects c
+    local wt="$1" num="$2" base head mb ids c id
     base=$(git -C "$wt" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null) || return 0
     git -C "$wt" fetch --quiet origin "pull/$num/head" 2>/dev/null || return 0
     head=$(git -C "$wt" rev-parse --verify --quiet FETCH_HEAD) || return 0
     mb=$(git -C "$wt" merge-base "$head" "$base" 2>/dev/null) || return 0
-    subjects=$(git -C "$wt" log --format=%s "$mb..$head") || return 0
+    ids=$(git -C "$wt" log -p --no-merges "$mb..$head" | git -C "$wt" patch-id --stable | cut -d' ' -f1) || return 0
     while read -r c; do
         [ -n "$c" ] || continue
-        grep -qxF -- "$(git -C "$wt" log -1 --format=%s "$c")" <<<"$subjects" || return 0
+        id=$(git -C "$wt" show "$c" | git -C "$wt" patch-id --stable | cut -d' ' -f1) || return 0
+        # 空コミットは patch-id が出ないので照合できない。
+        [ -n "$id" ] && grep -qxF -- "$id" <<<"$ids" || return 0
     done < <(git -C "$wt" rev-list --no-merges HEAD --not "$base" "$head")
     return 1
 }
 
 if ! orca status --json 2>/dev/null | jq -e '.result.runtime.reachable == true' >/dev/null 2>&1; then
     log "WARN: Orca のランタイムに届かない。Orca の worktree の掃除はスキップ (次回に拾う)"
+elif ! ps_json=$(orca_ps); then
+    log "WARN: orca worktree ps が取れない、または打ち切られた。エージェントの状態が分からないので Orca の worktree の掃除はスキップ"
 else
-    ps_json=$(orca worktree ps --json 2>/dev/null || echo '{}')
     fetched=""
     while IFS=$'\t' read -r wt branch; do
         [ -d "$wt" ] || continue
@@ -154,11 +197,11 @@ else
             log "keep  $wt (detached)"
             continue
         fi
-        if [ -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ]; then
-            log "keep  $wt (未コミットの変更あり)"
+        if is_dirty "$wt"; then
+            log "keep  $wt (未コミットの変更あり、または git status 失敗)"
             continue
         fi
-        busy=$(jq -r --arg p "$wt" '[.result.worktrees[]? | select(.path == $p) | .agents[]?.state | select(. != "done")] | join(",")' <<<"$ps_json")
+        busy=$(agents_busy "$wt" "$ps_json")
         if [ -n "$busy" ]; then
             log "keep  $wt (エージェントが $busy)"
             continue
@@ -180,7 +223,7 @@ else
         fi
 
         slug=$(git -C "$wt" remote get-url origin 2>/dev/null | sed -E 's#^.*github\.com[:/]##; s#\.git$##')
-        if ! prs=$(gh pr list -R "$slug" --head "$branch" --state all --json number,state 2>/dev/null); then
+        if ! prs=$(gh pr list -R "$slug" --head "$branch" --state all --json number,state,closedAt 2>/dev/null); then
             log "keep  $wt ($branch: gh で PR を引けない)"
             continue
         fi
@@ -193,6 +236,14 @@ else
             continue
         fi
         num=$(jq -r 'max_by(.number) | .number' <<<"$prs")
+        # 閉じた PR と同名のブランチで作り直した worktree (決まった名前のブランチ、`--pr` で切り直したもの) は、
+        # 作業前だと clean・固有コミット無しで旧 PR の判定を通ってしまう。作成より後に閉じた PR だけを根拠にする。
+        created=$(jq -r --arg p "$wt" '.result.worktrees[]? | select(.path == $p) | .createdAt // empty' <<<"$ps_json")
+        closed=$(jq -r 'max_by(.number) | .closedAt // empty | fromdateiso8601 * 1000 | floor' <<<"$prs")
+        if [ -z "$created" ] || [ -z "$closed" ] || [ "$closed" -lt "$created" ]; then
+            log "keep  $wt ($branch: PR #$num が worktree の作成より前に閉じている、または日時が取れない)"
+            continue
+        fi
         if has_commits_outside_pr "$wt" "$num"; then
             log "keep  $wt ($branch: PR #$num に無いコミットあり)"
             continue
@@ -205,7 +256,55 @@ else
         | [.path, ((.branch // "") | sub("^refs/heads/"; ""))] | @tsv')
 fi
 
-# ---- 対象 worktree と孤児の compose プロジェクトを落とす ----
+# ---- worktree を消す。ブランチは残るのでコミットは失われない ----
+# 消せたものだけを removed に入れ、compose を落とす対象はここから決める。
+# 候補の段階で落とすと、削除が拒否された worktree の環境だけが毎時壊れる。
+removed=()
+for wt in ${removable[@]+"${removable[@]}"}; do
+    if run git -C "$REPO" worktree remove "$wt" 2>/dev/null; then
+        log "removed $wt"
+        removed+=("$wt")
+    else
+        log "WARN: remove 失敗 $wt"
+    fi
+done
+run git -C "$REPO" worktree prune
+
+# ---- Orca の worktree を消す ----
+# 判定から削除までに fetch や gh で数分空くので、直前に状態を取り直す。
+if [ ${#orca_removable[@]} -gt 0 ] && ! ps_now=$(orca_ps); then
+    log "WARN: 削除直前の orca worktree ps が取れない。Orca の worktree の削除は見送る (次回に拾う)"
+    orca_removable=()
+fi
+for wt in ${orca_removable[@]+"${orca_removable[@]}"}; do
+    if is_dirty "$wt"; then
+        log "keep  $wt (削除直前に未コミットの変更を検出)"
+        continue
+    fi
+    busy=$(agents_busy "$wt" "$ps_now")
+    if [ -n "$busy" ]; then
+        log "keep  $wt (削除直前にエージェントが $busy)"
+        continue
+    fi
+    if [ "$DRY_RUN" = "1" ]; then
+        log "DRY-RUN: orca worktree rm --worktree path:$wt"
+        removed+=("$wt")
+        continue
+    fi
+    if orca worktree rm --worktree "path:$wt" --json 2>/dev/null | jq -e '.ok == true' >/dev/null; then
+        removed+=("$wt")
+        # 削除はバックグラウンドで続くことがある。1 分待っても残るフォルダはログに出す。
+        for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            [ -d "$wt" ] || break
+            sleep 5
+        done
+        if [ -d "$wt" ]; then log "WARN: orca rm 後もフォルダが残っている $wt"; else log "removed $wt"; fi
+    else
+        log "WARN: orca rm 失敗 $wt"
+    fi
+done
+
+# ---- 消した worktree と孤児の compose プロジェクトを落とす ----
 if docker info >/dev/null 2>&1; then
     docker ps -a --format '{{.Label "com.docker.compose.project"}}	{{.Label "com.docker.compose.project.working_dir"}}' \
         | sort -u | while IFS=$'\t' read -r proj dir; do
@@ -220,12 +319,11 @@ if docker info >/dev/null 2>&1; then
         [ "$matched" = "1" ] || continue
 
         reason=""
-        if [ ! -d "$dir" ]; then
+        for wt in ${removed[@]+"${removed[@]}"}; do
+            case "$dir" in "$wt"|"$wt"/*) reason="削除した worktree $wt に属する" ;; esac
+        done
+        if [ -z "$reason" ] && [ ! -d "$dir" ]; then
             reason="working_dir が既に無い (孤児)"
-        else
-            for wt in ${removable[@]+"${removable[@]}"} ${orca_removable[@]+"${orca_removable[@]}"}; do
-                case "$dir" in "$wt"|"$wt"/*) reason="削除対象 worktree $wt に属する" ;; esac
-            done
         fi
         [ -n "$reason" ] || continue
 
@@ -236,34 +334,6 @@ else
     log "WARN: docker が動いていない。コンテナの掃除はスキップ (次回、孤児として拾う)"
 fi
 
-# ---- worktree を消す。ブランチは残るのでコミットは失われない ----
-for wt in ${removable[@]+"${removable[@]}"}; do
-    if run git -C "$REPO" worktree remove "$wt" 2>/dev/null; then
-        log "removed $wt"
-    else
-        log "WARN: remove 失敗 $wt"
-    fi
-done
-run git -C "$REPO" worktree prune
-
-# ---- Orca の worktree を消す ----
-for wt in ${orca_removable[@]+"${orca_removable[@]}"}; do
-    if [ "$DRY_RUN" = "1" ]; then
-        log "DRY-RUN: orca worktree rm --worktree path:$wt"
-        continue
-    fi
-    if orca worktree rm --worktree "path:$wt" --json 2>/dev/null | jq -e '.ok == true' >/dev/null; then
-        # 削除はバックグラウンドで続くことがある。1 分待っても残るフォルダはログに出す。
-        for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
-            [ -d "$wt" ] || break
-            sleep 5
-        done
-        if [ -d "$wt" ]; then log "WARN: orca rm 後もフォルダが残っている $wt"; else log "removed $wt"; fi
-    else
-        log "WARN: orca rm 失敗 $wt"
-    fi
-done
-
 # ---- ディスク回収 ----
 if docker info >/dev/null 2>&1; then
     run docker image prune -f || true
@@ -273,4 +343,4 @@ if docker info >/dev/null 2>&1; then
     docker system df | sed 's/^/  /'
 fi
 
-log "=== 完了 (削除した worktree: ${#removable[@]} + Orca ${#orca_removable[@]}) ==="
+log "=== 完了 (削除した worktree: ${#removed[@]}) ==="
