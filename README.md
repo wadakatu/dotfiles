@@ -19,6 +19,7 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 | herdr の設定 | `home/config/herdr/config.toml` を Home Manager が out-of-store symlink（本体は Nix 管理外） |
 | work-api の worktree / コンテナ掃除 | Home Manager `launchd.agents`（1 時間ごと、`home/scripts/worktree-gc.sh`） |
 | 再起動で止まった Claude の再開、Needs decision で会話が開いていないカードの開き直し（同じセッションには 1 回だけ。人が閉じたタブは開き直さない） | Home Manager `launchd.agents`（ログイン時と 3 分ごと、`home/scripts/agent-resume.sh`）＋ SessionStart hook `agents/claude/hooks/session-marker.sh` |
+| 放置された Claude / Codex のセッションの通知と、確かめたものの停止（Orca の端末に /exit） | Home Manager `launchd.agents`（10 分ごと、`home/scripts/agent-gc.sh`）＋ CLI `~/.local/bin/agent-gc`。設計は `docs/agent-gc-design.md` |
 | Claude Code の auto memory の整理（重複・陳腐化・共有への移動、昇格は 1 件ずつ PR） | Home Manager `launchd.agents`（毎日 04:30、`home/scripts/memory-maintenance.sh`）。設計は `docs/memory-maintenance-design.md` |
 | CLI パッケージ | nixpkgs `home.packages` |
 | GUI アプリ | nix-darwin `homebrew.casks` |
@@ -62,12 +63,14 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 │   ├── worktree-gc.nix
 │   ├── pr-dispatch.nix
 │   ├── agent-resume.nix
+│   ├── agent-gc.nix
 │   ├── memory-maintenance.nix
 │   ├── zsh.nix
 │   ├── scripts/
 │   │   ├── worktree-gc.sh
 │   │   ├── pr-dispatch.sh
 │   │   ├── agent-resume.sh
+│   │   ├── agent-gc.sh
 │   │   └── memory-maintenance.sh  (+ -prompt.md, -schema.json)
 │   └── config/
 │       ├── ghostty/config
@@ -410,6 +413,23 @@ launchctl kickstart -k gui/$(id -u)/org.nix-community.home.worktree-gc  # 即時
 
 閾値や除外を変えるだけなら `darwin-rebuild` は不要（plist はリポジトリの絶対パスを
 直接叩いているため）。実行時刻を変えるときだけ `worktree-gc.nix` を直して rebuild する。
+
+## 放置セッションの検出と停止
+
+`home/agent-gc.nix` の LaunchAgent が 10 分ごとに `home/scripts/agent-gc.sh scan` を回す。
+idle が 24 時間（memory pressure が WARN 以上なら 6 時間）を超え、Orca でも done のまま放置された
+Claude / Codex のセッションを見つけると通知する。自動では止めない。設計は `docs/agent-gc-design.md`。
+
+```sh
+agent-gc list                  # 候補と、残した理由を一覧にする
+agent-gc stop --listed         # list で見せた候補に /exit を送る（KILL はしない）
+agent-gc stop <pid>...         # 指定した pid だけ止める
+DRY_RUN=1 agent-gc stop --listed  # 送らずに対象だけ出す
+tail -50 ~/Library/Logs/agent-gc.log
+```
+
+入力欄に書きかけがあるもの、Orca の端末が分からないものは止めない。止めたセッションは、
+残ったタブに表示される `claude --resume <id>` / `codex resume <id>` で戻れる。
 
 ## auto memory の自動整理
 
