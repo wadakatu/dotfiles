@@ -344,6 +344,8 @@ recover() {
         ok:*) [ $((NOW - ${J_OP#ok:})) -gt 1800 ] || return 0 # 起動は通った。agent が見えるまで待つ
               J_OP=- ;;
     esac
+    # 起動から 1 時間経っても agent が見えなければ諦めて人に回す（枠を握り続けない）
+    if [ "$J_START" != "-" ] && [ $((NOW - J_START)) -gt 3600 ]; then fail_job "$n" launch "1 時間起動できない"; return 0; fi
     launch_agent "$n" "$(cat "$STATE_DIR/prompts/$n" 2>/dev/null || echo "/issue-worker $n")"
 }
 launch_new() { # launch_new <N> (再確認済み。RC_TITLE がある)
@@ -481,6 +483,7 @@ cmd_resume() {
     mkdir -p "$STATE_DIR/prompts"; printf '%s\n' "$old" >>"$STATE_DIR/prompts/$n.exclude" # 過去の pane は全部除く
     save_prompt "$n" "$prompt"
     J_STATUS=launching; J_PANE=-; J_OP=-; J_START=$NOW; job_save # 4 時間の通知は再開から数える
+    board "id:$J_WT" in-progress "再開: #$n"
     launch_agent "$n" "$prompt" "$old"
 }
 
@@ -497,6 +500,7 @@ cmd_done() {
     load_cfg; lock
     job_load "$n" || die "#$n の job が無い"
     J_STATUS=pr_opened; J_PR=$url; J_NOTE=-; job_save
+    if [ "$J_WT" != "-" ]; then board "id:$J_WT" in-review "PR #${url##*/}"; fi # 判断待ちのままだと pr-dispatch が触らない
     log "done #$n: $url"
 }
 

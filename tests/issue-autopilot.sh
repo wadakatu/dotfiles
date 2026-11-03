@@ -392,5 +392,22 @@ pending 1
 run dispatch
 check "作成失敗が 2 件続いたら同じ dispatch で作らない" lacks calls "worktree create"
 
+setup launch-timeout
+list "$MAIN" "$W"
+printf 'o/r#1\tlaunching\tissue-1-a\tR::/wt/a\t-\t-\t-\t90000\t1\t-\n' >"$T/state/jobs.tsv"
+run dispatch
+check "1 時間起動できない job は failed にして枠を空ける" is "$(job 1)" failed
+check "起動できない job は再起動しない" lacks calls "agent launch"
+
+setup board-back
+list "$MAIN" "$W"
+printf 'o/r#1\tfailed\tissue-1-a\tR::/wt/a\tok:1\tPA\t-\t90000\t1\t-\n' >"$T/state/jobs.tsv"
+ps_agent "R::/wt/a" PA done "/issue-worker 1" 100000000
+run resume 1 "続けて"
+check "resume でカードを作業中に戻す" has calls "--comment 再開: #1 --json --workspace-status in-progress"
+run done 1 https://github.com/o/r/pull/9
+check "done は exit 0" rc 0
+check "PR を出したらカードをレビュー待ちに" has calls "--comment PR #9 --json --workspace-status in-review"
+
 [ "$fail" = 0 ] && echo "ok: issue-autopilot"
 exit "$fail"
