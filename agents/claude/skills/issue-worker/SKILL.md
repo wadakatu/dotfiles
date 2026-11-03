@@ -45,7 +45,9 @@ IA=~/www/personal/dotfiles/home/scripts/issue-autopilot.sh
 
 ## `--resume '<指示>'`
 
-人の指示を最優先に読み、手順 2 から続ける。既にある commit・PR は作り直さない（PR があれば push だけして `done`）。
+人の指示を最優先に読む。先に `gh pr list -R <repo> --head "$(git branch --show-current)" --state open --json url -q '.[0].url'` で
+自分の PR を探し、あれば作り直さず、指示の分だけ直して push し、`"$IA" done <N> <その URL>` で終える
+（`recheck` はその自分の PR を `pr-exists` と数えるので呼ばない）。無ければ手順 2 から続ける。既にある commit は作り直さない。
 
 ## してはいけないこと
 

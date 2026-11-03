@@ -172,8 +172,9 @@ wt_by_branch() { # 予約した branch。Orca は取られた名前に数字の�
         | [.id, (.branch | sub("^refs/heads/"; ""))] | @tsv][0] // empty' <<<"$LIST_JSON"
 }
 wt_exists() { jq -e --arg w "$1" 'any(.result.worktrees[]; .id == $w)' <<<"$LIST_JSON" >/dev/null; }
-agent_for() { # agent_for <wt> <N> [除く paneKey] → paneKey
-    jq -r --arg w "$1" --arg re "^/issue-worker $2( |$)" --arg ex "${3:--}" '
+agent_for() { # agent_for <wt> <N> [除く paneKey] → paneKey。既定で resume 前の pane を除く
+    local ex=${3:-$(cat "$STATE_DIR/prompts/$2.exclude" 2>/dev/null || true)}
+    jq -r --arg w "$1" --arg re "^/issue-worker $2( |$)" --arg ex "${ex:--}" '
         [.result.worktrees[] | select(.worktreeId == $w) | .agents[]?
          | select(((.prompt // "") | test($re)) and .paneKey != $ex)] | max_by(.updatedAt // 0) // empty | .paneKey' <<<"$PS_JSON"
 }
@@ -200,15 +201,15 @@ query($owner: String!, $name: String!, $n: Int!) {
   } }
 }' 2>/dev/null) || { RC_CODE=error; return 0; }
     res=$(jq -r '.data.viewer.login as $me | .data.repository.issue as $i
-        | if $i == null then "gone"
-          elif any($i.labels, $i.assignees, $i.closedByPullRequestsReferences, $i.timelineItems; .pageInfo.hasNextPage) then "error"
+        | if $i == null then "gone\t-\t-" else (
+          if any($i.labels, $i.assignees, $i.closedByPullRequestsReferences, $i.timelineItems; .pageInfo.hasNextPage) then "error"
           elif $i.state != "OPEN" or ($i.author.login // "") != $me or any($i.labels.nodes[]; .name == "no-agent")
                or any($i.assignees.nodes[]; .login != $me) then "gone"
           elif any($i.closedByPullRequestsReferences.nodes[]; .state == "OPEN" or .state == "MERGED")
                or any($i.timelineItems.nodes[]; .source.__typename == "PullRequest" and (.source.state == "OPEN" or .source.state == "MERGED")) then "pr-exists"
-          else "ok\t" + $i.updatedAt + "\t" + ($i.title | gsub("[\t\n]"; " ")) end' <<<"$json" 2>/dev/null) || { RC_CODE=error; return 0; }
-    case "$res" in ok*) ;; *) RC_CODE=$res; return 0 ;; esac
-    IFS=$'\t' read -r _ RC_UPD RC_TITLE <<<"$res"
+          else "ok" end) + "\t" + $i.updatedAt + "\t" + ($i.title | gsub("[\t\n]"; " ")) end' <<<"$json" 2>/dev/null) || { RC_CODE=error; return 0; }
+    IFS=$'\t' read -r RC_CODE RC_UPD RC_TITLE <<<"$res"
+    [ "$RC_CODE" = "ok" ] || return 0
     orca_lists || { RC_CODE=error; return 0; } # 直前に取り直す (他のセッションや人が作った worktree)
     others=$(wt_for_issue "$n" | grep -vxF -- "$own" || true)
     [ -z "$others" ] || { RC_CODE=owner; return 0; }
@@ -271,7 +272,8 @@ slugify() {
 }
 # launch_agent <N> <prompt>: J_WT の worktree で worker を起動する。返事を失ったら operationId を残す。
 launch_agent() {
-    local n=$1 prompt=$2 out op exclude=${3:--}
+    local n=$1 prompt=$2 out op exclude=${3:-}
+    if [ "$DRY_RUN" = "1" ]; then log "DRY-RUN: agent launch #$n ($prompt)"; return 0; fi
     mkdir -p "$STATE_DIR/prompts"; printf '%s' "$prompt" >"$STATE_DIR/prompts/$n"
     local args=(agent launch --agent claude --worktree "id:$J_WT" --model opus --effort high --surface chat --prompt "$prompt" --json)
     case "$J_OP" in - | ok:*) ;; *) args+=(--retry-launch "$J_OP") ;; esac
@@ -326,6 +328,7 @@ launch_new() { # launch_new <N> (再確認済み。RC_TITLE がある)
     fi
     J_WT=$wt; J_BRANCH=$(jq -r '.result.worktree.branch | sub("^refs/heads/"; "")' <<<"$out"); job_save
     orca worktree set --worktree "id:$wt" --display-name "$PREFIX: #$n ${RC_TITLE:0:30}" --json >/dev/null 2>&1 || true
+    rm -f "$STATE_DIR/prompts/$n.exclude"
     launch_agent "$n" "/issue-worker $n"
 }
 
@@ -352,18 +355,19 @@ cmd_candidates() {
         v=$(tsv_get "$VERDICTS" "$(key "$n")" | cut -f2)
         [ "$v" != "$upd" ] || continue
         hit=""
-        while IFS= read -r l; do [ -n "$l" ] && case ",$lbls," in *",$l,"*) hit="label $l" ;; esac; done < <(printf '%s' "$labels" | tr ',' '\n')
+        while IFS= read -r l; do [ -n "$l" ] && case ",$lbls," in *",$l,"*) hit="label $l" ;; esac; done < <(printf '%s\n' "$labels" | tr ',' '\n')
         if [ -z "$hit" ]; then
             while IFS= read -r w; do
                 [ -n "$w" ] && [ -z "$hit" ] && printf '%s' "$title" | grep -qiF -- "$w" && hit="title $w"
-            done < <(printf '%s' "$words" | tr ',' '\n')
+            done < <(printf '%s\n' "$words" | tr ',' '\n')
         fi
         if [ -n "$hit" ]; then verdict_put "$n" "$upd" ask "$hit"; log "rule ask #$n: $hit"; continue; fi
         untriaged="$untriaged"untriaged$'\t'"$n"$'\t'"$upd"$'\t'"$title"$'\n'
     done < <(jq -r '.[] | [(.number | tostring), .updatedAt, (.title | gsub("[\t\n]"; " ")),
         ([.labels[].name] | join(",") | if . == "" then "-" else . end),
         ([.assignees[].login] | join(",") | if . == "" then "-" else . end)] | @tsv' <<<"$issues")
-    pending=$(for n in $(jobs_with pending); do printf 'pending\t%s\n' "$n"; done)
+    pending=$(for n in $(jobs_with pending); do printf 'pending\t%s\n' "$n"; done
+        for n in $(jobs_with launching); do printf 'launching\t%s\n' "$n"; done) # 復旧は dispatch が行うので run を止めない
     refresh_asks
     run="$STATE_DIR/runs/$NOW-$$"; mkdir -p "$run"
     printf '%s%s' "$untriaged" "${pending:+$pending$'\n'}" >"$run/candidates.tsv.tmp"
@@ -380,7 +384,11 @@ cmd_verdict() {
     upd=$(gh issue view "$n" -R "$REPO" --json updatedAt -q .updatedAt) || die "issue #$n を読めない"
     verdict_put "$n" "$upd" "$v" "$reason"
     log "verdict #$n $v: $reason"
-    if [ "$v" = "go" ] && ! job_load "$n"; then job_new "$n"; job_save; fi
+    if [ "$v" = "go" ]; then
+        job_load "$n" || { job_new "$n"; job_save; }
+    elif job_load "$n" && [ "$J_STATUS" = "pending" ]; then
+        tsv_del "$JOBS" "$J_KEY"
+    fi
     refresh_asks
 }
 
@@ -399,10 +407,12 @@ cmd_dispatch() {
         fi
         job_load "$n"
         recheck_issue "$n"
+        [ "$RC_CODE" != "ok" ] || [ "$(tsv_get "$VERDICTS" "$J_KEY" | cut -f3)" = "go" ] || RC_CODE=not-go
         case "$RC_CODE" in
             ok) launch_new "$n"; launched=$((launched + 1)) ;;
             gone) tsv_del "$JOBS" "$J_KEY"; verdict_put "$n" "${RC_UPD:--}" skip "recheck: closed か対象外"; log "recheck #$n: gone" ;;
             pr-exists | owner) tsv_del "$JOBS" "$J_KEY"; verdict_put "$n" "${RC_UPD:--}" ask "$RC_CODE"; log "recheck #$n: $RC_CODE" ;;
+            not-go) tsv_del "$JOBS" "$J_KEY"; log "dispatch #$n: 判定が go でない。起動しない" ;;
             changed) tsv_del "$JOBS" "$J_KEY"; tsv_del "$VERDICTS" "$J_KEY"; log "recheck #$n: issue が編集された。再判定へ" ;;
             *) log "recheck #$n: 確かめられない。今回は飛ばす" ;;
         esac
@@ -419,8 +429,11 @@ cmd_resume() {
     [ "$J_WT" != "-" ] || die "#$n に worktree が無い"
     orca_lists || die "Orca の worktree を取れない"
     wt_exists "$J_WT" || die "#$n の worktree が消えている"
+    [ "$(agent_state "$J_WT" "$J_PANE" | cut -f1)" != "working" ] || die "#$n の agent ($J_PANE) はまだ動いている。タブを閉じてから resume する"
     prompt="/issue-worker $n --resume '$(printf '%s' "$instr" | tr "'\n" "’ ")'"
     old=$J_PANE; RUN_ID="r$NOW-$$"
+    if [ "$DRY_RUN" = "1" ]; then log "DRY-RUN: resume #$n ($prompt)"; return 0; fi
+    mkdir -p "$STATE_DIR/prompts"; printf '%s' "$old" >"$STATE_DIR/prompts/$n.exclude"
     J_STATUS=launching; J_PANE=-; J_OP=-; J_START=$NOW; job_save # 4 時間の通知は再開から数える
     launch_agent "$n" "$prompt" "$old"
 }

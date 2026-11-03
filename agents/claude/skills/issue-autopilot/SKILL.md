@@ -16,7 +16,8 @@ IA=~/www/personal/dotfiles/home/scripts/issue-autopilot.sh
 
 1. `"$IA" candidates` を実行する。exit 1 なら何もせず終わる。
    - 出力の先頭 `# repo=<owner/repo> base=<branch> checkout=<path>` で対象を知る。
-   - 行は `untriaged<TAB>N<TAB>updatedAt<TAB>title` と `pending<TAB>N...`。`pending` は判定済みなので読まない。
+   - 行は `untriaged<TAB>N<TAB>updatedAt<TAB>title`、`pending<TAB>N`、`launching<TAB>N`。
+     `pending` と `launching` は判定済みなので読まない（`untriaged` が無ければ手順 5 へ）。
 2. 判定のために対象リポのコードを最新にする。この worktree（dispatcher 用）で `git fetch origin` →
    `git switch --detach origin/<base>`。未コミットの変更があれば判定だけ行い、コードは推測せず `unclear` に倒す。
 3. `untriaged` を上から（updatedAt の新しい順）**最大 8 件**、1 件ずつ読む。

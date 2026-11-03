@@ -245,5 +245,60 @@ printf 'o/r#1\trunning\tissue-1-a\tR::/wt/a\tok:1\tPA\t-\t99000\t1\t-\n' >"$T/st
 run resume 1 "続けて"
 check "running の job は resume しない" lacks calls "agent launch"
 
+# ---- レビュー指摘の回帰 ----
+setup last-label
+echo '[{"number": 1, "title": "x", "updatedAt": "u1", "labels": [{"name": "security"}], "assignees": []}]' >"$T/issues.json"
+run candidates
+check "カンマ区切りの最後のラベルも見る" has state/verdicts.tsv $'\task\tlabel security'
+
+setup launching-only
+printf 'o/r#1\tlaunching\tissue-1-a\tR::/wt/a\tOP1\t-\t-\t99000\t1\t-\n' >"$T/state/jobs.tsv"
+list "$MAIN" '{"id": "R::/wt/a", "repoId": "R", "path": "/wt/a", "isMainWorktree": false, "branch": "refs/heads/issue-1-a"}'
+run candidates
+check "launching だけでも precheck を通す" rc 0
+check "launching を出す" has out $'launching\t1'
+
+setup dry-run-recover
+printf 'o/r#1\tlaunching\tissue-1-a\tR::/wt/a\tOP1\t-\t-\t99000\t1\t-\n' >"$T/state/jobs.tsv"
+list "$MAIN" '{"id": "R::/wt/a", "repoId": "R", "path": "/wt/a", "isMainWorktree": false, "branch": "refs/heads/issue-1-a"}'
+DRY_RUN=1 run dispatch
+check "DRY_RUN の復旧は起動しない" lacks calls "agent launch"
+
+setup verdict-revoke
+pending 1
+echo "2026-01-01T00:00:00Z" >"$T/upd"
+run verdict 1 ask "spec"
+check "ask にしたら pending を消す" is "$(job 1)" ""
+
+setup not-go
+printf 'o/r#1\t2026-01-01T00:00:00Z\task\tspec\t1\n' >"$T/state/verdicts.tsv"
+printf 'o/r#1\tpending\t-\t-\t-\t-\t-\t-\t1\t-\n' >"$T/state/jobs.tsv"
+run dispatch
+check "判定が go でない pending は起動しない" lacks calls "worktree create"
+
+setup pr-exists-upd
+pending 1
+graphql OPEN '"2026-01-01T00:00:00Z"' '[{"state": "OPEN"}]'
+run dispatch
+check "pr-exists の判定に issue の updatedAt" has state/verdicts.tsv $'o/r#1\t2026-01-01T00:00:00Z\task\tpr-exists'
+
+setup resume-working
+W='{"id": "R::/wt/a", "repoId": "R", "path": "/wt/a", "isMainWorktree": false, "branch": "refs/heads/issue-1-a"}'
+list "$MAIN" "$W"
+printf 'o/r#1\tstalled\tissue-1-a\tR::/wt/a\tok:1\tPA\t-\t90000\t1\t-\n' >"$T/state/jobs.tsv"
+ps_agent "R::/wt/a" PA working "/issue-worker 1" 100000000
+run resume 1 "続けて"
+check "動いている agent がいれば resume しない" lacks calls "agent launch"
+
+setup resume-exclude
+list "$MAIN" "$W"
+printf 'o/r#1\tfailed\tissue-1-a\tR::/wt/a\tok:1\tPA\t-\t90000\t1\t-\n' >"$T/state/jobs.tsv"
+ps_agent "R::/wt/a" PA done "/issue-worker 1" 100000000
+echo '{"ok": false, "error": {"operationId": "OP9"}}' >"$T/launch.json"; echo 1 >"$T/launch.rc"
+run resume 1 "続けて"
+rm "$T/launch.rc"; : >"$T/calls"
+run dispatch
+check "resume 前の pane を拾わず --retry-launch" has calls "--retry-launch OP9"
+
 [ "$fail" = 0 ] && echo "ok: issue-autopilot"
 exit "$fail"
