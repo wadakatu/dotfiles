@@ -130,7 +130,7 @@ board() { # board <selector> <status|-> <comment>
     local sel=$1 status=$2 comment=$3 prev
     [ -n "$sel" ] && [ "$sel" != "path:" ] || { log "board (カード未設定): $comment"; return 0; }
     prev=$(awk -F'\t' -v k="$sel" '$1 == k { v = $2 } END { print v }' "$BOARD")
-    [ "$prev" = "$comment" ] && return 0
+    if [ "$prev" = "$comment" ]; then tsv_del "$BOARD_RETRY" "$sel"; return 0; fi # 送れた状態に戻った。古い再送は捨てる
     if [ "$DRY_RUN" = "1" ]; then log "DRY-RUN: board $sel ($status) $comment"; return 0; fi
     local args=(worktree set --worktree "$sel" --comment "$comment" --json)
     case "$status" in

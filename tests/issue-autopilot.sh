@@ -413,5 +413,14 @@ run done 1 https://github.com/o/r/pull/9
 check "done は exit 0" rc 0
 check "PR を出したらカードをレビュー待ちに" has calls "--comment PR #9 --json --workspace-status in-review"
 
+setup board-retry-stale
+printf 'id:R::/wt/a\t再開: #1\n' >"$T/state/board.tsv"
+printf 'id:R::/wt/a\tneeds-decision\t#1 red\n' >"$T/state/board-retry.tsv"
+list "$MAIN" "$W"
+printf 'o/r#1\tfailed\tissue-1-a\tR::/wt/a\tok:1\tPA\t-\t90000\t1\t-\n' >"$T/state/jobs.tsv"
+ps_agent "R::/wt/a" PA done "/issue-worker 1" 100000000
+run resume 1 "続けて"
+check "同じカードに戻ったら古い再送を捨てる" lacks state/board-retry.tsv "#1 red"
+
 [ "$fail" = 0 ] && echo "ok: issue-autopilot"
 exit "$fail"
