@@ -40,6 +40,9 @@ jobs:
       # 人のセッションを止めるスクリプトなので、keep に倒す判定と入力欄の確認を CI で見張る。
       - name: agent-gc script
         run: bash tests/agent-gc.sh
+      # 無人で worktree とエージェントを起動するスクリプトなので、勝手に起動しないことと復旧を CI で見張る。
+      - name: issue-autopilot script
+        run: bash tests/issue-autopilot.sh
 
   # ── 現 Mac と同系統の macOS 26 / arm64 で実ビルド ─────────
   build-darwin:
