@@ -431,5 +431,13 @@ run candidates
 check "warnings が出たら送れていない扱いで再送に残す" has state/board-retry.tsv "id:R::/wt/a"
 check "warnings の内容をログに残す" has applog "unknown_status"
 
+setup asks-optout
+cat >"$T/issues.json" <<'EOF'
+[{"number": 5, "title": "auth", "updatedAt": "u5", "labels": [{"name": "no-agent"}], "assignees": []}]
+EOF
+printf 'o/r#5\tu5\task\tspec\t1\n' >"$T/state/verdicts.tsv"
+run candidates
+check "後から no-agent を付けた ask は判断待ちに数えない" has calls "--comment 判断待ち 0"
+
 [ "$fail" = 0 ] && echo "ok: issue-autopilot"
 exit "$fail"

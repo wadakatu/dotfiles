@@ -383,13 +383,14 @@ cmd_candidates() {
     me=$(gh api user -q .login 2>/dev/null) || { log "gh が使えない。見送り"; exit 1; }
     issues=$(gh issue list -R "$REPO" --author @me --state open -L 500 --json number,title,labels,updatedAt,assignees 2>/dev/null) || { log "issue を取れない。見送り"; exit 1; }
     [ "$(jq length <<<"$issues")" -lt 500 ] || { log "issue が 500 件。打ち切りとみなして見送り"; exit 1; }
-    jq -r '.[].number' <<<"$issues" >"$STATE_DIR/open.txt"
+    : >"$STATE_DIR/open.txt.tmp" # 判断待ちの集計に使う。対象外（no-agent・他人の担当）は入れない
     labels=$(cfg ask_labels); words=$(cfg ask_title_words "$DEFAULT_TITLE_WORDS")
     untriaged=""
     while IFS=$'\t' read -r n upd title lbls asg; do
         [ -n "$n" ] || continue
         case ",$lbls," in *,no-agent,* | *,tracking,* | *,Stale,*) continue ;; esac
         [ "$asg" = "-" ] || ! printf '%s' "$asg" | tr ',' '\n' | grep -qvxF -- "$me" || continue
+        echo "$n" >>"$STATE_DIR/open.txt.tmp"
         [ -z "$(wt_for_issue "$n")" ] || continue
         [ -z "$(tsv_get "$JOBS" "$(key "$n")")" ] || continue
         v=$(tsv_get "$VERDICTS" "$(key "$n")" | cut -f2)
@@ -406,6 +407,7 @@ cmd_candidates() {
     done < <(jq -r 'sort_by(.updatedAt) | reverse | .[] | [(.number | tostring), .updatedAt, (.title | gsub("[\t\n]"; " ")),
         ([.labels[].name] | join(",") | if . == "" then "-" else . end),
         ([.assignees[].login] | join(",") | if . == "" then "-" else . end)] | @tsv' <<<"$issues")
+    mv "$STATE_DIR/open.txt.tmp" "$STATE_DIR/open.txt"
     pending=$(for n in $(jobs_with pending); do printf 'pending\t%s\n' "$n"; done
         for n in $(jobs_with launching); do printf 'launching\t%s\n' "$n"; done) # 復旧は dispatch が行うので run を止めない
     refresh_asks
