@@ -18,12 +18,14 @@ export PATH
 # どのリポを掃除するか (REPO・BASE・PROJECT_PREFIXES) は公開リポに置かず、手元の設定ファイルで渡す。
 # 環境変数で渡した値はそちらが勝つ。REPO が無ければ何もしない。
 CONFIG="${WORKTREE_GC_CONFIG:-$HOME/.config/worktree-gc.env}"
-_env_repo="${REPO-}" _env_base="${BASE-}" _env_prefixes="${PROJECT_PREFIXES-}"
+# 空文字も「渡した」とみなすので、値ではなく宣言ごと控えて読み込み後に戻す。
+_env="$(declare -p REPO BASE PROJECT_PREFIXES 2>/dev/null || true)"
 # shellcheck source=/dev/null
 [ -f "$CONFIG" ] && . "$CONFIG"
-REPO="${_env_repo:-${REPO:-}}"
+eval "$_env"
+REPO="${REPO:-}"
 # detached の worktree が固有のコミットを持たないかを見る基準のブランチ。
-BASE="${_env_base:-${BASE:-origin/main}}"
+BASE="${BASE:-origin/main}"
 # Orca が worktree を作る場所。ここ配下は Orca 経由で判定・削除し、$REPO の判定には混ぜない。
 ORCA_ROOT="${ORCA_ROOT:-$HOME/orca/workspaces}"
 # 削除の全条件に効かせる最終ガード。稼働中のエージェントが作った直後の worktree は
@@ -33,7 +35,7 @@ MIN_AGE_HOURS="${MIN_AGE_HOURS:-24}"
 # working_dir が消えた孤児の compose プロジェクトを落とす対象にする名前の接頭辞。共有インフラ (mysql,
 # traefik...) や他リポジトリ、本体を巻き込まないための境界。空なら孤児は落とさない。
 # このスクリプトが消した worktree に属するプロジェクトは、名前を問わず working_dir で拾う。
-PROJECT_PREFIXES="${_env_prefixes:-${PROJECT_PREFIXES:-}}"
+PROJECT_PREFIXES="${PROJECT_PREFIXES-}"
 # build cache はここより古いものだけ捨てる。image は dangling のみ (-a を付けると
 # ベースイメージが毎日消えて build のたびに再 pull になる)。
 BUILDER_CACHE_MAX_AGE="${BUILDER_CACHE_MAX_AGE:-168h}"

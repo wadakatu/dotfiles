@@ -252,6 +252,15 @@ echo "exit=$?" >>"$T/log"
 check "設定の REPO を使う" logged "repo=$T/repo "
 check "環境変数の BASE が勝つ" gone "$T/repo-wt"
 
+# ---- 設定ファイル: 空文字の環境変数でも接頭辞を上書きして、孤児を落とさない ----
+setup config-empty-prefix
+printf 'PROJECT_PREFIXES=proj-\n' >"$T/gc.env"
+printf '%s\t%s\n' proj-old "$T/gone" >"$T/docker-ps.tsv"
+env PATH="$base/bin:$PATH" FAKE="$T" REPO="$T/repo" ORCA_ROOT="$T/orca" WORKTREE_GC_CONFIG="$T/gc.env" PROJECT_PREFIXES= \
+    bash "$script" >"$T/log" 2>&1
+echo "exit=$?" >>"$T/log"
+check "空の接頭辞なら孤児を落とさない" not_called proj-old
+
 for f in "$base"/*/log; do grep -q '^exit=0$' "$f" || { echo "FAIL [$(basename "$(dirname "$f")")] exit が 0 でない"; fail=1; }; done
 [ "$fail" = 0 ] && echo "ok: worktree-gc"
 exit "$fail"
