@@ -1,6 +1,6 @@
 # issue-autopilot 設計書（改訂 4）
 
-対象: Orca v1.4.246 / Claude Code 2.1.316 / studio-design/studio-api（Orca repo `app`、主 checkout `$HOME/www/dev/app`、default branch `dev`）。
+対象: Orca v1.4.246 / Claude Code 2.1.316 / 対象リポは設定で 1 つ渡す: `REPO`（GitHub の `owner/name`）、`CHECKOUT`（Orca に登録した主 checkout のパス）、`BASE`（default branch）。
 書式は `docs/agent-gc-design.md` に倣う。出典は `path:line` か公式 docs の URL。推測には「推測」と書く。
 改訂 4 は Codex の 3 回目のレビュー（起動・停止・再判定の境界）を反映した。
 
@@ -9,10 +9,10 @@
 自分が author の open issue を Orca の automation が拾い、issue ごとに worktree を作り、エージェントが **draft PR の作成まで** 進める。ready 化・マージは人。
 
 決定済み（変えない）:
-- ラベルでの opt-in はしない。author=@me の open issue は全部候補（今日 174 件）。opt-out は `no-agent` ラベルだけ。
+- ラベルでの opt-in はしない。author=@me の open issue は全部候補。opt-out は `no-agent` ラベルだけ。
 - 実装前に「一人で進めてよいか」を判定し、曖昧・仕様判断・auth・個人情報・本番・課金・セキュリティは実装せず Needs decision に上げる。判定は worktree を作る前に行い、判断待ちの issue には worktree を作らない。
 - 1 issue 1 PR。量は 1 日あたりで絞る。
-- 最初は api リポだけ。
+- 最初は対象リポ 1 つだけ。
 
 線引きはグローバル CLAUDE.md「委任の線引き」（`~/.claude/CLAUDE.md:87-119`）そのまま。新しく PR にするものは必ず Codex の実装レビューを通す（同 :70-71）。
 
@@ -44,21 +44,21 @@ orca automations create --name issue-autopilot --trigger "0 */2 * * *" --provide
 | 候補抽出・重複除外・ルール判定・上限・ロック・状態遷移 | `issue-autopilot.sh`（LLM なし） | 機械的に決まるものは AI に任せない（`home/pr-dispatch.nix:7-8`） |
 | 曖昧さ・範囲の判定（triage） | dispatcher session。Sonnet（`--extra-agent-args`、`orca automations create --help` 行 48。ユーザー設定の既定は opus `~/.claude/settings.json:3`） | issue と該当コードを読むだけ |
 | 実装〜draft PR | worker session。Opus、effort high | 既存の開発フロー（`~/.claude/CLAUDE.md:65-68`） |
-| 実装レビュー | `codex exec -C <wt> -s read-only review --base origin/dev` | 必須（同 :70-71）。枠 4 を共有（`~/.claude-shared-memory/orca-parallel-agent-pipeline.md:34`） |
+| 実装レビュー | `codex exec -C <wt> -s read-only review --base origin/$BASE` | 必須（同 :70-71）。枠 4 を共有（`~/.claude-shared-memory/orca-parallel-agent-pipeline.md:34`） |
 | ready 後の CI / conflict / レビュー対応 | pr-dispatch（非 draft のみ `home/scripts/pr-dispatch.sh:104`） | 人が ready にした後 |
 | マージ後の片付け | worktree-gc | `home/scripts/worktree-gc.sh:162-226` |
 
 automation は 1 つ。benny の「triage と修正を分ける」は、判定（`verdicts`）と実行待ち（`jobs`）を別 state にし、`dispatch` が `config` の `dispatch_enabled` を毎回読むことで実現する（§8）。
 
-dispatcher の実行場所は `app` の専用 worktree（表示名 `app: issue-autopilot`、ブランチは push しない）。判断待ちの集約カードも兼ねる（§4.3）。worker の worktree はこの worktree の子にする（`--parent-worktree`。`--no-parent` は使わない、`orca-parallel-agent-pipeline.md:12`）。
+dispatcher の実行場所は対象リポの専用 worktree（表示名 `<リポ>: issue-autopilot`、ブランチは push しない）。判断待ちの集約カードも兼ねる（§4.3）。worker の worktree はこの worktree の子にする（`--parent-worktree`。`--no-parent` は使わない、`orca-parallel-agent-pipeline.md:12`）。
 
 Orca automation を選んだ理由: run 履歴と terminal を Orca が持ち、`--precheck` で安い判定を前段に置ける（https://www.onorca.dev/docs/cli/automations、`--help` 行 44-46）。`orca automations run` は precheck を飛ばす（同 行 46）ので、skill の最初の手順でも `candidates` を呼ぶ。`--reuse-session` は extras と併用不可なので使わない（同 行 48）。
 
 worker の起動（`dispatch` の中、ロック内、§3.2）:
 
 ```
-orca worktree create --repo "path:$HOME/www/dev/app" --name "issue-$N-$slug" --branch "issue-$N-$slug" \
-  --issue "$N" --base-branch origin/dev --parent-worktree "path:<dispatcher worktree>" --setup run --json
+orca worktree create --repo "path:$CHECKOUT" --name "issue-$N-$slug" --branch "issue-$N-$slug" \
+  --issue "$N" --base-branch "origin/$BASE" --parent-worktree "path:<dispatcher worktree>" --setup run --json
 orca agent launch --agent claude --worktree "id:<worktreeId>" --model opus --effort high --surface chat \
   --prompt "/issue-worker $N" --json
 ```
@@ -72,11 +72,11 @@ orca agent launch --agent claude --worktree "id:<worktreeId>" --model opus --eff
 
 precheck の既定 timeout は 60 秒（`--help` 行 45）。issue ごとに GitHub を叩くと収まらないので、一括取得 3 回だけにし、issue 単位の照合は `dispatch` に回す。timeout は 120 秒。
 
-1. `gh issue list -R studio-design/studio-api --author @me --state open -L 500 --json number,title,labels,updatedAt,assignees`。500 件なら打ち切りとみなして exit 1。
+1. `gh issue list -R "$REPO" --author @me --state open -L 500 --json number,title,labels,updatedAt,assignees`。500 件なら打ち切りとみなして exit 1。
 2. `orca worktree list --json` と `orca worktree ps --json`。`.ok != true` か `.result.truncated == true` なら exit 1（`worktree-gc.sh:75`）。branch は `refs/heads/` を外してから比べる（`pr-dispatch.sh:95` と同じ。実際の値は `refs/heads/wadakatu/…`）。
 3. **未判定** を作る。次を除外:
    - ラベル `no-agent`、`tracking`、`Stale`。assignee に自分以外。
-   - worktree がある: `repoId` が `app` の id（`141d1cc3-…`）で、`linkedIssue == N`、または `linkedItems[].url` が issue URL、または branch が `issue-<N>-` で始まる（この照合を `wt_for_issue <N>` とし、§3.2 と worker でも使う）。
+   - worktree がある: `repoId` が対象リポの Orca repo id で、`linkedIssue == N`、または `linkedItems[].url` が issue URL、または branch が `issue-<N>-` で始まる（この照合を `wt_for_issue <N>` とし、§3.2 と worker でも使う）。
    - `jobs.tsv` に行がある（状態を問わない）。
    - `verdicts.tsv` に同じ `(repo#N, updatedAt)` の判定がある。
 4. **実行待ち** は `jobs.tsv` の `pending` 行。未判定の除外処理は通さない。
@@ -142,7 +142,7 @@ ask は dispatcher session を通さずスクリプトが直接ボードに出�
 
 go（全部満たす）:
 - 期待する振る舞いが書いてあり、テストで表せる。
-- api リポで完結し、公開 API の形・DB スキーマ・`deploy/`・secret を変えない（2 リポ跨ぎは ask、`~/www/dev/app/AGENTS.md:113`）。
+- 対象リポで完結し、公開 API の形・DB スキーマ・デプロイ設定・secret を変えない（2 リポ跨ぎは ask。対象リポの AGENTS.md / CLAUDE.md に規則があればそれに従う）。
 - 触るファイル 10 以下・差分 300 行以下・新しい依存なし（bounded fix。数字は推測、§10）。
 - Bug なら再現手順があるか、テストで再現できる見込みがある。
 
@@ -165,7 +165,7 @@ orca worktree set --worktree current --workspace-status needs-decision --unread 
 
 ### 4.4 着手直前の再確認（ownership gate、benny §3）
 
-`issue-autopilot.sh recheck <N>` を `dispatch`（pending に対して）と worker（起動済みに対して）が呼ぶ。GraphQL 1 回で issue の state・author・labels・assignees・updatedAt・`closedByPullRequestsReferences`・timeline の CROSS_REFERENCED_EVENT（PR のみ）を取る（9688 で空、9365 で非空を確認）。加えて `wt_for_issue <N>` で Orca の worktree を見る。
+`issue-autopilot.sh recheck <N>` を `dispatch`（pending に対して）と worker（起動済みに対して）が呼ぶ。GraphQL 1 回で issue の state・author・labels・assignees・updatedAt・`closedByPullRequestsReferences`・timeline の CROSS_REFERENCED_EVENT（PR のみ）を取る（実在の issue で、空のものと非空のものの両方を確認）。加えて `wt_for_issue <N>` で Orca の worktree を見る。
 
 | 結果 | pending のとき | 起動済み（worker）のとき |
 |---|---|---|
@@ -202,18 +202,18 @@ push と merge:
 - branch-guard は保護ブランチ上の commit/push と `HEAD:dev` 名指しの push を止める（`agents/claude/hooks/branch-guard.sh:66-78`）が、作業ブランチから `git push origin HEAD:refs/heads/dev` は通る（宛先検査 :76 が `refs/heads/` を見ない。模擬入力で exit 0）。**stage 0 の前提として別 PR で直す**: 宛先検査に `refs/heads/` 省略可を足し、作業ブランチを cwd にした回帰確認を付ける。
 - `gh pr merge`、`gh workflow run`、`gh release` はどの hook にも掛からない。`agents/claude/settings.json` の deny に `Bash(gh pr merge *)` `Bash(gh workflow run *)` `Bash(gh release *)` を足す（全セッションに効くが、線引き上どのセッションも自動では打たない）。
 
-秘密情報: deny は `.env` `.env.local` `.env.production` `.env.staging` `.env.testing` と鍵（`~/.claude/settings.json:59-72`）。setup の `worktree-init.sh` は主 checkout の `.env` と `gcs_key.json` `firebase_key.json` `google_api_key.json` を新 worktree にコピーする（`~/www/dev/app/scripts/worktree-init.sh:17, 67-70`）ので worker の worktree には主 checkout と同じ認証情報がある。`make` がコンテナに `.env` を渡すので外せない。やること: deny に `Read(//**/*_key.json)` を足す。Read の deny は `cat` `head` `tail` `sed` `tee` とリダイレクトにも効くが、ディレクトリへの `grep -r` や Python/Node の子プロセスからの読み取りには効かない（https://code.claude.com/docs/en/permissions#what-read-and-edit-rules-cover）。残りは auto モードの classifier と skill の禁止。pilot に追加の隔離基盤は要らない。
+秘密情報: deny は `.env` `.env.local` `.env.production` `.env.staging` `.env.testing` と鍵（`~/.claude/settings.json:59-72`）。対象リポの setup script が主 checkout の `.env` や鍵ファイルを新 worktree にコピーするなら、worker の worktree には主 checkout と同じ認証情報がある（開発環境が `.env` を要るなら外せない）。やること: deny に `Read(//**/*_key.json)` を足す。Read の deny は `cat` `head` `tail` `sed` `tee` とリダイレクトにも効くが、ディレクトリへの `grep -r` や Python/Node の子プロセスからの読み取りには効かない（https://code.claude.com/docs/en/permissions#what-read-and-edit-rules-cover）。残りは auto モードの classifier と skill の禁止。pilot に追加の隔離基盤は要らない。
 
 worker の skill で禁じること: マージ、`gh pr ready`、他人の PR/issue へのコメント、Slack/メール、`deploy/` と `infra-iac`、本番の読み書き、migration の追加（`fail <N> scope`）、`.env` と `*_key.json` の読み取り、`orca agent launch`（benny §14）。
 
 PR は `gh pr create --draft` で終わり。本文は `/pr` skill の形（`agents/skills/pr/SKILL.md:38-61`）。「検証:」に修正前に落ちたテスト名と修正後の結果、`## 関連情報` に issue と「issue-autopilot による自動作成、Codex レビュー済み」。draft のままなので pr-dispatch は触らず（`pr-dispatch.sh:104`）、人が ready にした時点から既存の流れに乗る。
 
-再現: benny は実 UI で独立に 2 回再現する（§7）。API では「失敗するテストを先に書いて赤を見る → 可能なら `/vasari:verify` か curl で 1 回」に置き換える（本設計の適応）。再現できなければ `fail <N> unclear`。
+再現: benny は実 UI で独立に 2 回再現する（§7）。API では「失敗するテストを先に書いて赤を見る → 可能なら対象リポの動作確認 skill か curl で 1 回」に置き換える（本設計の適応）。再現できなければ `fail <N> unclear`。
 
 ## 7. 失敗時と観測
 
-**setup 完了待ち（worker の最初の手順、`--resume` では飛ばす）**: 完了の印は setup script 自身が最後に出す `Orca setup done:` の行（`orca repo show --json` の `.result.repo.hookSettings.scripts.setup`。`set -euo pipefail` なので全工程成功時だけ出る）。`orca terminal list --worktree current --json` で Setup タブ（`title`）を見つけ、出力末尾にこの行が出るまで 60 秒おきに最長 20 分待つ。`openapi/bundled/` の存在は使わない（`bundle:api` は 5 本を順に作る、`~/www/dev/app/openapi/package.json:13`）。
-再試行: 印が無く、**Setup タブが終了している**（`connected == false`、または行自体が消えた。推測: stage 0 で確かめる）ときだけ 1 回、**同じ script をそのまま** 流す: `orca repo show --repo "path:$HOME/www/dev/app" --json | jq -r '.result.repo.hookSettings.scripts.setup' | ORCA_WORKTREE_PATH="$PWD" bash`。`connected == true` の間は待つだけで、重ねない。再試行の前に `.setup-retry` を worktree に置き、2 回目はしない。それでも印が出なければ `fail <N> setup` と末尾の行を note に。
+**setup 完了待ち（worker の最初の手順、`--resume` では飛ばす）**: 完了の印は setup script 自身が最後に出す `Orca setup done:` の行（`orca repo show --json` の `.result.repo.hookSettings.scripts.setup`。`set -euo pipefail` なので全工程成功時だけ出る）。`orca terminal list --worktree current --json` で Setup タブ（`title`）を見つけ、出力末尾にこの行が出るまで 60 秒おきに最長 20 分待つ。途中の生成物の有無では判定しない（setup が複数の生成物を順に作る場合、途中で止まっても一部は存在する）。
+再試行: 印が無く、**Setup タブが終了している**（`connected == false`、または行自体が消えた。推測: stage 0 で確かめる）ときだけ 1 回、**同じ script をそのまま** 流す: `orca repo show --repo "path:$CHECKOUT" --json | jq -r '.result.repo.hookSettings.scripts.setup' | ORCA_WORKTREE_PATH="$PWD" bash`。`connected == true` の間は待つだけで、重ねない。再試行の前に `.setup-retry` を worktree に置き、2 回目はしない。それでも印が出なければ `fail <N> setup` と末尾の行を note に。
 
 **sweep（`candidates` の中、ロック内、観測と整合だけ。起動はしない）**:
 
@@ -289,4 +289,3 @@ worker 自身の失敗: テストが 2 回直しても赤 → push せず `fail 
 - /Users/wadakatu/www/personal/dotfiles/home/scripts/pr-dispatch.sh（state TSV・board()・GraphQL 一括取得・`refs/heads/` 除去 :95 の手本）
 - /Users/wadakatu/www/personal/dotfiles/home/scripts/memory-maintenance.sh（`pending`/`creating` の回復と日次上限の手本 :795-812）
 - /Users/wadakatu/www/personal/dotfiles/agents/claude/hooks/branch-guard.sh（stage 0 前提の修正箇所 :76）
-- /Users/wadakatu/www/dev/app/scripts/worktree-init.sh（setup がコピーする認証情報と要求の一次情報）
