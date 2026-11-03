@@ -33,6 +33,7 @@ JOBS="$STATE_DIR/jobs.tsv"           # key status branch worktreeId operationId 
 LAUNCHES="$STATE_DIR/launches.log"   # run_id ts day key reserved|launched|failed
 BOARD="$STATE_DIR/board.tsv"         # selector last_comment
 LOCK="$STATE_DIR/lock.d"
+BOARD_RETRY="$STATE_DIR/board-retry.tsv" # selector status comment (送れなかったカード)
 DRY_RUN="${DRY_RUN:-0}"
 NOW="${ISSUE_AUTOPILOT_NOW:-$(date +%s)}"
 TODAY=$(TZ=Asia/Tokyo date +%F)
@@ -82,8 +83,11 @@ lock() {
     local i=0 p
     while ! mkdir "$LOCK" 2>/dev/null; do
         p=$(cat "$LOCK/pid" 2>/dev/null || true)
-        if [ -n "$p" ] && ! kill -0 "$p" 2>/dev/null; then
-            log "死んだロックを回収 (pid $p)"; rm -rf "$LOCK"; continue
+        if [ -n "$p" ] && ! kill -0 "$p" 2>/dev/null && mkdir "$LOCK.reclaim" 2>/dev/null; then
+            # 回収も 1 プロセスだけ。取ったあとで pid を読み直し、別の所有者に替わっていれば消さない
+            # ponytail: 回収中に落ちると lock.reclaim が残る。そのときは手で消す (ログの「ロックが空かない」で気づく)
+            if [ "$(cat "$LOCK/pid" 2>/dev/null || true)" = "$p" ]; then log "死んだロックを回収 (pid $p)"; rm -rf "$LOCK"; fi
+            rmdir "$LOCK.reclaim"; continue
         fi
         i=$((i + 1)); [ "$i" -ge 60 ] && die "ロックが空かない (pid ${p:-?})"
         sleep 1
@@ -91,13 +95,15 @@ lock() {
     echo $$ >"$LOCK/pid"
     LOCKED=1
     trap 'rm -rf "$LOCK"' EXIT
-    touch "$VERDICTS" "$JOBS" "$LAUNCHES" "$BOARD"
+    touch "$VERDICTS" "$JOBS" "$LAUNCHES" "$BOARD" "$BOARD_RETRY"
 }
 
 # ---- TSV (1 列目がキー) ----
 tsv_get() { awk -F'\t' -v k="$2" '$1 == k { print; exit }' "$1"; }
 tsv_del() { awk -F'\t' -v k="$2" '$1 != k' "$1" >"$1.tmp"; mv "$1.tmp" "$1"; }
-tsv_put() { tsv_del "$1" "${2%%$'\t'*}"; printf '%s\n' "$2" >>"$1"; }
+tsv_put() { # 置換後の全体を一時ファイルに作ってから 1 回の rename で入れ替える
+    awk -F'\t' -v k="${2%%$'\t'*}" -v l="$2" '$1 != k { print } END { print l }' "$1" >"$1.tmp" && mv "$1.tmp" "$1"
+}
 key() { printf '%s#%s' "$REPO" "$1"; }
 
 job_load() { # job_load <N>: J_* に読む。無ければ 1
@@ -133,10 +139,16 @@ board() { # board <selector> <status|-> <comment>
     esac
     if orca "${args[@]}" >/dev/null 2>&1; then
         tsv_put "$BOARD" "$sel"$'\t'"$comment"
+        tsv_del "$BOARD_RETRY" "$sel"
         log "board $sel: $comment"
     else
+        tsv_put "$BOARD_RETRY" "$sel"$'\t'"$status"$'\t'"$comment"
         log "WARN: カードに書けない $sel (次回に再試行)"
     fi
+}
+board_retry() { # 送れなかったカードを送り直す (状態遷移とは別に、成功するまで残す)
+    local sel st c
+    while IFS=$'\t' read -r sel st c; do [ -n "$sel" ] && board "$sel" "$st" "$c"; done < <(cat "$BOARD_RETRY")
 }
 # worktree の無い判断待ちを dispatcher のカードに 1 行で集める。対象は最後の candidates で open だった issue。
 refresh_asks() {
@@ -241,6 +253,7 @@ fail_job() { # fail_job <N> <code> [補足]  (J_* は読み込み済み)
 # ---- sweep: Orca の結果で state を直すだけ。GitHub も起動も叩かない ----
 sweep() {
     local n row st up
+    board_retry
     for n in $(jobs_with launching running stalled); do
         job_load "$n"
         if [ "$J_STATUS" = "launching" ]; then
@@ -407,8 +420,12 @@ cmd_dispatch() {
     orca_lists || { log "Orca の worktree を取れない。見送り"; exit 0; }
     RUN_ID="d$NOW-$$"
     local n launched=0 active today
-    for n in $(jobs_with launching); do job_load "$n"; recover "$n"; done
+    for n in $(jobs_with launching); do
+        dispatch_allowed || exit 0 # 復旧中の失敗で cooldown に入ったら残りも起動しない
+        job_load "$n"; recover "$n"
+    done
     for n in $(jobs_with pending); do
+        dispatch_allowed || break
         active=$(jobs_with launching running stalled | grep -c . || true)
         today=$(awk -F'\t' -v d="$TODAY" '$3 == d && $5 == "reserved"' "$LAUNCHES" | wc -l | tr -d ' ')
         if [ "$launched" -ge "$(cfg max_per_run 2)" ] || [ "$active" -ge "$(cfg max_active 3)" ] || [ "$today" -ge "$(cfg max_per_day 4)" ]; then

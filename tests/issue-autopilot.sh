@@ -37,7 +37,7 @@ case "$1 $2" in
     "worktree ps") cat "$FAKE/ps.json" ;;
     "worktree create") echo "$*" >>"$FAKE/calls"; cat "$FAKE/create.json" ;;
     "agent launch") echo "$*" >>"$FAKE/calls"; cat "$FAKE/launch.json"; exit "$(cat "$FAKE/launch.rc" 2>/dev/null || echo 0)" ;;
-    "worktree set") echo "$*" >>"$FAKE/calls"; echo '{"ok": true}' ;;
+    "worktree set") echo "$*" >>"$FAKE/calls"; [ -f "$FAKE/set.fail" ] && exit 1; echo '{"ok": true}' ;;
     *) exit 1 ;;
 esac
 EOF
@@ -342,6 +342,25 @@ printf 'o/r#1\tlaunching\tissue-1-a\tR::/wt/gone\tOP1\t-\t-\t99000\t1\t-\n' >"$T
 run dispatch
 check "起動途中に worktree が消えたら failed で枠を離す" is "$(job 1)" failed
 check "消えた worktree へ起動しない" lacks calls "agent launch"
+
+setup board-retry
+list "$MAIN" "$W"
+printf 'o/r#1\trunning\tissue-1-a\tR::/wt/a\tok:1\tPA\t-\t99000\t1\t-\n' >"$T/state/jobs.tsv"
+ps_agent "R::/wt/a" PA working "/issue-worker 1" 90000000
+touch "$T/set.fail"
+run candidates
+check "通知に失敗しても stalled にはする" is "$(job 1)" stalled
+rm "$T/set.fail"; : >"$T/calls"
+run candidates
+check "送れなかったカードを次の sweep で送り直す" has calls "--worktree id:R::/wt/a --comment 停止: #1"
+check "送れたら再送の対象から消す" lacks state/board-retry.tsv "id:R::/wt/a"
+
+setup recover-cooldown
+printf 'o/r#2\tlaunching\tb\tR::/wt/gone2\tOP1\t-\t-\t99000\t1\t-\n' >"$T/state/jobs.tsv"
+printf 'o/r#3\tlaunching\tc\tR::/wt/gone3\tOP1\t-\t-\t99000\t1\t-\n' >>"$T/state/jobs.tsv"
+pending 1
+run dispatch
+check "復旧中に cooldown に入ったら pending を起動しない" lacks calls "worktree create"
 
 [ "$fail" = 0 ] && echo "ok: issue-autopilot"
 exit "$fail"
