@@ -83,6 +83,7 @@
       "Read(~/.gnupg/**)",
       "Read(~/.config/gh/**)",
       "Read(~/.claude/.credentials.json)",
+      "Read(//**/*_key.json)",
 
       "Edit(//nix/store/**)",
 
@@ -91,7 +92,11 @@
       "Bash(rm -rf /*)",
       "Bash(rm -rf ~)",
       "Bash(rm -rf ~/*)",
-      "Bash(chmod 777 *)"
+      "Bash(chmod 777 *)",
+
+      "Bash(gh pr merge *)",
+      "Bash(gh workflow run *)",
+      "Bash(gh release *)"
     ],
 
     "ask": [
