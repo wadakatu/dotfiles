@@ -330,5 +330,18 @@ setup asks-zero
 run candidates
 check "判断待ち 0 でカードを作業中・既読に戻す" has calls "--comment 判断待ち 0 --json --workspace-status in-progress --read"
 
+setup verdict-stale
+echo "2026-02-02T00:00:00Z" >"$T/upd"
+run verdict 1 go "ok" "2026-01-01T00:00:00Z"
+check "読んだ版と違えば判定を書かない" lacks state/verdicts.tsv "o/r#1"
+check "版違いは exit 3" rc 3
+check "job も作らない" is "$(job 1)" ""
+
+setup launching-wt-gone
+printf 'o/r#1\tlaunching\tissue-1-a\tR::/wt/gone\tOP1\t-\t-\t99000\t1\t-\n' >"$T/state/jobs.tsv"
+run dispatch
+check "起動途中に worktree が消えたら failed で枠を離す" is "$(job 1)" failed
+check "消えた worktree へ起動しない" lacks calls "agent launch"
+
 [ "$fail" = 0 ] && echo "ok: issue-autopilot"
 exit "$fail"

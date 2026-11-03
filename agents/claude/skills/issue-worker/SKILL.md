@@ -26,7 +26,9 @@ IA=~/www/personal/dotfiles/home/scripts/issue-autopilot.sh
 2. **再確認**: `"$IA" recheck <N>`。
    - `ok` → 続ける。
    - `gone` / `owner` / `pr-exists` → `fail <N> <その語>`。
-   - `changed` → issue を読み直し、`/issue-autopilot` の go 条件を満たすなら `"$IA" verdict <N> go "changed ok"` で続ける。満たさなければ `fail <N> changed`。
+   - `changed` → 読む前に `gh issue view <N> -R <repo> --json updatedAt -q .updatedAt` を控えてから issue を読み直す。
+     `/issue-autopilot` の go 条件を満たすなら `"$IA" verdict <N> go "changed ok" <控えた updatedAt>` で続ける
+     （exit 3 なら読んでいる間にまた編集されたので、もう一度読み直す。2 回続いたら `fail <N> changed`）。満たさなければ `fail <N> changed`。
    - `error` → 5 分待って 1 回だけやり直し、駄目なら `fail <N> recheck`。
    - `gh issue view <N> -R <repo> --comments` を読み、誰かが「対応します」「PR を出した」と書いていれば `fail <N> owner`。
 3. **再現**: 対象リポの規約（`AGENTS.md` / `CLAUDE.md`）どおりにテストを書き、**修正前に落ちる**のを見る。
@@ -37,8 +39,9 @@ IA=~/www/personal/dotfiles/home/scripts/issue-autopilot.sh
 6. **Codex レビュー**: `pgrep -f '[c]odex exec' | wc -l` が 4 未満になるまで 5 分おきに待つ。
    開始から 4 時間で空かなければ PR を作らず `fail <N> review-pending`。空いたら Bash を `run_in_background: true` で:
    `codex exec -C "$PWD" -s read-only -o "$TMPDIR/issue-<N>-review.md" review --base origin/<base> < /dev/null`。
-   指摘はコードで裏を取ってから直し、直したらテストを流し直す。
-7. **draft PR**: `git push -u origin HEAD` → `gh pr create --draft`。本文は `/pr` skill の形で、
+   指摘はコードで裏を取ってから直し、直したらテストを流し直して commit する。
+7. **draft PR**: `git status --porcelain` が空（検証した変更が全部 commit 済み）なのを確かめてから
+   `git push -u origin HEAD` → `gh pr create --draft`。本文は `/pr` skill の形で、
    - 「検証:」に修正前に落ちたテスト名と修正後の結果、
    - `## 関連情報` に `Closes #<N>` と「issue-autopilot による自動作成、Codex レビュー済み」。
    作ったら `"$IA" done <N> <PR の URL>`。

@@ -5,7 +5,7 @@
 # 「一人で進めてよいか」の判定は /issue-autopilot (dispatcher)、実装は /issue-worker が行う。
 #
 #   candidates            precheck。sweep の後、未判定と実行待ちを出す。両方 0 なら exit 1
-#   verdict <N> go|ask|skip "<理由>"   判定を書く (go は実行待ちを作る)
+#   verdict <N> go|ask|skip "<理由>" [読んだ updatedAt]   判定を書く (go は実行待ちを作る。版が違えば exit 3)
 #   dispatch              実行待ちの起動と、起動途中 (launching) の復旧。起動はすべてここと resume から
 #   resume <N> "<指示>"    起動済みの job を同じ worktree で再開する
 #   recheck <N>           着手直前の再確認。ok / gone / pr-exists / owner / changed / error を出す
@@ -248,6 +248,7 @@ sweep() {
                 row=$(wt_by_branch "$J_BRANCH")
                 [ -n "$row" ] && { IFS=$'\t' read -r J_WT J_BRANCH <<<"$row"; job_save; log "sweep #$n: worktree を拾った"; }
             fi
+            if [ "$J_WT" != "-" ] && ! wt_exists "$J_WT"; then fail_job "$n" gone "起動途中に worktree 消失"; continue; fi
             if [ "$J_WT" != "-" ] && [ "$J_PANE" = "-" ]; then
                 J_PANE=$(agent_for "$J_WT" "$n")
                 if [ -n "$J_PANE" ]; then J_STATUS=running; job_save; event "$n" launched; log "sweep #$n: agent を拾った"; else J_PANE=-; fi
@@ -307,6 +308,7 @@ recover() {
         J_STATUS=pending; J_BRANCH=-; J_OP=-; J_START=-; J_NOTE="worktree が作れなかった"; job_save
         event "$n" failed; log "recover #$n: worktree が無い。pending に戻す"; return 0
     fi
+    if ! wt_exists "$J_WT"; then fail_job "$n" gone "起動途中に worktree 消失"; return 0; fi
     J_PANE=$(agent_for "$J_WT" "$n")
     if [ -n "$J_PANE" ]; then J_STATUS=running; job_save; log "recover #$n: agent を拾った"; return 0; fi
     J_PANE=-
@@ -382,10 +384,13 @@ cmd_candidates() {
 }
 
 cmd_verdict() {
-    local n=${1:?N} v=${2:?go|ask|skip} reason=${3:-} upd
+    local n=${1:?N} v=${2:?go|ask|skip} reason=${3:-} seen=${4:-} upd
     case "$v" in go | ask | skip) ;; *) die "verdict は go|ask|skip: $v" ;; esac
     load_cfg; lock
     upd=$(gh issue view "$n" -R "$REPO" --json updatedAt -q .updatedAt) || die "issue #$n を読めない"
+    if [ -n "$seen" ] && [ "$seen" != "$upd" ]; then # 読んだ後に編集された。古い内容への判定は残さない
+        log "verdict #$n: 読んだ版 ($seen) と今 ($upd) が違う。書かずに次回の再判定へ"; echo changed; exit 3
+    fi
     verdict_put "$n" "$upd" "$v" "$reason"
     log "verdict #$n $v: $reason"
     if [ "$v" = "go" ]; then

@@ -23,7 +23,8 @@ IA=~/www/personal/dotfiles/home/scripts/issue-autopilot.sh
 3. `untriaged` を上から（updatedAt の新しい順）**最大 8 件**、1 件ずつ読む。
    - `gh issue view <N> -R <repo> --comments`、本文が指すファイルを `rg` で探して読む。
    - 対象リポの `AGENTS.md` / `CLAUDE.md` に規則があれば従う。
-4. 1 件ごとに `"$IA" verdict <N> <go|ask|skip> "<理由コード> <補足 20 字以内>"` を書く。
+4. 1 件ごとに `"$IA" verdict <N> <go|ask|skip> "<理由コード> <補足 20 字以内>" <その行の updatedAt>` を書く。
+   読んだ後に issue が編集されていると `changed` を出して exit 3 になる。そのまま次の issue へ進む（次の run で読み直す）。
 5. 最後に `"$IA" dispatch` を 1 回実行する（起動するかどうか・何件かはスクリプトが決める）。
 6. 結果を 1〜3 行で返す（判定の件数と、起動した issue 番号）。
 
