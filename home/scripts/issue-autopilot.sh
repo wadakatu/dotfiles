@@ -102,7 +102,8 @@ lock() {
 tsv_get() { awk -F'\t' -v k="$2" '$1 == k { print; exit }' "$1"; }
 tsv_del() { awk -F'\t' -v k="$2" '$1 != k' "$1" >"$1.tmp"; mv "$1.tmp" "$1"; }
 tsv_put() { # 置換後の全体を一時ファイルに作ってから 1 回の rename で入れ替える
-    awk -F'\t' -v k="${2%%$'\t'*}" -v l="$2" '$1 != k { print } END { print l }' "$1" >"$1.tmp" && mv "$1.tmp" "$1"
+    # 値は ENVIRON で渡す（-v は \n や \t を展開して列・行を壊す）
+    TSV_LINE="$2" awk -F'\t' -v k="${2%%$'\t'*}" '$1 != k { print } END { print ENVIRON["TSV_LINE"] }' "$1" >"$1.tmp" && mv "$1.tmp" "$1"
 }
 key() { printf '%s#%s' "$REPO" "$1"; }
 
@@ -194,6 +195,12 @@ agent_for() { # agent_for <wt> <N> [除く paneKey] → paneKey。既定で resu
         [.result.worktrees[] | select(.worktreeId == $w) | .agents[]?
          | select(((.prompt // "") | test($re)) and (.paneKey as $p | $ex | index([$p]) | not))] | max_by(.updatedAt // 0) // empty | .paneKey' <<<"$PS_JSON"
 }
+agent_alive() { # done / idle / 消失 以外（working・waiting・不明な状態）は生きているとみなす
+    case "$(agent_state "$1" "$2" | cut -f1)" in "" | done | idle) return 1 ;; *) return 0 ;; esac
+}
+save_prompt() { # 起動の指示を launching を書く前に残す（途中で落ちても recover が同じ指示で起動する）
+    mkdir -p "$STATE_DIR/prompts"; printf '%s' "$2" >"$STATE_DIR/prompts/$1.tmp" && mv "$STATE_DIR/prompts/$1.tmp" "$STATE_DIR/prompts/$1"
+}
 agent_state() { # agent_state <wt> <paneKey> → "state<TAB>updatedAt(秒)"。無ければ空
     jq -r --arg w "$1" --arg p "$2" '[.result.worktrees[] | select(.worktreeId == $w) | .agents[]? | select(.paneKey == $p)][0]
         // empty | [.state, (((.updatedAt // 0) / 1000) | floor | tostring)] | @tsv' <<<"$PS_JSON"
@@ -279,6 +286,11 @@ sweep() {
                     J_STATUS=stalled; job_save
                     board "id:$J_WT" needs-decision "停止: #$n $(((NOW - J_START) / 3600))h"
                 fi ;;
+            *) # waiting（権限確認など）や不明な状態: 枠は持ったまま人に回す
+                if [ "$J_STATUS" = "running" ]; then
+                    J_STATUS=stalled; job_save
+                    board "id:$J_WT" needs-decision "入力待ち: #$n ($st)"
+                fi ;;
         esac
     done
 }
@@ -292,7 +304,7 @@ slugify() {
 launch_agent() {
     local n=$1 prompt=$2 out op exclude=${3:-}
     if [ "$DRY_RUN" = "1" ]; then log "DRY-RUN: agent launch #$n ($prompt)"; return 0; fi
-    mkdir -p "$STATE_DIR/prompts"; printf '%s' "$prompt" >"$STATE_DIR/prompts/$n"
+    save_prompt "$n" "$prompt"
     local args=(agent launch --agent claude --worktree "id:$J_WT" --model opus --effort high --surface chat --prompt "$prompt" --json)
     case "$J_OP" in - | ok:*) ;; *) args+=(--retry-launch "$J_OP") ;; esac
     if out=$(orca "${args[@]}" 2>&1) && jq -e '.ok == true' <<<"$out" >/dev/null 2>&1; then
@@ -336,6 +348,7 @@ launch_new() { # launch_new <N> (再確認済み。RC_TITLE がある)
     br="issue-$n-$(slugify "$RC_TITLE")"
     if [ "$DRY_RUN" = "1" ]; then log "DRY-RUN: launch #$n ($br)"; return 0; fi
     event "$n" reserved
+    save_prompt "$n" "/issue-worker $n"
     J_STATUS=launching; J_BRANCH=$br; J_START=$NOW; J_NOTE=-; job_save
     local args=(worktree create --repo "path:$CHECKOUT" --name "$br" --branch "$br" --issue "$n" --base-branch "origin/$BASE" --setup run --json)
     [ -n "$DISPATCHER" ] && args+=(--parent-worktree "path:$DISPATCHER")
@@ -455,7 +468,7 @@ cmd_resume() {
     [ "$J_WT" != "-" ] || die "#$n に worktree が無い"
     orca_lists || die "Orca の worktree を取れない"
     wt_exists "$J_WT" || die "#$n の worktree が消えている"
-    [ "$(agent_state "$J_WT" "$J_PANE" | cut -f1)" != "working" ] || die "#$n の agent ($J_PANE) はまだ動いている。タブを閉じてから resume する"
+    ! agent_alive "$J_WT" "$J_PANE" || die "#$n の agent ($J_PANE) はまだ残っている。タブを閉じてから resume する"
     if [ "$J_STATUS" = "failed" ] && [ "$(jobs_with launching running stalled | grep -c . || true)" -ge "$(cfg max_active 3)" ]; then
         die "稼働が上限 ($(cfg max_active 3))。空いてから resume する" # stalled は枠を持ったままなので数えない
     fi
@@ -463,6 +476,7 @@ cmd_resume() {
     old=$J_PANE; RUN_ID="r$NOW-$$"
     if [ "$DRY_RUN" = "1" ]; then log "DRY-RUN: resume #$n ($prompt)"; return 0; fi
     mkdir -p "$STATE_DIR/prompts"; printf '%s\n' "$old" >>"$STATE_DIR/prompts/$n.exclude" # 過去の pane は全部除く
+    save_prompt "$n" "$prompt"
     J_STATUS=launching; J_PANE=-; J_OP=-; J_START=$NOW; job_save # 4 時間の通知は再開から数える
     launch_agent "$n" "$prompt" "$old"
 }
@@ -507,7 +521,7 @@ cmd_skip() {
             launching) die "#$n は起動中。running になってからタブを閉じ、もう一度 skip する" ;;
             running | stalled)
                 orca_lists || die "Orca の worktree を取れない"
-                [ "$(agent_state "$J_WT" "$J_PANE" | cut -f1)" != "working" ] || die "#$n の agent ($J_PANE) はまだ動いている。タブを閉じてから skip する"
+                ! agent_alive "$J_WT" "$J_PANE" || die "#$n の agent ($J_PANE) はまだ残っている。タブを閉じてから skip する"
                 J_STATUS=failed; J_NOTE="人が skip"; job_save ;;
         esac
     fi

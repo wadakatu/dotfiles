@@ -362,5 +362,27 @@ pending 1
 run dispatch
 check "復旧中に cooldown に入ったら pending を起動しない" lacks calls "worktree create"
 
+setup waiting
+list "$MAIN" "$W"
+printf 'o/r#1\trunning\tissue-1-a\tR::/wt/a\tok:1\tPA\t-\t99000\t1\t-\n' >"$T/state/jobs.tsv"
+ps_agent "R::/wt/a" PA waiting "/issue-worker 1" 99990000
+run candidates
+check "入力待ちの worker は stalled にして人に回す" is "$(job 1)" stalled
+check "入力待ちをボードに出す" has calls "入力待ち: #1"
+run resume 1 "続けて"
+check "入力待ちの agent が残っていれば resume しない" lacks calls "agent launch"
+
+setup tsv-escape
+printf 'o/r#1\trunning\tissue-1-a\tR::/wt/a\tok:1\tPA\t-\t99000\t1\t-\n' >"$T/state/jobs.tsv"
+run fail 1 red 'fix \n and \t handling'
+check "補足の \\n で行が割れない" is "$(wc -l <"$T/state/jobs.tsv" | tr -d ' ')" 1
+
+setup prompt-reset
+pending 1
+mkdir -p "$T/state/prompts"; printf "/issue-worker 1 --resume 'old'" >"$T/state/prompts/1"
+echo '{"ok": false}' >"$T/create.json"
+run dispatch
+check "新規起動の前に前回の resume 指示を消す" is "$(cat "$T/state/prompts/1")" "/issue-worker 1"
+
 [ "$fail" = 0 ] && echo "ok: issue-autopilot"
 exit "$fail"
