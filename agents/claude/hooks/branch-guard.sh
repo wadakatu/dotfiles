@@ -72,8 +72,9 @@ for p in $PROTECTED; do
   case $norm in
   *"git push"*)
     # Catch pushes naming a protected ref: `git push origin main`,
-    # `git push origin HEAD:dev`, `git push origin feature:main`.
-    if printf '%s' "$norm" | grep -Eq "git push[^&|;]*([[:space:]]|:)${p}([[:space:]]|:|\$)"; then
+    # `git push origin HEAD:dev`, `git push origin feature:main`,
+    # `git push origin HEAD:refs/heads/dev`.
+    if printf '%s' "$norm" | grep -Eq "git push[^&|;]*([[:space:]]|:)(refs/heads/)?${p}([[:space:]]|:|\$)"; then
       echo "branch-guard: this push explicitly targets protected branch '$p'. Open a PR instead." >&2
       exit 2
     fi

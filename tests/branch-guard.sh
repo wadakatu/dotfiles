@@ -29,6 +29,9 @@ check 2 "$feat" 'git push origin main'
 check 2 "$feat" "git -C $feat push origin main"
 check 2 "$feat" 'git -c push.default=current push origin HEAD:dev'
 check 2 "$feat" 'git --no-pager push origin feature:master'
+check 2 "$feat" 'git push origin HEAD:refs/heads/dev'
+check 2 "$feat" 'git push origin refs/heads/main'
+check 0 "$feat" 'git push origin HEAD:refs/heads/feature'
 check 0 "$feat" 'git commit -m x'
 check 0 "$feat" "git -C $feat push origin feature"
 # -C の前に別のオプションがあっても、cwd ではなく -C の先で判定する
