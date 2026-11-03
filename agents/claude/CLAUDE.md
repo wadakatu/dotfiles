@@ -124,6 +124,13 @@ skill を足したり消したりしたら、`darwin-rebuild switch` でリン�
 
 人の判断が要る質問は、文章で終わらせず AskUserQuestion で聞く。文章の質問は Orca のボードにも Needs You にも出ず、
 ユーザーからは完了に見える（Stop hook の question-guard.sh が差し戻す）。
+
+判断を仰ぐ質問は、ツール名・モード名・件数・ファイル名を詰め込んだ 1 段落にしない。
+本文で「それは何か → 何が困っているか → 試した結果 → 選択肢それぞれで何が起きるか」を番号付きで 1 つずつ、平易な言葉で書き、
+ダイアログの質問文と選択肢は短く、選んだら何が起きるかだけにする。数字は判断に効くものに絞り、内訳は聞かれたら出す。
+**Why:** 件数と設定名を並べた長い質問は「もう少しわかりやすく１つずつ教えて　今何を言ってるのかさっぱりわからない」と差し戻され、
+レビュー指摘の二択でも「あまり違いがわかっていない…わかりやすく簡潔に説明してほしい」と言われた。
+
 止まって聞くとき、Orca の worktree にいれば
 `orca worktree set --worktree current --workspace-status needs-decision --unread --comment "<何を判断してほしいか 1 行>" --json`
 でボードの Needs decision 列にカードを移す。判断をもらったら `--workspace-status in-progress --read` に戻す。
