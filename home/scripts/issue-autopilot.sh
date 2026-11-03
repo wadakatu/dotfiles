@@ -223,7 +223,7 @@ query($owner: String!, $name: String!, $n: Int!) {
     assignees(first: 20) { pageInfo { hasNextPage } nodes { login } }
     closedByPullRequestsReferences(first: 20, includeClosedPrs: true) { pageInfo { hasNextPage } nodes { state } }
     timelineItems(itemTypes: [CROSS_REFERENCED_EVENT], first: 50) { pageInfo { hasNextPage }
-      nodes { ... on CrossReferencedEvent { source { __typename ... on PullRequest { state } } } } }
+      nodes { ... on CrossReferencedEvent { willCloseTarget source { __typename ... on PullRequest { state } } } } }
   } }
 }' 2>/dev/null) || { RC_CODE=error; return 0; }
     res=$(jq -r '.data.viewer.login as $me | .data.repository.issue as $i
@@ -232,7 +232,7 @@ query($owner: String!, $name: String!, $n: Int!) {
           elif $i.state != "OPEN" or ($i.author.login // "") != $me or any($i.labels.nodes[]; .name == "no-agent")
                or any($i.assignees.nodes[]; .login != $me) then "gone"
           elif any($i.closedByPullRequestsReferences.nodes[]; .state == "OPEN" or .state == "MERGED")
-               or any($i.timelineItems.nodes[]; .source.__typename == "PullRequest" and (.source.state == "OPEN" or .source.state == "MERGED")) then "pr-exists"
+               or any($i.timelineItems.nodes[]; .willCloseTarget == true and .source.__typename == "PullRequest" and (.source.state == "OPEN" or .source.state == "MERGED")) then "pr-exists"
           else "ok" end) + "\t" + $i.updatedAt + "\t" + ($i.title | gsub("[\t\n]"; " ")) end' <<<"$json" 2>/dev/null) || { RC_CODE=error; return 0; }
     IFS=$'\t' read -r RC_CODE RC_UPD RC_TITLE <<<"$res"
     [ "$RC_CODE" = "ok" ] || return 0

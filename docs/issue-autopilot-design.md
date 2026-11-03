@@ -165,7 +165,7 @@ orca worktree set --worktree current --workspace-status needs-decision --unread 
 
 ### 4.4 着手直前の再確認（ownership gate、benny §3）
 
-`issue-autopilot.sh recheck <N>` を `dispatch`（pending に対して）と worker（起動済みに対して）が呼ぶ。GraphQL 1 回で issue の state・author・labels・assignees・updatedAt・`closedByPullRequestsReferences`・timeline の CROSS_REFERENCED_EVENT（PR のみ）を取る（実在の issue で、空のものと非空のものの両方を確認）。加えて `wt_for_issue <N>` で Orca の worktree を見る。
+`issue-autopilot.sh recheck <N>` を `dispatch`（pending に対して）と worker（起動済みに対して）が呼ぶ。GraphQL 1 回で issue の state・author・labels・assignees・updatedAt・`closedByPullRequestsReferences`・timeline の CROSS_REFERENCED_EVENT（PR のみ。`willCloseTarget` が真のものだけ数え、issue に触れているだけの PR は数えない）を取る（実在の issue で、空のものと非空のものの両方を確認）。加えて `wt_for_issue <N>` で Orca の worktree を見る。
 
 | 結果 | pending のとき | 起動済み（worker）のとき |
 |---|---|---|
