@@ -248,6 +248,9 @@ fail_job() { # fail_job <N> <code> [補足]  (J_* は読み込み済み)
     event "$n" failed
     log "failed #$n: $J_NOTE"
     [ "$J_WT" != "-" ] && board "id:$J_WT" needs-decision "#$n $code${note:+ $(printf '%s' "$note" | cut -c1-60)}"
+    cooldown_check
+}
+cooldown_check() { # 直近 1 時間に失敗 2 件なら 2 時間止める
     local recent until
     recent=$(awk -F'\t' -v t=$((NOW - 3600)) '$5 == "failed" && $2 > t' "$LAUNCHES" | wc -l | tr -d ' ')
     until=$(cfg cooldown_until)
@@ -331,7 +334,7 @@ recover() {
     fi
     if [ "$J_WT" = "-" ]; then
         J_STATUS=pending; J_BRANCH=-; J_OP=-; J_START=-; J_NOTE="worktree が作れなかった"; job_save
-        event "$n" failed; log "recover #$n: worktree が無い。pending に戻す"; return 0
+        event "$n" failed; log "recover #$n: worktree が無い。pending に戻す"; cooldown_check; return 0
     fi
     if ! wt_exists "$J_WT"; then fail_job "$n" gone "起動途中に worktree 消失"; return 0; fi
     J_PANE=$(agent_for "$J_WT" "$n")
@@ -395,7 +398,7 @@ cmd_candidates() {
         fi
         if [ -n "$hit" ]; then verdict_put "$n" "$upd" ask "$hit"; log "rule ask #$n: $hit"; continue; fi
         untriaged="$untriaged"untriaged$'\t'"$n"$'\t'"$upd"$'\t'"$title"$'\n'
-    done < <(jq -r '.[] | [(.number | tostring), .updatedAt, (.title | gsub("[\t\n]"; " ")),
+    done < <(jq -r 'sort_by(.updatedAt) | reverse | .[] | [(.number | tostring), .updatedAt, (.title | gsub("[\t\n]"; " ")),
         ([.labels[].name] | join(",") | if . == "" then "-" else . end),
         ([.assignees[].login] | join(",") | if . == "" then "-" else . end)] | @tsv' <<<"$issues")
     pending=$(for n in $(jobs_with pending); do printf 'pending\t%s\n' "$n"; done

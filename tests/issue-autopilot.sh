@@ -116,7 +116,8 @@ check "編集された issue は再判定" has out $'untriaged\t8\t'
 for n in 2 3 4 5 6 7; do check "#$n は未判定に出ない" lacks out $'untriaged\t'"$n"$'\t'; done
 check "ラベルで ask" has state/verdicts.tsv $'o/r#5\tu5\task\tlabel area: auth'
 check "タイトルで ask" has state/verdicts.tsv $'o/r#7\tu7\task\ttitle 本番'
-check "ask を dispatcher のカードに集める" has calls "--worktree path:/disp --comment 判断待ち 2: #5 label area: auth / #7 title 本番"
+check "ask を dispatcher のカードに集める" has calls "--worktree path:/disp --comment 判断待ち 2: #7 title 本番 / #5 label area: auth"
+check "未判定は updatedAt の新しい順" is "$(grep ^untriaged "$T/out" | cut -f2 | tr '\n' ' ')" "8 1 "
 cp "$T/calls" "$T/calls.1"
 run candidates
 check "同じ判断待ちはカードに打ち直さない" is "$(wc -l <"$T/calls")" "$(wc -l <"$T/calls.1")"
@@ -383,6 +384,13 @@ mkdir -p "$T/state/prompts"; printf "/issue-worker 1 --resume 'old'" >"$T/state/
 echo '{"ok": false}' >"$T/create.json"
 run dispatch
 check "新規起動の前に前回の resume 指示を消す" is "$(cat "$T/state/prompts/1")" "/issue-worker 1"
+
+setup create-fail-cooldown
+printf 'o/r#2\tlaunching\tissue-2-b\t-\t-\t-\t-\t99000\t1\t-\n' >"$T/state/jobs.tsv"
+printf 'o/r#3\tlaunching\tissue-3-c\t-\t-\t-\t-\t99000\t1\t-\n' >>"$T/state/jobs.tsv"
+pending 1
+run dispatch
+check "作成失敗が 2 件続いたら同じ dispatch で作らない" lacks calls "worktree create"
 
 [ "$fail" = 0 ] && echo "ok: issue-autopilot"
 exit "$fail"
