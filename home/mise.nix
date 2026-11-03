@@ -4,7 +4,7 @@
   # 最新安定版を使い、プロジェクト固有の設定がある場合はそちらを優先する。
   programs.mise = {
     enable = true;
-    # 安定版 26.05 の mise (2026.5.12) は、studio-auth の mise.toml の min_version
+    # 安定版 26.05 の mise (2026.5.12) は、使っているリポジトリの mise.toml の min_version
     # (2026.9.16) を満たさないので unstable から取る。
     # nixpkgs が 26.11 (2026-11 末リリース予定) に上がったら外す。
     package = pkgsUnstable.mise;

@@ -17,7 +17,7 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 | Neovim と設定 | Home Manager + `home/config/nvim` |
 | Ghostty と設定 | Homebrew cask + Home Manager |
 | herdr の設定 | `home/config/herdr/config.toml` を Home Manager が out-of-store symlink（本体は Nix 管理外） |
-| work-api の worktree / コンテナ掃除 | Home Manager `launchd.agents`（1 時間ごと、`home/scripts/worktree-gc.sh`） |
+| worktree / コンテナ掃除 | Home Manager `launchd.agents`（1 時間ごと、`home/scripts/worktree-gc.sh`） |
 | 再起動で止まった Claude の再開、Needs decision で会話が開いていないカードの開き直し（同じセッションには 1 回だけ。人が閉じたタブは開き直さない） | Home Manager `launchd.agents`（ログイン時と 3 分ごと、`home/scripts/agent-resume.sh`）＋ SessionStart hook `agents/claude/hooks/session-marker.sh` |
 | 放置された Claude / Codex のセッションの通知と、確かめたものの停止（Orca の端末に /exit） | Home Manager `launchd.agents`（10 分ごと、`home/scripts/agent-gc.sh`）＋ CLI `~/.local/bin/agent-gc`。設計は `docs/agent-gc-design.md` |
 | Claude Code の auto memory の整理（重複・陳腐化・共有への移動、昇格は 1 件ずつ PR） | Home Manager `launchd.agents`（毎日 04:30、`home/scripts/memory-maintenance.sh`）。設計は `docs/memory-maintenance-design.md` |
@@ -366,10 +366,17 @@ memory-maintenance）も同じ値を見るので、クローン先を変える�
 
 ## worktree / コンテナの自動掃除
 
-work-api（`~/www/<work>`）の worktree は放置すると 1 つにつき nginx / php-fpm /
-redis の 3 コンテナと bridge network を持ち続け、docker のサブネットプールが枯れて
-`make up` が落ちる。`home/worktree-gc.nix` が定義する LaunchAgent が毎時 0 分に
+worktree ごとに docker compose の環境を立てるリポでは、worktree を放置するとコンテナと
+bridge network が積み上がり、docker のサブネットプールが枯れる。`home/worktree-gc.nix` が定義する LaunchAgent が毎時 0 分に
 `home/scripts/worktree-gc.sh` を回してこれを掃除する。
+
+対象のリポは公開リポに置かず、手元の `~/.config/worktree-gc.env` に書く（無ければ何もしない）:
+
+```bash
+REPO="$HOME/path/to/repo"          # 掃除する本体の checkout
+BASE=origin/main                   # detached の判定の基準（既定 origin/main）
+PROJECT_PREFIXES="repo-wt- repo-"  # 孤児の compose プロジェクトを落とす名前の接頭辞
+```
 
 削除は次を **全て** 満たす worktree だけ。1 つでも欠ければ残す。
 
@@ -379,7 +386,7 @@ redis の 3 コンテナと bridge network を持ち続け、docker のサブネ
 | `git status --porcelain` が空（失敗したら変更ありとみなす） | 未コミットの作業を消さない |
 | cwd がその中にあるプロセスが居ない（`lsof`。取れなければこの節は全部残す） | サブディレクトリで作業中のシェル・エージェントを消さない |
 | ディレクトリの mtime が 24 時間より古い | 稼働中のエージェントが作った直後のものを除外 |
-| upstream が remote から消えている（= PR が merge / close 済み）<br>または detached かつ `origin/dev` から辿れる | 固有のコミットを持たないものだけ消す |
+| upstream が remote から消えている（= PR が merge / close 済み）<br>または detached かつ `$BASE`（既定 `origin/main`）から辿れる | 固有のコミットを持たないものだけ消す |
 
 Orca の worktree（`~/orca/workspaces/` 配下、全リポジトリ）は上の表とは別に判定し、
 `orca worktree rm` で消す。こちらも次を **全て** 満たすものだけ。
@@ -410,14 +417,14 @@ workspace 状態を持っており `git worktree remove` を直接叩くと食�
 
 - 削除できた worktree のプロジェクト: `com.docker.compose.project.working_dir` ラベルで突き合わせ、
   名前を問わず `down --volumes` で名前付きボリュームごと消す。
-- working_dir が既に消えている孤児: どこの worktree か分からないので、`app-app-` / `app-worktree-`
-  で始まる名前か Orca 配下の working_dir のものだけ。ボリュームは残す。
+- working_dir が既に消えている孤児: どこの worktree か分からないので、`$PROJECT_PREFIXES`
+  のどれかで始まる名前か Orca 配下の working_dir のものだけ。ボリュームは残す。
 
-共有インフラ（mysql、traefik、grafana…）や他リポジトリ（`docker-*`、`studio-*`）、本体の `app` は
+共有インフラ（mysql、traefik、grafana…）や他リポジトリ、本体は
 working_dir が健在なので触らない。判定は `tests/worktree-gc.sh` で CI が見張る。
 
 ディスク回収は dangling image / volume と 168 時間より古い build cache のみ。
-`docker image prune -a` を毎日回すと `api-base` が消えて `make build` のたびに
+`docker image prune -a` を毎日回すとベースイメージが消えて build のたびに
 再 pull になるため使わない。
 
 手で確認・実行する場合:

@@ -70,7 +70,7 @@ setup() {
     echo '[]' >"$T/prs.json"
 }
 run_gc() {
-    env PATH="$base/bin:$PATH" FAKE="$T" REPO="$T/repo" ORCA_ROOT="$T/orca" \
+    env PATH="$base/bin:$PATH" FAKE="$T" REPO="$T/repo" ORCA_ROOT="$T/orca" WORKTREE_GC_CONFIG=/nonexistent PROJECT_PREFIXES="proj-" \
         bash "$script" >"$T/log" 2>&1
     echo "exit=$?" >>"$T/log"
 }
@@ -178,10 +178,10 @@ check "理由がログに出る" logged "削除直前にエージェントが wo
 setup compose
 merged_repo_wt "$T/repo-wt" feat-a
 mkdir -p "$T/infra"
-printf '%s\t%s\n' custom-name "$T/repo-wt/docker" app-app-old "$T/gone" other-old "$T/gone2" mysql "$T/infra" >"$T/docker-ps.tsv"
+printf '%s\t%s\n' custom-name "$T/repo-wt/docker" proj-old "$T/gone" other-old "$T/gone2" mysql "$T/infra" >"$T/docker-ps.tsv"
 run_gc
 check "消した worktree のプロジェクトは --volumes で落とす" grep -qxF "compose -p custom-name down --remove-orphans --volumes" "$T/docker-calls"
-check "接頭辞の合う孤児はボリュームを残して落とす" grep -qxF "compose -p app-app-old down --remove-orphans" "$T/docker-calls"
+check "接頭辞の合う孤児はボリュームを残して落とす" grep -qxF "compose -p proj-old down --remove-orphans" "$T/docker-calls"
 check "接頭辞の合わない孤児は触らない" not_called other-old
 check "working_dir が健在のものは触らない" not_called mysql
 
@@ -240,6 +240,26 @@ jq -n --arg p "$T/orca/wt" '{result: {worktrees: [{path: $p, branch: null, isMai
 ps_json "$T/orca/wt" "$(($(date +%s) * 1000))" done >"$T/ps.json"
 run_gc
 check "orca rm が呼ばれない" test ! -e "$T/rm-calls"
+
+# ---- 設定ファイル: 環境変数が無ければ REPO と BASE を読み、環境変数があればそちらが勝つ ----
+setup config
+git -C "$T/repo" worktree add -q --detach "$T/repo-wt" origin/main
+touch -t 202601010000 "$T/repo-wt"
+printf 'REPO=%q\nBASE=origin/nope\n' "$T/repo" >"$T/gc.env"
+env PATH="$base/bin:$PATH" FAKE="$T" ORCA_ROOT="$T/orca" WORKTREE_GC_CONFIG="$T/gc.env" BASE=origin/main \
+    bash "$script" >"$T/log" 2>&1
+echo "exit=$?" >>"$T/log"
+check "設定の REPO を使う" logged "repo=$T/repo "
+check "環境変数の BASE が勝つ" gone "$T/repo-wt"
+
+# ---- 設定ファイル: 空文字の環境変数でも接頭辞を上書きして、孤児を落とさない ----
+setup config-empty-prefix
+printf 'PROJECT_PREFIXES=proj-\n' >"$T/gc.env"
+printf '%s\t%s\n' proj-old "$T/gone" >"$T/docker-ps.tsv"
+env PATH="$base/bin:$PATH" FAKE="$T" REPO="$T/repo" ORCA_ROOT="$T/orca" WORKTREE_GC_CONFIG="$T/gc.env" PROJECT_PREFIXES= \
+    bash "$script" >"$T/log" 2>&1
+echo "exit=$?" >>"$T/log"
+check "空の接頭辞なら孤児を落とさない" not_called proj-old
 
 for f in "$base"/*/log; do grep -q '^exit=0$' "$f" || { echo "FAIL [$(basename "$(dirname "$f")")] exit が 0 でない"; fail=1; }; done
 [ "$fail" = 0 ] && echo "ok: worktree-gc"
