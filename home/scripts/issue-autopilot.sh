@@ -48,6 +48,7 @@ log() {
 die() { log "ERROR: $*"; exit 2; }
 # タブと改行を潰し、空なら "-"。IFS=$'\t' の read はタブの連続を 1 つに詰めるので、空欄を作らない。
 clean() { local s; s=$(printf '%s' "$*" | tr '\t\n\r' '   '); printf '%s' "${s:--}"; }
+clip() { jq -Rrs --argjson n "$1" 'rtrimstr("\n") | .[0:$n]'; } # 文字数で切る (macOS の awk の substr はバイトで切り、日本語を壊す)
 
 # ---- config (key=value。人が編集する) ----
 cfg() { # cfg <key> [default]
@@ -146,7 +147,7 @@ board() { # board <selector> <status|-> <comment>
         log "board $sel: $comment"
     else
         tsv_put "$BOARD_RETRY" "$sel"$'\t'"$status"$'\t'"$comment"
-        log "WARN: カードに書けない $sel (次回に再試行): $(printf '%s' "$out" | jq -c '[.. | objects | .warnings? // empty | .[]?]' 2>/dev/null | cut -c1-200)"
+        log "WARN: カードに書けない $sel (次回に再試行): $(printf '%s' "$out" | jq -c '[.. | objects | .warnings? // empty | .[]?]' 2>/dev/null | clip 200)"
     fi
 }
 board_retry() { # 送れなかったカードを送り直す (状態遷移とは別に、成功するまで残す)
@@ -158,8 +159,8 @@ refresh_asks() {
     local open="$STATE_DIR/open.txt" items n
     [ -f "$open" ] || return 0
     items=$(awk -F'\t' -v r="$REPO#" 'NR == FNR { open[$1] = 1; next }
-        index($1, r) == 1 && $3 == "ask" { n = substr($1, length(r) + 1); if (n in open) printf "#%s %s\n", n, substr($4, 1, 30) }' \
-        "$open" "$VERDICTS")
+        index($1, r) == 1 && $3 == "ask" { n = substr($1, length(r) + 1); if (n in open) printf "#%s\t%s\n", n, $4 }' \
+        "$open" "$VERDICTS" | jq -Rr 'split("\t") | "\(.[0]) \(.[1][0:30])"')
     n=$(printf '%s' "$items" | grep -c . || true)
     if [ "$n" -eq 0 ]; then
         board "path:$DISPATCHER" in-progress "判断待ち 0"
@@ -249,7 +250,7 @@ fail_job() { # fail_job <N> <code> [補足]  (J_* は読み込み済み)
     J_STATUS=failed; J_NOTE="$code${note:+ $note}"; job_save
     event "$n" failed
     log "failed #$n: $J_NOTE"
-    [ "$J_WT" != "-" ] && board "id:$J_WT" needs-decision "#$n $code${note:+ $(printf '%s' "$note" | cut -c1-60)}"
+    [ "$J_WT" != "-" ] && board "id:$J_WT" needs-decision "#$n $code${note:+ $(printf '%s' "$note" | clip 60)}"
     cooldown_check
 }
 cooldown_check() { # 直近 1 時間に失敗 2 件なら 2 時間止める
@@ -323,7 +324,7 @@ launch_agent() {
     else
         op=$(jq -r '[.. | .operationId? // empty | strings][0] // empty' <<<"$out" 2>/dev/null || true)
         if [ -n "$op" ]; then J_OP=$op; J_NOTE="返事を失った。次の dispatch で --retry-launch"; fi
-        [ -n "$op" ] || J_NOTE="起動に失敗: $(printf '%s' "$out" | tail -n 1 | cut -c1-80)"
+        [ -n "$op" ] || J_NOTE="起動に失敗: $(printf '%s' "$out" | tail -n 1 | clip 80)"
         job_save
         log "WARN: launch #$n: $J_NOTE"
     fi
@@ -363,7 +364,7 @@ launch_new() { # launch_new <N> (再確認済み。RC_TITLE がある)
     out=$(orca "${args[@]}" 2>&1) || true
     wt=$(jq -r 'if .ok == true then .result.worktree.id // empty else empty end' <<<"$out" 2>/dev/null || true)
     if [ -z "$wt" ]; then
-        J_NOTE="worktree create: $(printf '%s' "$out" | tail -n 1 | cut -c1-80)"; job_save
+        J_NOTE="worktree create: $(printf '%s' "$out" | tail -n 1 | clip 80)"; job_save
         log "WARN: #$n の worktree を作れない (次の dispatch で復旧)"; return 0
     fi
     J_WT=$wt; J_BRANCH=$(jq -r '.result.worktree.branch | sub("^refs/heads/"; "")' <<<"$out"); job_save

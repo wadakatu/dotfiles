@@ -122,6 +122,13 @@ cp "$T/calls" "$T/calls.1"
 run candidates
 check "同じ判断待ちはカードに打ち直さない" is "$(wc -l <"$T/calls")" "$(wc -l <"$T/calls.1")"
 
+setup candidates-utf8
+echo '[{"number": 9, "title": "x", "updatedAt": "u9", "labels": [], "assignees": []}]' >"$T/issues.json"
+printf 'o/r#9\tu9\task\tspec あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほまみむめも\t1\n' >"$T/state/verdicts.tsv"
+run candidates
+check "判断待ちの補足は文字の途中で切らない" iconv -f UTF-8 -t UTF-8 "$T/calls"
+check "判断待ちの補足は 30 文字まで" has calls "判断待ち 1: #9 spec あいうえおかきくけこさしすせそたちつてとなにぬねの --json"
+
 setup candidates-none
 run candidates
 check "候補が無ければ exit 1 (run を飛ばす)" rc 1
