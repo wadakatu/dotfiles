@@ -15,7 +15,7 @@ If a more specific verification skill covers this repository or local environmen
    - the local application URL;
    - the command that starts the application, if it is not already running;
    - the exact page and data state needed to exercise the changed behavior.
-2. Never guess a URL or route when the repository can provide it. For `studio-front`, use `https://front.studio.test` when project documentation confirms that environment.
+2. Never guess a URL or route when the repository can provide it.
 3. Run the narrowest relevant automated tests before browser verification.
 4. Use Chrome DevTools MCP (`mcp__chrome_devtools__*`) to open the local application. Do not substitute source inspection, unit tests, web search, or a different browser automation surface for this step.
 5. Navigate through the UI as a user would and exercise the affected state. Inspect the latest page snapshot before interacting with elements.

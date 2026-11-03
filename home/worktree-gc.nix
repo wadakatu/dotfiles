@@ -1,11 +1,11 @@
 { config, pkgs, dotfilesDir, ... }: {
-  # work-api と Orca 管理下の全リポの worktree、それに紐づく docker compose プロジェクトを
+  # 手元の設定 (~/.config/worktree-gc.env) で指定したリポと Orca 管理下の全リポの worktree、それに紐づく docker compose プロジェクトを
   # 1 時間ごとに掃除する LaunchAgent。放置すると worktree ごとに nginx/php-fpm/redis の
   # 3 コンテナと bridge network が積み上がり、docker のサブネットプールが枯れて
   # `make up` が落ちる (実測: worktree 20 個でコンテナ 102 個・ネットワーク 26 個)。
   #
   # AI エージェントではなくスクリプトで回すのは、判定が全て機械的に決まるため。
-  # 「upstream が remote から消えた」「origin/dev から辿れる」「未コミットが無い」「中に cwd を持つプロセスが居ない」、
+  # 「upstream が remote から消えた」「$BASE から辿れる」「未コミットが無い」「中に cwd を持つプロセスが居ない」、
   # Orca の worktree なら「PR の状態」「PR に無いコミットの有無」「エージェントの状態」
   # 以外の材料を使わないので、モデルに投げる理由が無い。
   launchd.agents.worktree-gc = {

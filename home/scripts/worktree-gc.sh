@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # worktree と、それに紐づく docker compose プロジェクトを掃除する。
-# 対象は work-api ($REPO) の worktree と、Orca が管理する全リポの worktree ($ORCA_ROOT 配下)。
+# 対象は $REPO の worktree と、Orca が管理する全リポの worktree ($ORCA_ROOT 配下)。
 # launchd から毎時 0 分に実行される。定義は home/worktree-gc.nix。
 #
 # 手で確認するとき:
@@ -15,19 +15,27 @@ set -euo pipefail
 PATH="$PATH:/etc/profiles/per-user/${USER}/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 export PATH
 
-REPO="${REPO:-$HOME/www/dev/app}"
+# どのリポを掃除するか (REPO・BASE・PROJECT_PREFIXES) は公開リポに置かず、手元の設定ファイルで渡す。
+# 環境変数で渡した値はそちらが勝つ。REPO が無ければ何もしない。
+CONFIG="${WORKTREE_GC_CONFIG:-$HOME/.config/worktree-gc.env}"
+_env_repo="${REPO-}" _env_base="${BASE-}" _env_prefixes="${PROJECT_PREFIXES-}"
+# shellcheck source=/dev/null
+[ -f "$CONFIG" ] && . "$CONFIG"
+REPO="${_env_repo:-${REPO:-}}"
+# detached の worktree が固有のコミットを持たないかを見る基準のブランチ。
+BASE="${_env_base:-${BASE:-origin/main}}"
 # Orca が worktree を作る場所。ここ配下は Orca 経由で判定・削除し、$REPO の判定には混ぜない。
 ORCA_ROOT="${ORCA_ROOT:-$HOME/orca/workspaces}"
 # 削除の全条件に効かせる最終ガード。稼働中のエージェントが作った直後の worktree は
-# 「detached・clean・origin/dev と同一」で内容ベースの判定を全部すり抜けるため、
+# 「detached・clean・$BASE と同一」で内容ベースの判定を全部すり抜けるため、
 # 新しいものは一律で見送る (次の実行で拾える)。
 MIN_AGE_HOURS="${MIN_AGE_HOURS:-24}"
 # working_dir が消えた孤児の compose プロジェクトを落とす対象にする名前の接頭辞。共有インフラ (mysql,
-# traefik...) や他リポジトリ (docker-*, studio-*) と、本体の `app` を巻き込まないための境界。
+# traefik...) や他リポジトリ、本体を巻き込まないための境界。空なら孤児は落とさない。
 # このスクリプトが消した worktree に属するプロジェクトは、名前を問わず working_dir で拾う。
-PROJECT_PREFIXES="app-app- app-worktree-"
+PROJECT_PREFIXES="${_env_prefixes:-${PROJECT_PREFIXES:-}}"
 # build cache はここより古いものだけ捨てる。image は dangling のみ (-a を付けると
-# api-base が毎日消えて make build のたびに再 pull になる)。
+# ベースイメージが毎日消えて build のたびに再 pull になる)。
 BUILDER_CACHE_MAX_AGE="${BUILDER_CACHE_MAX_AGE:-168h}"
 DRY_RUN="${DRY_RUN:-0}"
 
@@ -160,11 +168,11 @@ while read -r wt; do
             mark_stale "$wt" "$branch: upstream が remote から消滅 = merge/close 済み"
         fi
     else
-        # detached。origin/dev から辿れる = 固有のコミットを持たない使い捨て。
-        if git -C "$wt" merge-base --is-ancestor HEAD origin/dev 2>/dev/null; then
-            mark_stale "$wt" "detached: origin/dev に含まれる"
+        # detached。$BASE から辿れる = 固有のコミットを持たない使い捨て。
+        if git -C "$wt" merge-base --is-ancestor HEAD "$BASE" 2>/dev/null; then
+            mark_stale "$wt" "detached: $BASE に含まれる"
         else
-            log "keep  $wt (detached: origin/dev に無いコミットを持つ)"
+            log "keep  $wt (detached: $BASE に無いコミットを持つ)"
         fi
     fi
 done < <(git -C "$REPO" worktree list --porcelain | awk '/^worktree /{print $2}')
