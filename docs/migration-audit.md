@@ -100,9 +100,9 @@ Spotlight の最終使用日時は全アプリで取得できなかったため�
 | Herd | PHP / Composerの継続利用確認済み | Homebrew cask 宣言済み |
 | Logi Options+ | 継続利用確認済み | Homebrew cask 宣言済み |
 | Notion | 継続利用確認済み、Dock 固定 | Homebrew cask宣言済み |
+| Orion | 普段使いのブラウザ（2026-11 に Zen Browser から移行） | Homebrew cask `orion` を宣言済み |
 | ScreenTune | 継続利用確認済み、Dock 固定 | Homebrew未対応。公式サイトから手動導入 |
 | Slack | 継続利用確認済み、Dock 固定 | Homebrew cask宣言済み |
-| Zen Browser | 継続利用確認済み | Homebrew cask `zen` を宣言済み |
 
 ### 不要確定
 
@@ -126,6 +126,7 @@ Spotlight の最終使用日時は全アプリで取得できなかったため�
 - GitHub Desktop（Git CLI / GitHub CLIを利用するため移行対象外）
 - Google Chrome（Zen Browserへ移行するためHomebrew cask宣言から削除済み）
 - PhpStorm（最近使用していないためHomebrew cask宣言から削除済み）
+- Zen Browser（メモリ消費が大きいため Orion へ移行。Homebrew cask宣言から削除済み）
 
 Safari は macOS 標準アプリとして宣言管理の対象外とする。
 
