@@ -73,11 +73,11 @@ ps_agent() { # ps_agent <worktreeId> <paneKey> <state> <prompt> <updatedAt(ms)>
     printf '{"ok": true, "result": {"worktrees": [{"worktreeId": "%s", "agents": [{"paneKey": "%s", "state": "%s", "prompt": "%s", "updatedAt": %s}]}]}}\n' \
         "$1" "$2" "$3" "$4" "$5" >"$T/ps.json"
 }
-graphql() { # graphql <state> <updatedAt json> <closedBy nodes json>
+graphql() { # graphql <state> <updatedAt json> <closedBy nodes json> [timeline nodes json]
     printf '{"data": {"viewer": {"login": "me"}, "repository": {"issue": {"state": "%s", "title": "Fix login", "updatedAt": %s, "author": {"login": "me"},
       "labels": {"pageInfo": {"hasNextPage": false}, "nodes": []}, "assignees": {"pageInfo": {"hasNextPage": false}, "nodes": []},
       "closedByPullRequestsReferences": {"pageInfo": {"hasNextPage": false}, "nodes": %s},
-      "timelineItems": {"pageInfo": {"hasNextPage": false}, "nodes": []}}}}}\n' "$1" "$2" "$3" >"$T/graphql.json"
+      "timelineItems": {"pageInfo": {"hasNextPage": false}, "nodes": %s}}}}}\n' "$1" "$2" "$3" "${4:-[]}" >"$T/graphql.json"
 }
 pending() { # pending <N>...: go の判定と pending の job を置く
     local n
@@ -186,6 +186,19 @@ run dispatch
 check "PR があれば作らない" lacks calls "worktree create"
 check "job を消す" is "$(job 1)" ""
 check "ask pr-exists にする" has state/verdicts.tsv $'\task\tpr-exists'
+
+setup pr-mention
+pending 1
+graphql OPEN '"2026-01-01T00:00:00Z"' '[]' '[{"willCloseTarget": false, "source": {"__typename": "PullRequest", "state": "OPEN"}}]'
+run dispatch
+check "触れているだけの PR では止めない" has calls "worktree create"
+
+setup pr-closing-xref
+pending 1
+graphql OPEN '"2026-01-01T00:00:00Z"' '[]' '[{"willCloseTarget": true, "source": {"__typename": "PullRequest", "state": "OPEN"}}]'
+run dispatch
+check "閉じる PR の参照があれば作らない" lacks calls "worktree create"
+check "閉じる PR の参照で ask pr-exists" has state/verdicts.tsv $'\task\tpr-exists'
 
 setup owner
 pending 1
