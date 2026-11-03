@@ -310,7 +310,8 @@ launch_agent() {
     save_prompt "$n" "$prompt"
     local args=(agent launch --agent claude --worktree "id:$J_WT" --model opus --effort high --surface chat --prompt "$prompt" --json)
     case "$J_OP" in - | ok:*) ;; *) args+=(--retry-launch "$J_OP") ;; esac
-    if out=$(orca "${args[@]}" 2>&1) && jq -e '.ok == true' <<<"$out" >/dev/null 2>&1; then
+    # --retry-launch は同じディレクトリからの再送を求めるので、呼び出し元の cwd によらず固定する
+    if out=$(cd "$STATE_DIR" && orca "${args[@]}" 2>&1) && jq -e '.ok == true' <<<"$out" >/dev/null 2>&1; then
         J_OP="ok:$NOW"; J_NOTE="$(jq -r '.result.launch.outcome.kind // "?"' <<<"$out" 2>/dev/null || echo ?)"
         orca_lists || true
         J_PANE=$(agent_for "$J_WT" "$n" "$exclude" 2>/dev/null || true)
@@ -344,8 +345,8 @@ recover() {
         ok:*) [ $((NOW - ${J_OP#ok:})) -gt 1800 ] || return 0 # 起動は通った。agent が見えるまで待つ
               J_OP=- ;;
     esac
-    # 起動から 1 時間経っても agent が見えなければ諦めて人に回す（枠を握り続けない）
-    if [ "$J_START" != "-" ] && [ $((NOW - J_START)) -gt 3600 ]; then fail_job "$n" launch "1 時間起動できない"; return 0; fi
+    # 5 時間経っても agent が見えなければ諦めて人に回す。automation は 2 時間おきなので再試行は 2 回は入る
+    if [ "$J_START" != "-" ] && [ $((NOW - J_START)) -gt 18000 ]; then fail_job "$n" launch "5 時間起動できない"; return 0; fi
     launch_agent "$n" "$(cat "$STATE_DIR/prompts/$n" 2>/dev/null || echo "/issue-worker $n")"
 }
 launch_new() { # launch_new <N> (再確認済み。RC_TITLE がある)

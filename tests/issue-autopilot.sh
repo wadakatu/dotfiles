@@ -36,7 +36,7 @@ case "$1 $2" in
     "worktree list") cat "$FAKE/list.json" ;;
     "worktree ps") cat "$FAKE/ps.json" ;;
     "worktree create") echo "$*" >>"$FAKE/calls"; cat "$FAKE/create.json" ;;
-    "agent launch") echo "$*" >>"$FAKE/calls"; cat "$FAKE/launch.json"; exit "$(cat "$FAKE/launch.rc" 2>/dev/null || echo 0)" ;;
+    "agent launch") echo "$*" >>"$FAKE/calls"; pwd >"$FAKE/launch.cwd"; cat "$FAKE/launch.json"; exit "$(cat "$FAKE/launch.rc" 2>/dev/null || echo 0)" ;;
     "worktree set") echo "$*" >>"$FAKE/calls"; [ -f "$FAKE/set.fail" ] && exit 1; echo '{"ok": true}' ;;
     *) exit 1 ;;
 esac
@@ -394,16 +394,20 @@ check "作成失敗が 2 件続いたら同じ dispatch で作らない" lacks c
 
 setup launch-timeout
 list "$MAIN" "$W"
-printf 'o/r#1\tlaunching\tissue-1-a\tR::/wt/a\t-\t-\t-\t90000\t1\t-\n' >"$T/state/jobs.tsv"
+printf 'o/r#1\tlaunching\tissue-1-a\tR::/wt/a\t-\t-\t-\t80000\t1\t-\n' >"$T/state/jobs.tsv"
 run dispatch
-check "1 時間起動できない job は failed にして枠を空ける" is "$(job 1)" failed
+check "5 時間起動できない job は failed にして枠を空ける" is "$(job 1)" failed
 check "起動できない job は再起動しない" lacks calls "agent launch"
+printf 'o/r#1\tlaunching\tissue-1-a\tR::/wt/a\tOP1\t-\t-\t92800\t1\t-\n' >"$T/state/jobs.tsv"
+run dispatch
+check "次の定期実行 (2 時間後) では --retry-launch を試す" has calls "--retry-launch OP1"
 
 setup board-back
 list "$MAIN" "$W"
 printf 'o/r#1\tfailed\tissue-1-a\tR::/wt/a\tok:1\tPA\t-\t90000\t1\t-\n' >"$T/state/jobs.tsv"
 ps_agent "R::/wt/a" PA done "/issue-worker 1" 100000000
 run resume 1 "続けて"
+check "起動は状態ディレクトリから出す (--retry-launch と同じ cwd)" is "$(cat "$T/launch.cwd")" "$T/state"
 check "resume でカードを作業中に戻す" has calls "--comment 再開: #1 --json --workspace-status in-progress"
 run done 1 https://github.com/o/r/pull/9
 check "done は exit 0" rc 0
