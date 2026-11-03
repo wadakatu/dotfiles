@@ -126,7 +126,11 @@ board() { # board <selector> <status|-> <comment>
     [ "$prev" = "$comment" ] && return 0
     if [ "$DRY_RUN" = "1" ]; then log "DRY-RUN: board $sel ($status) $comment"; return 0; fi
     local args=(worktree set --worktree "$sel" --comment "$comment" --json)
-    [ "$status" = "-" ] || args+=(--workspace-status "$status" --unread)
+    case "$status" in
+        -) ;;
+        in-progress) args+=(--workspace-status "$status" --read) ;;
+        *) args+=(--workspace-status "$status" --unread) ;;
+    esac
     if orca "${args[@]}" >/dev/null 2>&1; then
         tsv_put "$BOARD" "$sel"$'\t'"$comment"
         log "board $sel: $comment"
@@ -143,7 +147,7 @@ refresh_asks() {
         "$open" "$VERDICTS")
     n=$(printf '%s' "$items" | grep -c . || true)
     if [ "$n" -eq 0 ]; then
-        board "path:$DISPATCHER" - "判断待ち 0"
+        board "path:$DISPATCHER" in-progress "判断待ち 0"
     else
         board "path:$DISPATCHER" needs-decision "判断待ち $n: $(printf '%s\n' "$items" | awk 'NF { printf "%s%s", (c++ ? " / " : ""), $0 }')"
     fi
@@ -173,10 +177,10 @@ wt_by_branch() { # 予約した branch。Orca は取られた名前に数字の�
 }
 wt_exists() { jq -e --arg w "$1" 'any(.result.worktrees[]; .id == $w)' <<<"$LIST_JSON" >/dev/null; }
 agent_for() { # agent_for <wt> <N> [除く paneKey] → paneKey。既定で resume 前の pane を除く
-    local ex=${3:-$(cat "$STATE_DIR/prompts/$2.exclude" 2>/dev/null || true)}
-    jq -r --arg w "$1" --arg re "^/issue-worker $2( |$)" --arg ex "${ex:--}" '
+    local ex; ex=$({ [ -z "${3:-}" ] || echo "$3"; cat "$STATE_DIR/prompts/$2.exclude" 2>/dev/null || true; } | jq -R . | jq -s .)
+    jq -r --arg w "$1" --arg re "^/issue-worker $2( |$)" --argjson ex "$ex" '
         [.result.worktrees[] | select(.worktreeId == $w) | .agents[]?
-         | select(((.prompt // "") | test($re)) and .paneKey != $ex)] | max_by(.updatedAt // 0) // empty | .paneKey' <<<"$PS_JSON"
+         | select(((.prompt // "") | test($re)) and (.paneKey as $p | $ex | index([$p]) | not))] | max_by(.updatedAt // 0) // empty | .paneKey' <<<"$PS_JSON"
 }
 agent_state() { # agent_state <wt> <paneKey> → "state<TAB>updatedAt(秒)"。無ければ空
     jq -r --arg w "$1" --arg p "$2" '[.result.worktrees[] | select(.worktreeId == $w) | .agents[]? | select(.paneKey == $p)][0]
@@ -430,10 +434,13 @@ cmd_resume() {
     orca_lists || die "Orca の worktree を取れない"
     wt_exists "$J_WT" || die "#$n の worktree が消えている"
     [ "$(agent_state "$J_WT" "$J_PANE" | cut -f1)" != "working" ] || die "#$n の agent ($J_PANE) はまだ動いている。タブを閉じてから resume する"
+    if [ "$J_STATUS" = "failed" ] && [ "$(jobs_with launching running stalled | grep -c . || true)" -ge "$(cfg max_active 3)" ]; then
+        die "稼働が上限 ($(cfg max_active 3))。空いてから resume する" # stalled は枠を持ったままなので数えない
+    fi
     prompt="/issue-worker $n --resume '$(printf '%s' "$instr" | tr "'\n" "’ ")'"
     old=$J_PANE; RUN_ID="r$NOW-$$"
     if [ "$DRY_RUN" = "1" ]; then log "DRY-RUN: resume #$n ($prompt)"; return 0; fi
-    mkdir -p "$STATE_DIR/prompts"; printf '%s' "$old" >"$STATE_DIR/prompts/$n.exclude"
+    mkdir -p "$STATE_DIR/prompts"; printf '%s\n' "$old" >>"$STATE_DIR/prompts/$n.exclude" # 過去の pane は全部除く
     J_STATUS=launching; J_PANE=-; J_OP=-; J_START=$NOW; job_save # 4 時間の通知は再開から数える
     launch_agent "$n" "$prompt" "$old"
 }
@@ -475,7 +482,11 @@ cmd_skip() {
     if job_load "$n"; then
         case "$J_STATUS" in
             pending) tsv_del "$JOBS" "$J_KEY" ;;
-            launching | running | stalled) J_STATUS=failed; J_NOTE="人が skip"; job_save ;;
+            launching) die "#$n は起動中。running になってからタブを閉じ、もう一度 skip する" ;;
+            running | stalled)
+                orca_lists || die "Orca の worktree を取れない"
+                [ "$(agent_state "$J_WT" "$J_PANE" | cut -f1)" != "working" ] || die "#$n の agent ($J_PANE) はまだ動いている。タブを閉じてから skip する"
+                J_STATUS=failed; J_NOTE="人が skip"; job_save ;;
         esac
     fi
     cmd_verdict "$n" skip "人が skip"

@@ -300,5 +300,35 @@ rm "$T/launch.rc"; : >"$T/calls"
 run dispatch
 check "resume 前の pane を拾わず --retry-launch" has calls "--retry-launch OP9"
 
+setup skip-working
+list "$MAIN" "$W"
+printf 'o/r#1\trunning\tissue-1-a\tR::/wt/a\tok:1\tPA\t-\t99000\t1\t-\n' >"$T/state/jobs.tsv"
+ps_agent "R::/wt/a" PA working "/issue-worker 1" 100000000
+echo "2026-01-01T00:00:00Z" >"$T/upd"
+run skip 1
+check "動いている job は skip で枠を離さない" is "$(job 1)" running
+
+setup resume-limit
+list "$MAIN" "$W"
+for i in 2 3 4; do printf 'o/r#%s\trunning\tb\tR::/wt/%s\tok:1\tP%s\t-\t99000\t1\t-\n' "$i" "$i" "$i" >>"$T/state/jobs.tsv"; done
+printf 'o/r#1\tfailed\tissue-1-a\tR::/wt/a\tok:1\tPA\t-\t90000\t1\t-\n' >>"$T/state/jobs.tsv"
+run resume 1 "続けて"
+check "稼働が上限なら failed から resume しない" lacks calls "agent launch"
+
+setup resume-twice
+list "$MAIN" "$W"
+printf 'o/r#1\tfailed\tissue-1-a\tR::/wt/a\tok:1\tP1\t-\t90000\t1\t-\n' >"$T/state/jobs.tsv"
+mkdir -p "$T/state/prompts"; echo P0 >"$T/state/prompts/1.exclude"
+ps_agent "R::/wt/a" P0 done "/issue-worker 1 --resume 'x'" 100000000
+echo '{"ok": false, "error": {"operationId": "OP9"}}' >"$T/launch.json"; echo 1 >"$T/launch.rc"
+run resume 1 "続けて"
+rm "$T/launch.rc"; : >"$T/calls"
+run dispatch
+check "2 回前の pane も拾わない" has calls "--retry-launch OP9"
+
+setup asks-zero
+run candidates
+check "判断待ち 0 でカードを作業中・既読に戻す" has calls "--comment 判断待ち 0 --json --workspace-status in-progress --read"
+
 [ "$fail" = 0 ] && echo "ok: issue-autopilot"
 exit "$fail"
