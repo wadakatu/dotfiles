@@ -50,7 +50,10 @@ IA=~/www/personal/dotfiles/home/scripts/issue-autopilot.sh
 
 人の指示を最優先に読む。先に `gh pr list -R <repo> --head "$(git branch --show-current)" --state open --json url -q '.[0].url'` で
 自分の PR を探し、あれば作り直さず、指示の分だけ直して push し、`"$IA" done <N> <その URL>` で終える
-（`recheck` はその自分の PR を `pr-exists` と数えるので呼ばない）。無ければ手順 2 から続ける。既にある commit は作り直さない。
+（`recheck` はその自分の PR を `pr-exists` と数えるので呼ばない）。
+PR が無く `git log --oneline origin/<base>..HEAD` に commit があれば修正は済んでいる。手順 2 の再確認だけ行い、
+手順 3 の再現（修正前に落ちるか）はやり直さない。関係するテストを流して緑なら手順 6（レビュー）から、赤なら手順 4 から続ける。
+commit も無ければ手順 2 から続ける。既にある commit は作り直さない。
 
 ## してはいけないこと
 

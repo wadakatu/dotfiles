@@ -37,7 +37,7 @@ case "$1 $2" in
     "worktree ps") cat "$FAKE/ps.json" ;;
     "worktree create") echo "$*" >>"$FAKE/calls"; cat "$FAKE/create.json" ;;
     "agent launch") echo "$*" >>"$FAKE/calls"; pwd >"$FAKE/launch.cwd"; cat "$FAKE/launch.json"; exit "$(cat "$FAKE/launch.rc" 2>/dev/null || echo 0)" ;;
-    "worktree set") echo "$*" >>"$FAKE/calls"; [ -f "$FAKE/set.fail" ] && exit 1; echo '{"ok": true}' ;;
+    "worktree set") echo "$*" >>"$FAKE/calls"; [ -f "$FAKE/set.fail" ] && exit 1; cat "$FAKE/set.json" 2>/dev/null || echo '{"ok": true}' ;;
     *) exit 1 ;;
 esac
 EOF
@@ -421,6 +421,15 @@ printf 'o/r#1\tfailed\tissue-1-a\tR::/wt/a\tok:1\tPA\t-\t90000\t1\t-\n' >"$T/sta
 ps_agent "R::/wt/a" PA done "/issue-worker 1" 100000000
 run resume 1 "続けて"
 check "同じカードに戻ったら古い再送を捨てる" lacks state/board-retry.tsv "#1 red"
+
+setup board-warning
+echo '{"ok": true, "warnings": [{"code": "unknown_status"}]}' >"$T/set.json"
+list "$MAIN" "$W"
+printf 'o/r#1\trunning\tissue-1-a\tR::/wt/a\tok:1\tPA\t-\t99000\t1\t-\n' >"$T/state/jobs.tsv"
+ps_agent "R::/wt/a" PA working "/issue-worker 1" 90000000
+run candidates
+check "warnings が出たら送れていない扱いで再送に残す" has state/board-retry.tsv "id:R::/wt/a"
+check "warnings の内容をログに残す" has applog "unknown_status"
 
 [ "$fail" = 0 ] && echo "ok: issue-autopilot"
 exit "$fail"

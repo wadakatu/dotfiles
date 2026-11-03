@@ -138,13 +138,15 @@ board() { # board <selector> <status|-> <comment>
         in-progress) args+=(--workspace-status "$status" --read) ;;
         *) args+=(--workspace-status "$status" --unread) ;;
     esac
-    if orca "${args[@]}" >/dev/null 2>&1; then
+    local out
+    # 列が消えて内部名が変わると exit 0 でも warnings が返り、列は動かない。送れていない扱いにする
+    if out=$(orca "${args[@]}" 2>/dev/null) && jq -e '[.. | objects | .warnings? // empty | .[]?] | length == 0' <<<"$out" >/dev/null 2>&1; then
         tsv_put "$BOARD" "$sel"$'\t'"$comment"
         tsv_del "$BOARD_RETRY" "$sel"
         log "board $sel: $comment"
     else
         tsv_put "$BOARD_RETRY" "$sel"$'\t'"$status"$'\t'"$comment"
-        log "WARN: カードに書けない $sel (次回に再試行)"
+        log "WARN: カードに書けない $sel (次回に再試行): $(printf '%s' "$out" | jq -c '[.. | objects | .warnings? // empty | .[]?]' 2>/dev/null | cut -c1-200)"
     fi
 }
 board_retry() { # 送れなかったカードを送り直す (状態遷移とは別に、成功するまで残す)
