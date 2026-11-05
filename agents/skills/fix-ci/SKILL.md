@@ -10,6 +10,7 @@ description: 落ちている CI を調査し、根本原因を修正して green
 1. **失敗の特定**
     - `gh pr checks`（PR がない場合は `gh run list --branch <branch>`）で失敗ジョブを特定
     - `gh run view <run-id> --log-failed` で失敗ログを取得する
+    - ランが進行中だと `gh run view --log` / `--job <id> --log` はラン全体が終わるまで拒否される（`is still in progress`）。完了したジョブのログは `gh api --allow-escape-sequences repos/<owner>/<repo>/actions/jobs/<job-id>/logs > job.log` で先に取れる（`--allow-escape-sequences` が無いと出力を拒否する）。job id は `gh run view <run-id> --json jobs --jq '.jobs[] | {name, databaseId, conclusion}'` で引く
 
 2. **根本原因の診断**
     - ログの**最初の実エラー**を特定する（後続のカスケード失敗と区別する）
