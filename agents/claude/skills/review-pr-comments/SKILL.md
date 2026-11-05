@@ -12,13 +12,24 @@ PRのレビューコメントを取得し、現在のコードと照合して各
 
 ### 1. PRコメントの取得
 
+inline・review 本体・会話欄の 3 つを必ず全部取る。人の質問や依頼は inline ではなく review 本体の body や会話欄に書かれることがあり、inline だけを見ると黙って落ちる。
+
 ```bash
 # PR番号を特定（現在のブランチから）
 gh pr view --json number -q '.number'
 
 # レビューコメントを取得（--paginate 必須: 無いと 30 件で切れて 31 件目以降が黙って漏れる）
 gh api --paginate repos/{owner}/{repo}/pulls/{number}/comments --jq '.[] | "ID: \(.id)\nFile: \(.path)\nLine: \(.line)\nBody: \(.body)\n---"'
+
+# review 本体の body（本文が空の review は inline への返信の器なので除く）
+gh api --paginate repos/{owner}/{repo}/pulls/{number}/reviews --jq '.[] | select(.body != "") | "Review ID: \(.id)\nUser: \(.user.login)\nState: \(.state)\nBody: \(.body)\n---"'
+
+# 会話欄（PR 全体へのコメント）
+gh api --paginate repos/{owner}/{repo}/issues/{number}/comments --jq '.[] | "Comment ID: \(.id)\nUser: \(.user.login)\nBody: \(.body)\n---"'
 ```
+
+review 本体の body は自動ツール（要約や quota の文言）が大半なので、人のもの（`.user.login` が `[bot]` で終わらないもの）を先に読んで落とさない。
+review 本体と会話欄の質問には inline の reply が使えないので、回答は会話欄に書く（`gh api repos/{owner}/{repo}/issues/{number}/comments -f body="..." --method POST`）。
 
 ### 2. 現在のコードとの照合
 
@@ -133,6 +144,7 @@ gh api repos/{owner}/{repo}/pulls/{pull_number}/comments/{comment_id}/replies \
 
 - コメントを確認する前に、必ず最新のコードを読んでから判定する
 - 自動レビューツール（CodeRabbit等）と人間のレビュー、両方のコメントを対象にする
+- inline だけを見て「全件対応済み」と報告しない。review 本体と会話欄も読んだうえで報告する
 - 修正時は対象リポジトリの CLAUDE.md の規約に従い、そこで規定されたリンター/フォーマッタを通す
 - 判断に迷う場合は「対応不要」ではなく、ユーザーに確認を取る
 - **対応不要 (👎) は reply で理由説明を必ず残す** — 👎 だけだと後からレビュワーが辿れない
