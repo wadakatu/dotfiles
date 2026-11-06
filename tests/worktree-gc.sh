@@ -30,8 +30,12 @@ cat >"$base/bin/docker" <<'EOF'
 #!/usr/bin/env bash
 [ -f "$FAKE/docker-ps.tsv" ] || exit 1
 case "$1" in
-    ps) cat "$FAKE/docker-ps.tsv" ;;
-    compose) echo "$*" >>"$FAKE/docker-calls" ;;
+    ps) case "$2" in
+        -q) p=${4#label=com.docker.compose.project=}; awk -v p="$p" '$1 == p {print $2}' "$FAKE/docker-running" 2>/dev/null ;;
+        *) cat "$FAKE/docker-ps.tsv" ;;
+    esac ;;
+    start) echo "$*" >>"$FAKE/order" ;;
+    compose) echo "$*" >>"$FAKE/docker-calls"; echo "$*" >>"$FAKE/order" ;;
 esac
 exit 0
 EOF
@@ -50,7 +54,8 @@ case "$1 $2" in
         if [ -f "$FAKE/ps.$n.json" ]; then cat "$FAKE/ps.$n.json"; else cat "$FAKE/ps.json"; fi ;;
     "worktree list") cat "$FAKE/list.json" ;;
     "worktree rm")
-        wt=${4#path:}; echo "$wt" >>"$FAKE/rm-calls"
+        wt=${4#path:}; echo "$wt" >>"$FAKE/rm-calls"; echo "rm $wt" >>"$FAKE/order"
+        [ -f "$FAKE/rm-fail" ] && { echo '{"ok": false}'; exit 0; }
         git -C "$FAKE/repo" worktree remove --force "$wt" && echo '{"ok": true}' ;;
     *) exit 1 ;;
 esac
@@ -184,6 +189,26 @@ check "消した worktree のプロジェクトは --volumes で落とす" grep 
 check "接頭辞の合う孤児はボリュームを残して落とす" grep -qxF "compose -p proj-old down --remove-orphans" "$T/docker-calls"
 check "接頭辞の合わない孤児は触らない" not_called other-old
 check "working_dir が健在のものは触らない" not_called mysql
+
+# ---- Orca: worktree のスタックは削除の前に止め (コンテナは残す)、消せてからボリュームごと落とす ----
+setup orca-stack
+orca_wt "$T/orca/wt" feat-o "$AFTER" "$CREATED"
+printf '%s\t%s\n' wt-stack "$T/orca/wt/docker" >"$T/docker-ps.tsv"
+run_gc
+check "削除の前に止め、削除の後でボリュームごと落とす" diff <(printf '%s\n' \
+    "compose -p wt-stack stop" "rm $T/orca/wt" "compose -p wt-stack down --remove-orphans --volumes") <(head -n 3 "$T/order")
+
+# ---- Orca: 削除が拒否されたら、止める前に動いていたコンテナだけ動かし直し、down はしない ----
+setup orca-stack-rm-fails
+orca_wt "$T/orca/wt" feat-o "$AFTER" "$CREATED"
+printf '%s\t%s\n' wt-up "$T/orca/wt/a" wt-idle "$T/orca/wt/b" >"$T/docker-ps.tsv"
+printf '%s %s\n' wt-up id-web >"$T/docker-running" # wt-up の他のサービスと wt-idle は元から止まっている
+mkdir -p "$T/orca/wt/a" "$T/orca/wt/b" # 削除が拒否されたので working_dir は実在する
+touch "$T/rm-fail"
+run_gc
+check "動いていたものだけ start し、どれも down しない" diff <(printf '%s\n' \
+    "compose -p wt-idle stop" "compose -p wt-up stop" "rm $T/orca/wt" "start id-web") <(head -n 4 "$T/order")
+check "down が呼ばれない" test -z "$(grep down "$T/docker-calls")"
 
 # ---- $REPO: upstream が origin 以外の remote でも、消えたら拾う ----
 setup repo-fork-upstream
