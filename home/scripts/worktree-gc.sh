@@ -100,6 +100,40 @@ agents_busy() {
     jq -r --arg p "$1" '[.result.worktrees[]? | select(.path == $p) | .agents[]?.state | select(. != "done")] | join(",")' <<<"$2"
 }
 
+# worktree の中に working_dir を持つ compose プロジェクトを、消す前に止める。
+# bind mount の中に named volume を重ねたマウント先 (storage/ など) は、コンテナが動いている間は
+# Docker Desktop が掴んでいてホストから消せない。そのまま消すと Permission denied で途中で止まり、
+# git の登録だけ外れたフォルダが残って Orca の削除も止まる。
+# down ではなく stop にする: 削除が拒否されたとき、コンテナが残っていれば匿名ボリュームの参照も残り、
+# 末尾の `docker volume prune` に消されない。止める前に動いていたコンテナの ID は running に入れる。
+stop_stacks() {
+    local wt="$1" proj dir id
+    local seen=" "
+    running=()
+    docker info >/dev/null 2>&1 || return 0
+    while IFS=$'\t' read -r proj dir; do
+        [ -n "$proj" ] && [ -n "$dir" ] || continue
+        case "$dir" in "$wt"|"$wt"/*) ;; *) continue ;; esac
+        [[ "$seen" == *" $proj "* ]] && continue
+        seen+="$proj "
+        while read -r id; do [ -n "$id" ] && running+=("$id"); done \
+            < <(docker ps -q --filter "label=com.docker.compose.project=$proj")
+        log "stop  $proj — $wt を消す前に止める"
+        run docker compose -p "$proj" stop || log "WARN: stop 失敗 $proj"
+    done < <(docker ps -a --format '{{.Label "com.docker.compose.project"}}	{{.Label "com.docker.compose.project.working_dir"}}' | sort -u)
+    # コンテナが止まってもマウントが外れるまで 1 秒弱かかる (実測)。
+    if [ "$seen" != " " ] && [ "$DRY_RUN" != "1" ]; then sleep 3; fi
+    return 0
+}
+
+# 削除が拒否された worktree の環境は、止める前に動いていたコンテナだけ動かし直す
+# (`compose start` はプロジェクト内で元から止まっていたサービスまで起こす)。
+restart_stacks() {
+    [ ${#running[@]} -gt 0 ] || return 0
+    log "start ${running[*]} — worktree を消せなかったので戻す"
+    run docker start "${running[@]}" >/dev/null || log "WARN: start 失敗 ${running[*]}"
+}
+
 [ -d "$REPO" ] || { log "repo が無い: $REPO"; exit 0; }
 
 log "=== worktree-gc 開始 (repo=$REPO dry_run=$DRY_RUN) ==="
@@ -296,11 +330,13 @@ fi
 # 候補の段階で落とすと、削除が拒否された worktree の環境だけが毎時壊れる。
 removed=()
 for wt in ${removable[@]+"${removable[@]}"}; do
+    stop_stacks "$wt"
     if run git -C "$REPO" worktree remove "$wt" 2>/dev/null; then
         log "removed $wt"
         removed+=("$wt")
     else
         log "WARN: remove 失敗 $wt"
+        restart_stacks
     fi
 done
 run git -C "$REPO" worktree prune
@@ -321,6 +357,7 @@ for wt in ${orca_removable[@]+"${orca_removable[@]}"}; do
         log "keep  $wt (削除直前にエージェントが $busy)"
         continue
     fi
+    stop_stacks "$wt"
     if [ "$DRY_RUN" = "1" ]; then
         log "DRY-RUN: orca worktree rm --worktree path:$wt"
         removed+=("$wt")
@@ -336,6 +373,7 @@ for wt in ${orca_removable[@]+"${orca_removable[@]}"}; do
         if [ -d "$wt" ]; then log "WARN: orca rm 後もフォルダが残っている $wt"; else log "removed $wt"; fi
     else
         log "WARN: orca rm 失敗 $wt"
+        restart_stacks
     fi
 done
 
