@@ -8,7 +8,9 @@ assert builtins.isAttrs (builtins.fromTOML (builtins.readFile base));
   # Codex の system 層 (/etc/codex/config.toml)。environment.etc は nix-darwin のシステムモジュールで、
   # /etc/<name> -> /etc/static/<name> -> /nix/store/... の読み取り専用リンクを root の activation が張る。
   # 手で書いた設定だけを置き、Codex が自分で書く状態は ~/.codex/config.toml (user 層) に残す (README「Codex の設定」)。
-  environment.etc."codex/config.toml".source = base;
+  # source = base は flake のソース内のパスを指すだけで closure に参照が残らず、GC でリンク先が消える。
+  # text にして store に独立したファイルを作る。
+  environment.etc."codex/config.toml".text = builtins.readFile base;
 
   # branch-guard を system 層の hook にする。system 層の hook は managed 扱いで /hooks の trust が要らず、
   # /hooks から無効化もできない (codex-rs hooks/src/engine/discovery.rs)。新しい Mac でも初回から効く。
