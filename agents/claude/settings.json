@@ -37,7 +37,7 @@
       "effortLevel": "high"
     }
   },
-  "autoCompactWindow": 200000,
+  "autoCompactWindow": 500000,
   "promptSuggestionEnabled": false,
   "showThinkingSummaries": true,
   "switchModelsOnFlag": false,
