@@ -53,8 +53,8 @@
       "google-chrome"
       "logi-options+"
       "notion"
-      "orion"
       "slack"
+      "vivaldi"
     ];
   };
 }
