@@ -54,6 +54,12 @@ Codex の設定を変えるときは `~/.codex/config.toml` ではなくこち�
 `~/.claude/skills/<name>` と `~/.agents/skills/<name>` はそこへの symlink（Home Manager が張る）。直すときは dotfiles 側を編集する。
 skill を足したり消したりしたら、`darwin-rebuild switch` でリンクを張り直す。
 
+dotfiles は公開リポジトリで、仕事とは無関係。個人で試す道具は置いてよいが、汎用に書く。仕事のリポジトリ名・社内のパス・
+issue / PR 番号・社内ツールの ID・仕事のリポジトリのスクリプトの中身は書かない。対象のリポジトリは引数で受け取り、
+仕事に固有の設定は追跡しないローカル設定か仕事のリポジトリに置く。dotfiles に書く前に、差分を勤務先の名前で `git grep -i` する。
+**Why:** 個人で試す道具の設計を、仕事のリポジトリの固有名を埋め込んだまま dotfiles に書いてマージし、ユーザーに指摘されて
+汎用化し直すことになった。
+
 ## メモリ
 
 - 特定のリポに依存しない学び（ツールの使い方、Orca / worktree / Codex / zsh / gh の挙動、ユーザーの好み）は、
