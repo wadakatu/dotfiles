@@ -37,7 +37,7 @@
       "effortLevel": "high"
     }
   },
-  "autoCompactWindow": 200000,
+  "autoCompactWindow": 500000,
   "promptSuggestionEnabled": false,
   "showThinkingSummaries": true,
   "switchModelsOnFlag": false,
@@ -59,6 +59,13 @@
     "commit": "",
     "pr": "",
     "sessionUrl": false
+  },
+
+  "autoMode": {
+    "allow": [
+      "$defaults",
+      "git push --force-with-lease (bare, or =<branch>:<sha>) of the agent's own non-default work branch after a rebase is allowed (user-authorized 2026-11-05). Plain --force / -f, and any force push to dev/master/main, stay blocked"
+    ]
   },
 
   "permissions": {
