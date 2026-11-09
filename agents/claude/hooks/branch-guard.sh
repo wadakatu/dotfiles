@@ -61,6 +61,11 @@ if [ -n "$target" ]; then
   esac
 fi
 
+# Per-repo opt-out for repos that deliberately ship straight to main
+# (e.g. a solo, experimental tool): `git config branchguard.allowProtected true`.
+# Lives in the repo's own .git/config, so its worktrees share it.
+[ "$(git -C "$dir" config --bool branchguard.allowProtected 2>/dev/null)" = true ] && exit 0
+
 branch=$(git -C "$dir" symbolic-ref --short -q HEAD) || exit 0
 
 for p in $PROTECTED; do
