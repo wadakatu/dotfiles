@@ -38,6 +38,14 @@ check 0 "$feat" "git -C $feat push origin feature"
 check 0 "$main" "git -c user.name=x -C $feat commit -m x"
 check 0 "$main" "git --no-pager -C $feat commit -m x"
 check 2 "$feat" "git --no-pager -c user.name=x -C $main commit -m x"
+# detached HEAD でも、保護ブランチを名指しする push は止める（commit は止めない）
+git -C "$feat" -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m init
+git -C "$feat" worktree add -q --detach "$tmp/detached"
+det=$tmp/detached
+check 2 "$det" 'git push origin HEAD:main'
+check 2 "$feat" "git -C $det push origin HEAD:refs/heads/dev"
+check 0 "$det" 'git push origin HEAD:refs/heads/feature'
+check 0 "$det" 'git commit -m x'
 check 0 "$main" 'git log --oneline'
 check 0 "$main" "git -C $main status"
 

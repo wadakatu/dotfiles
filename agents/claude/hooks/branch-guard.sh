@@ -66,7 +66,9 @@ fi
 # Lives in the repo's own .git/config, so its worktrees share it.
 [ "$(git -C "$dir" config --bool branchguard.allowProtected 2>/dev/null)" = true ] && exit 0
 
-branch=$(git -C "$dir" symbolic-ref --short -q HEAD) || exit 0
+# Detached HEAD (or not a repo) has no branch to protect, but an explicit push
+# to a protected ref must still be checked below, so don't exit early.
+branch=$(git -C "$dir" symbolic-ref --short -q HEAD) || branch=""
 
 for p in $PROTECTED; do
   if [ "$branch" = "$p" ]; then
