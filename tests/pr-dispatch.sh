@@ -1679,6 +1679,18 @@ mv "$ORCA_ROOT/r/issue-1-fix-thing-1" "$ORCA_ROOT/r/moved-away"
 run
 check "起動しない" no_launch
 
+q_setup "同じリポの別の clone にある worktree も、その issue の worktree として数える"
+issue 1
+git init -q -b trunk "$base/main/r2"
+git -C "$base/main/r2" remote add origin "$base/origin/github.com/o/r.git"
+git -C "$base/main/r2" commit -q --allow-empty -m init
+jq -cn --arg p "$base/main/r2" '{worktreeId: ("r2::" + $p), path: $p, branch: "refs/heads/trunk", workspaceStatus: "", isMainWorktree: true, agents: [], repoId: "r2"}' >>"$FAKE/wts"
+qcreated 1
+jq -c 'if .linkedIssue == 1 then .repoId = "r2" else . end' "$FAKE/wts" >"$FAKE/wts.new" && mv "$FAKE/wts.new" "$FAKE/wts"
+run
+check "もう 1 つは作らない" no_create
+check "理由を出す" logged "queue 対象外 o/r#1 (Orca に worktree がある"
+
 q_setup "worktree の作成が失敗を返す"
 issue 1
 echo '{"ok":false,"error":{"code":"x"}}' >"$FAKE/create.json"
