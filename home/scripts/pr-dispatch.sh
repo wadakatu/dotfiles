@@ -908,10 +908,12 @@ queue_unlabel() {
         log "WARN: queue: ラベルを外せない → $1#$2 (次回に外し直す。同じ T では起動し直さない)"
     fi
 }
-# queue_launch <key> <worktree> <番号> <T> <operationId|-> <印の時刻|空> <repo>: worker を起動し、起動できたらラベルを外す。
+# queue_launch <key> <worktree> <番号> <T> <operationId|-> <印の時刻|空> <repo> [今のラベルの T]: worker を起動し、起動できたらラベルを外す。
+# 外すのは、起動した T が今のラベルの T と同じときだけ。付け直す前の T の依頼を出し直したときは、新しい承認のラベルを残す
+# (その worker は着手前の check で止まるので、外すと付け直した承認がキューから消える)。
 # T は起動の引数で渡す (worker は取り直さない。setup を待つ間の変更を、着手の直前の check で拾うため)。
 queue_launch() {
-    local key=$1 wt=$2 n=$3 t=$4 op=$5 t0=$6 slug=$7 prompt
+    local key=$1 wt=$2 n=$3 t=$4 op=$5 t0=$6 slug=$7 t_label=${8:-$4} prompt
     t0=${t0:-$(date +%s)}
     prompt="/issue-worker $n --approved-at $t
 
@@ -919,7 +921,7 @@ queue_launch() {
     if launch_agent "$key" "$wt" "$prompt" "$op" "$t0" --model opus --effort high --surface chat; then
         log "queue: worker を起動 → $slug#$n"
         launched=$((launched + 1))
-        queue_unlabel "$slug" "$n"
+        [ "$t" != "$t_label" ] || queue_unlabel "$slug" "$n"
     else
         log "WARN: queue: worker を起動できなかった → $slug#$n ($(launch_last "$key" | cut -f2)。失敗なら次回に試し直し、返事を失ったなら同じ依頼を出し直す。分からなければ起動し直さない)"
     fi
@@ -1004,6 +1006,7 @@ query($q: String!, $endCursor: String) {
             continue
         fi
         key="$iss"$'\t'"issue-worker"$'\t'"$t"
+        t_label=$t
         main=$(printf '%s' "$mains" | awk -F'\t' -v s="$slug" '$1 == s { print $2; exit }')
         rid=$(printf '%s' "$mains" | awk -F'\t' -v s="$slug" '$1 == s { print $3; exit }')
         if [ -z "$main" ]; then
@@ -1109,7 +1112,7 @@ query($q: String!, $endCursor: String) {
                     log "DRY-RUN: queue worker を起動 → $iss (${wt#"$ORCA_ROOT"/})"
                     continue
                 fi
-                queue_launch "$key" "$wt" "$n" "$t" "$op" "$t0" "$slug"
+                queue_launch "$key" "$wt" "$n" "$t" "$op" "$t0" "$slug" "$t_label"
                 continue
             fi
         fi
