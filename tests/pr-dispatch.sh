@@ -84,7 +84,13 @@ case "$1 $2" in
         case "$*" in
             *is:closed*) [ -e "$FAKE/closed-down" ] && exit 1; cat "$FAKE/closed.tsv" ;;
             *is:issue*) [ -e "$FAKE/issues-down" ] && exit 1; cat "$FAKE/issues.json" ;;
-            *"issue(number"*) [ -e "$FAKE/issue-down" ] && exit 1; cat "$FAKE/issue.json" ;;
+            *"issue(number"*)
+                [ -e "$FAKE/issue-down" ] && exit 1
+                # issue.json があればそれを返す (一覧を読んだ後に変わった issue)。無ければ、一覧と同じ内容を返す。
+                [ -e "$FAKE/issue.json" ] && { cat "$FAKE/issue.json"; exit 0; }
+                n=$(printf '%s\n' "$@" | sed -n 's/^n=//p')
+                jq -cs --argjson n "${n:-0}" '{data: {viewer: {login: "me"}, repository: {issue: (map(select(.number == $n))[0] // null)}}}' "$FAKE/issues" 2>/dev/null
+                ;;
             *draft:false*) cat "$FAKE/prs.json" ;;
             *) [ -e "$FAKE/open-down" ] && exit 1; cat "$FAKE/prs.json"; cat "$FAKE/drafts.json" 2>/dev/null || true ;;
         esac
@@ -1236,6 +1242,9 @@ qwt() {
 }
 # qcreated <番号> [列] [エージェントの JSON 配列]: 前の回に偽の Orca が作った worktree を、一覧に出す
 qcreated() {
+    git init -q "$ORCA_ROOT/r/issue-$1-fix-thing-$1"
+    git -C "$ORCA_ROOT/r/issue-$1-fix-thing-$1" remote add origin https://github.com/o/r.git
+    git -C "$ORCA_ROOT/r/issue-$1-fix-thing-$1" commit -q --allow-empty -m init
     jq -cn --arg p "$ORCA_ROOT/r/issue-$1-fix-thing-$1" --arg b "refs/heads/issue-$1-fix-thing-$1" --argjson n "$1" --arg s "${2:-in-progress}" --argjson a "${3:-[]}" \
         '{worktreeId: ("r::" + $p), path: $p, branch: $b, workspaceStatus: $s, isMainWorktree: false, agents: $a, repoId: "r", linkedIssue: $n, createdAt: 1}' >>"$FAKE/wts"
 }
@@ -1635,6 +1644,41 @@ check "理由を出す" logged "keep  o/r#1 (今回の起動上限 0 に達し�
 MAX_LAUNCHES=1 run
 check "上限の内なら起動する" q_launched 1
 
+q_setup "issue を読んでから起動するまでの間にラベルを付け直されたら、そのラベルは外さない"
+issue 1
+jq -c --arg t "$T2" --arg l "$LBL" '{data: {viewer: {login: "me"}, repository: {issue: (.labeled.nodes += [{createdAt: $t, actor: {login: "me"}, label: {name: $l}}])}}}' "$FAKE/issues" >"$FAKE/issue.json"
+run
+check "起動はする (worker は着手前の再確認で止まる)" q_launched 1
+check "付け直したラベルは外さない" not_called "issue edit"
+check "理由を出す" logged "queue: ラベルを外さない → o/r#1"
+
+q_setup "ラベルを外す直前に GitHub を読めなければ、外さない (次の回に外し直す)"
+issue 1
+touch "$FAKE/issue-down"
+run
+check "外さない" not_called "issue edit"
+rm "$FAKE/issue-down"
+qcreated 1 in-progress "$(agent working t1:l1 "/issue-worker 1")"
+run
+check "次の回に外す" called "gh issue edit 1 -R o/r --remove-label $LBL"
+
+q_setup "作成済みの worktree に未コミットの変更があれば、worker を起動しない"
+issue 1
+qrow "$(date +%s)" creating - 1
+qcreated 1
+echo x >"$ORCA_ROOT/r/issue-1-fix-thing-1/human.txt"
+run
+check "起動しない" no_launch
+check "ボードに知らせる" called "未コミットの変更があるので、worker の起動を見送り: #1"
+
+q_setup "作成済みの worktree の状態を読めなければ、worker を起動しない"
+issue 1
+qrow "$(date +%s)" creating - 1
+qcreated 1
+mv "$ORCA_ROOT/r/issue-1-fix-thing-1" "$ORCA_ROOT/r/moved-away"
+run
+check "起動しない" no_launch
+
 q_setup "worktree の作成が失敗を返す"
 issue 1
 echo '{"ok":false,"error":{"code":"x"}}' >"$FAKE/create.json"
@@ -1712,6 +1756,16 @@ check "前の T の依頼を出し直す" called "--prompt /issue-worker 1 --app
 check "同じ operationId で" called "--retry-launch op_1"
 check "新しい T では起動しない" not_called "--approved-at $T2"
 check "付け直したラベルは残す (前の T の worker は着手前の再確認で止まる)" not_called "issue edit"
+
+q_setup "返事を失った起動の出し直しは、worktree に変更があっても行う (最初の依頼で動き出した worker の変更がありうる)"
+issue 1
+qcreated 1
+echo x >"$ORCA_ROOT/r/issue-1-fix-thing-1/wip.txt"
+qrow 100 creating - 1
+qrow "$(date +%s)" launching - 1
+qrow "$(date +%s)" lost op_1 1
+run
+check "同じ operationId で出し直す" called "--retry-launch op_1"
 
 q_setup "起動が 3 回失敗する"
 issue 1
