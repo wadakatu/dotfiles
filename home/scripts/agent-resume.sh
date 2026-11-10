@@ -76,8 +76,13 @@ open_tab() {
     now=$(date +%s)
     if [ "$kind" != "idle" ]; then
         # 同じセッションの handle の無い行は 1 つまで (失敗して次の回に試し直しても増えない)。
-        pending_fill "$wtid" "$sid" "" "" ""
-        printf -- '-\t-\t%s\t%s\t%s\n' "$wtid" "$sid" "$now" >>"$PENDING_FILE"
+        # 記録を書けなければ、タブを作らない (再開を依頼したのに記録が無い、を作らないため)。
+        # この関数は if の条件として呼ばれ、中では set -e が効かないので、失敗は自分で見る。
+        if ! { pending_fill "$wtid" "$sid" "" "" "" &&
+            printf -- '-\t-\t%s\t%s\t%s\n' "$wtid" "$sid" "$now" >>"$PENDING_FILE"; } 2>/dev/null; then
+            log "再開の記録を書けない ($PENDING_FILE)。タブは作らない"
+            return 1
+        fi
     fi
     out=$(orca terminal create --worktree "id:$wtid" --title "再開" \
         --command "bash '${BASH_SOURCE[0]}' launch '$sid' '$kind' '$cwd'" --json 2>/dev/null) || rc=$?
@@ -95,11 +100,11 @@ open_tab() {
 # pending_fill <worktreeId> <sid> <時刻> <handle> <paneKey>: handle の無い行に handle と paneKey を補う。
 # handle が空なら、その行を消す (時刻も空なら、そのセッションの handle の無い行を全部消す)。
 pending_fill() {
-    touch "$PENDING_FILE"
-    awk -F'\t' -v OFS='\t' -v w="$1" -v s="$2" -v t="$3" -v h="$4" -v p="$5" '
-        $1 == "-" && $3 == w && $4 == s && (t == "" || $5 == t) { if (h == "") next; $1 = h; $2 = p }
-        { print }' "$PENDING_FILE" >"$PENDING_FILE.tmp"
-    mv "$PENDING_FILE.tmp" "$PENDING_FILE"
+    touch "$PENDING_FILE" &&
+        awk -F'\t' -v OFS='\t' -v w="$1" -v s="$2" -v t="$3" -v h="$4" -v p="$5" '
+            $1 == "-" && $3 == w && $4 == s && (t == "" || $5 == t) { if (h == "") next; $1 = h; $2 = p }
+            { print }' "$PENDING_FILE" >"$PENDING_FILE.tmp" &&
+        mv "$PENDING_FILE.tmp" "$PENDING_FILE"
 }
 
 # 会話記録の末尾から、止まったときの状態を question / work / idle で返す。

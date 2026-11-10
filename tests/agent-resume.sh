@@ -49,7 +49,7 @@ for c in orca sysctl; do
 done
 
 export FAKE="$base/fake" CLAUDE_HOME="$base/claude"
-export STATE_DIR="$base/state" DISPATCH_LOCK="$base/lock.d" DISPATCH_LOCK_WAIT=0 LAUNCH_INTERVAL=0
+export STATE_DIR="$base/state" DISPATCH_LOCK="$base/lock" DISPATCH_LOCK_WAIT=0 LAUNCH_INTERVAL=0
 pending="$STATE_DIR/resume-pending.tsv"
 wt="$base/wt"
 wtid="repo::$wt"
@@ -188,6 +188,16 @@ run
 run
 check "毎回試す" [ "$(grep -c 'terminal create' "$FAKE/calls")" = 3 ]
 check "handle の無い行は 1 つのまま" rows 1
+
+CASE="記録を書けない"
+reset
+mark sid-1 work
+mkdir "$pending" # ファイルのあるべき場所がディレクトリで、追記できない
+run
+check "タブを作らない" not_called "terminal create"
+check "理由をログに出す" grep -q "再開の記録を書けない" "$base/out"
+check "カードに知らせる" called "worktree set --worktree id:$wtid --unread"
+rm -rf "$pending"
 
 CASE="DRY_RUN"
 reset
