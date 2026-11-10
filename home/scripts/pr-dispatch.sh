@@ -424,7 +424,9 @@ while IFS=$'\t' read -r slug branch num url head mergeable ci threads merge_stat
     fi
     # 人の作業を踏まない。エージェントが居なくても、未コミットの変更がある worktree には起動しない
     # (状態を読めないときも起動しない)。
-    if ! dirty=$(git -C "$wt" status --porcelain 2>/dev/null) || [ -n "$dirty" ]; then
+    # --no-optional-locks: status は既定で index を書き直し、その間のロックが、同じ worktree で動いている git を失敗させうる
+    # (git-status(1) の BACKGROUND REFRESH)。数分おきに打つので、ロックを取らない。
+    if ! dirty=$(git -C "$wt" --no-optional-locks status --porcelain 2>/dev/null) || [ -n "$dirty" ]; then
         board "$wt" "dirty-$action" "$sig" - "未コミットの変更があるので、自動の /$action を見送り: #$num"
         continue
     fi
