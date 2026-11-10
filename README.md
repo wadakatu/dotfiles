@@ -18,7 +18,8 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 | Ghostty と設定 | Homebrew cask + Home Manager |
 | herdr の設定 | `home/config/herdr/config.toml` を Home Manager が out-of-store symlink（本体は Nix 管理外） |
 | worktree / コンテナ掃除 | Home Manager `launchd.agents`（1 時間ごと、`home/scripts/worktree-gc.sh`） |
-| 再起動で止まった Claude の再開、Needs decision で会話が開いていないカードの開き直し（同じセッションには 1 回だけ。人が閉じたタブは開き直さない） | Home Manager `launchd.agents`（ログイン時と 3 分ごと、`home/scripts/agent-resume.sh`）＋ SessionStart hook `agents/claude/hooks/session-marker.sh` |
+| PR の自動対応（conflict / CI 失敗 / 未対応のレビューにエージェントを起動）と、人の判断待ちのボード表示 | Home Manager `launchd.agents`（ログイン時と 3 分ごと、`home/scripts/pr-dispatch.sh`）。止めるときは `~/Library/Application Support/pr-dispatch/BRAKE` を置く（再開と起動が止まり、ボードの更新は続く） |
+| 再起動で止まった Claude の再開、Needs decision で会話が開いていないカードの開き直し（同じセッションには 1 回だけ。人が閉じたタブは開き直さない） | Home Manager `launchd.agents` の pr-dispatch が毎回の最初に呼ぶ（ログイン時と 3 分ごと、`home/scripts/agent-resume.sh`）＋ SessionStart hook `agents/claude/hooks/session-marker.sh`。再開したセッションに指示が入るまで、その worktree への PR の自動対応は待つ |
 | 放置された Claude / Codex のセッションの通知と、確かめたものの停止（Orca の端末に /exit） | Home Manager `launchd.agents`（10 分ごと、`home/scripts/agent-gc.sh`）＋ CLI `~/.local/bin/agent-gc`。設計は `docs/agent-gc-design.md` |
 | Claude Code の auto memory の整理（重複・陳腐化・共有への移動、昇格は 1 件ずつ PR） | Home Manager `launchd.agents`（毎日 04:30、`home/scripts/memory-maintenance.sh`）。設計は `docs/memory-maintenance-design.md` |
 | CLI パッケージ | nixpkgs `home.packages` |
@@ -61,8 +62,7 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 │   ├── neovim.nix
 │   ├── packages.nix
 │   ├── worktree-gc.nix
-│   ├── pr-dispatch.nix
-│   ├── agent-resume.nix
+│   ├── pr-dispatch.nix  # PR の自動対応と、再起動で止まったセッションの再開
 │   ├── agent-gc.nix
 │   ├── memory-maintenance.nix
 │   ├── run-from-main.nix  # LaunchAgent が origin/main のスクリプトを動かす起動スクリプト
@@ -70,7 +70,7 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 │   ├── scripts/
 │   │   ├── worktree-gc.sh
 │   │   ├── pr-dispatch.sh
-│   │   ├── agent-resume.sh
+│   │   ├── agent-resume.sh  # pr-dispatch.sh が毎回の最初に呼ぶ
 │   │   ├── dispatch-lock.sh  # pr-dispatch と agent-resume が同時に動かないための共有ロック
 │   │   ├── agent-gc.sh
 │   │   └── memory-maintenance.sh  (+ -prompt.md, -schema.json)
@@ -353,7 +353,7 @@ flake では相対パスを渡すと flake source の store コピーを指し�
 絶対パスの文字列を渡している
 （[home-manager#2085](https://github.com/nix-community/home-manager/issues/2085)）。
 このため、このリポジトリのクローン先は `flake.nix` の `mkDarwin` に渡す
-`dotfilesPath` と一致させる。LaunchAgent（worktree-gc / pr-dispatch / agent-resume /
+`dotfilesPath` と一致させる。LaunchAgent（worktree-gc / pr-dispatch /
 memory-maintenance）も同じ値を見るので、クローン先を変えるときは `dotfilesPath` を直して
 `darwin-rebuild switch` する。
 
