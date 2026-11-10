@@ -5,7 +5,7 @@
 #   conflict → /sync-pr、CI 失敗 → /fix-ci、未対応のレビュー → /review-pr-comments
 # あわせて、人の判断待ちになったものを Orca のボードに出す。
 #   同じ対応を MAX_ATTEMPTS 回起動しても直らない PR → Needs decision
-#   CLEAN で auto-merge の無い PR (マージするかは人が決める) → Needs decision
+#   CLEAN で auto-merge の無い PR (マージするかは人が決める) → In review に置き、未読と「マージ可」を付ける
 #   入力待ち (waiting) のエージェント → Needs decision
 #   文章で質問して止まったエージェント (Orca では done に見える) → 未読と「要確認」のコメントだけ付ける
 #   PR がマージ・クローズされた worktree → Done (worktree-gc が消すまでの置き場所)
@@ -63,6 +63,14 @@ log() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
 # 数分ごとに同じ内容が並ぶ見送りの理由は、VERBOSE=1 のときだけ出す。
 vlog() { [ "$VERBOSE" = "1" ] && log "$@"; return 0; }
 
+# orca_set <orca worktree set の引数...>: カードを書き換える。書けたら 0。
+# 列を作り直して内部名が変わると、exit 0 でも warnings が返って列は動かないので、warnings があれば書けていない扱いにする。
+orca_set() {
+    local out
+    out=$(orca worktree set "$@" 2>/dev/null) &&
+        jq -e '[.. | objects | .warnings? // empty | .[]?] | length == 0' <<<"$out" >/dev/null 2>&1
+}
+
 flagged=0
 # board <path> <reason> <sig> <status|-> <comment>
 # (path, reason, sig) を初めて見たときだけボードに書く。status が - なら列は動かさず未読とコメントだけ付ける。
@@ -76,13 +84,11 @@ board() {
         flagged=$((flagged + 1))
         return 0
     fi
-    local args=(--worktree "path:$wt" --comment "$comment" --json) out
+    local args=(--worktree "path:$wt" --comment "$comment" --json)
     [ "$status" = "completed" ] || args+=(--unread)
     [ "$status" = "-" ] || args+=(--workspace-status "$status")
-    # 列を作り直して内部名が変わると、exit 0 でも warnings が返って列は動かない。
-    # 書けたことにして覚えると、その通知は二度と出ないので、warnings があれば書けていない扱いにする。
-    if out=$(orca worktree set "${args[@]}" 2>/dev/null) &&
-        jq -e '[.. | objects | .warnings? // empty | .[]?] | length == 0' <<<"$out" >/dev/null 2>&1; then
+    # 書けていないのに覚えると、その通知は二度と出ない。
+    if orca_set "${args[@]}"; then
         printf '%s\n' "$key" >>"$BOARD_FILE"
         log "board $reason → ${wt#"$ORCA_ROOT"/}: $comment"
         flagged=$((flagged + 1))
@@ -143,15 +149,28 @@ wt_json=$(orca worktree list --json 2>/dev/null) || {
     exit 0
 }
 worktrees=""
-while IFS=$'\t' read -r wt_path branch status; do
-    [ -n "$branch" ] || continue
+while IFS=$'\t' read -r wt_path branch legacy status; do
     slug=$(git -C "$wt_path" remote get-url origin 2>/dev/null | sed -E 's#^.*github\.com[:/]##; s#\.git$##') || continue
     [ -n "$slug" ] || continue
+    # 移行: 以前の版は、マージ待ちのカードを Needs decision に置いていた (コメントが「マージ判断:」で始まる)。
+    # In review に戻す。Needs decision のままだと、その PR に conflict が出ても自動の対応が止まる。
+    # ponytail: Needs decision に「マージ判断:」のカードが無くなったら、この節と jq の legacy の列を消す
+    if [ "$status" = "needs-decision" ] && [ "$legacy" = "1" ]; then
+        if [ "$DRY_RUN" = "1" ]; then
+            log "DRY-RUN: board マージ判断のカードを In review に戻す → ${wt_path#"$ORCA_ROOT"/}"
+        elif orca_set --worktree "path:$wt_path" --workspace-status in-review --json; then
+            log "board マージ判断のカードを In review に戻した → ${wt_path#"$ORCA_ROOT"/}"
+            status=in-review
+        else
+            log "WARN: マージ判断のカードを In review に戻せない → $wt_path (次回に再試行)"
+        fi
+    fi
     worktrees="$worktrees$slug"$'\t'"$branch"$'\t'"$wt_path"$'\t'"$status"$'\n'
 done < <(jq -r --arg root "$ORCA_ROOT" '
     .result.worktrees[]
-    | select((.isMainWorktree | not) and (.path | startswith($root + "/")))
-    | [.path, ((.branch // "") | sub("^refs/heads/"; "")), (.workspaceStatus // "")] | @tsv' <<<"$wt_json")
+    | select((.isMainWorktree | not) and (.path | startswith($root + "/")) and ((.branch // "") != ""))
+    | [.path, (.branch | sub("^refs/heads/"; "")), (if (.comment // "") | startswith("マージ判断:") then "1" else "0" end),
+       (.workspaceStatus // "")] | @tsv' <<<"$wt_json")
 
 if [ -z "$worktrees" ]; then
     log "Orca の worktree が無い。終了"
@@ -350,9 +369,11 @@ while IFS=$'\t' read -r slug branch num url head mergeable ci threads merge_stat
     elif [ "$threads" != "-" ]; then
         action="review-pr-comments"; sig="$head:$threads"
     else
-        # 対応が要らない PR。CLEAN で auto-merge が無ければ、マージするかは人が決める。
+        # 対応が要らない PR。CLEAN で auto-merge が無ければ、マージするかは人が決める。カードは In review に置き、
+        # 未読と「マージ可」で知らせる。Needs decision には置かない (人が質問に答えるための列で、置くと、その PR に
+        # あとから conflict が出ても自動の対応が止まる)。別の理由で Needs decision にあるカードは動かさない。
         if [ "$merge_state" = "CLEAN" ] && [ "$merge_mode" = "manual" ] && [ "$board" != "needs-decision" ]; then
-            board "$wt" merge "$head" needs-decision "マージ判断: #${num}（CLEAN・auto-merge なし）"
+            board "$wt" merge "$head" in-review "マージ可: #${num}"
         fi
         continue
     fi

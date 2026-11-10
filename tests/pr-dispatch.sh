@@ -99,14 +99,14 @@ setup() { # setup <ケース名>: 状態と偽の入力を作り直す
     echo '{"ok":true}' >"$FAKE/set.json"
     echo '{"result":{"terminals":[],"truncated":false}}' >"$FAKE/terms.json"
 }
-# wt <名前> <branch> <ボードの列> [エージェントの JSON 配列]: Orca の worktree を 1 つ作る (本物の git リポジトリ)。
+# wt <名前> <branch> <ボードの列> [エージェントの JSON 配列] [カードのコメント]: Orca の worktree を 1 つ作る (本物の git リポジトリ)。
 wt() {
     local d="$ORCA_ROOT/r/$1"
     git init -q "$d"
     git -C "$d" remote add origin https://github.com/o/r.git
     git -C "$d" commit -q --allow-empty -m init
-    jq -cn --arg p "$d" --arg b "refs/heads/$2" --arg s "$3" --argjson a "${4:-[]}" \
-        '{worktreeId: ("r::" + $p), path: $p, branch: $b, workspaceStatus: $s, isMainWorktree: false, agents: $a}' >>"$FAKE/wts"
+    jq -cn --arg p "$d" --arg b "refs/heads/$2" --arg s "$3" --argjson a "${4:-[]}" --arg c "${5:-}" \
+        '{worktreeId: ("r::" + $p), path: $p, branch: $b, workspaceStatus: $s, isMainWorktree: false, agents: $a, comment: $c}' >>"$FAKE/wts"
 }
 p() { echo "$ORCA_ROOT/r/$1"; }
 # agent <state> [paneKey] [prompt] [stateStartedAt (ミリ秒)]
@@ -202,7 +202,7 @@ wt a feat-a in-progress
 pr 1 feat-a MERGEABLE SUCCESS CLEAN "" true
 run
 check "起動しない" no_launch
-check "マージ判断にもしない (未対応が無いとは言えない)" not_called "マージ判断"
+check "マージ可にもしない (未対応が無いとは言えない)" not_called "マージ可"
 
 # ---- 観測が欠けた回は起動しない ----
 for broken in orca-down gh-down list.json.rc ps.json.rc; do
@@ -235,7 +235,7 @@ printf 'BOOT-OLD\t1\tr::%s\t%s\t%s\n' "$(p c)" "$(p c)" "$base/none.jsonl" >"$R/
 run
 check "起動しない" no_launch
 check "再開もしない" not_called "terminal create"
-check "ボードは更新する" called "マージ判断: #2"
+check "ボードは更新する" called "マージ可: #2"
 rm "$S/BRAKE"
 run
 check "外したら起動する" launched a
@@ -305,14 +305,62 @@ wt a feat-a in-progress
 pr 1 feat-a MERGEABLE SUCCESS CLEAN
 echo '{"ok":true,"result":{"warnings":["unknown status"]}}' >"$FAKE/set.json"
 run
-check "書こうとする" [ "$(count 'マージ判断: #1')" = 1 ]
+check "書こうとする" [ "$(count 'マージ可: #1')" = 1 ]
 check "書けたことにしない" lacks "$S/board.tsv" "merge"
 run
-check "次の回にもう一度書く" [ "$(count 'マージ判断: #1')" = 2 ]
+check "次の回にもう一度書く" [ "$(count 'マージ可: #1')" = 2 ]
 echo '{"ok":true}' >"$FAKE/set.json"
 run
 run
-check "書けたら、それ以上は書かない" [ "$(count 'マージ判断: #1')" = 3 ]
+check "書けたら、それ以上は書かない" [ "$(count 'マージ可: #1')" = 3 ]
+
+setup "マージ待ちのカードは In review に置く"
+wt a feat-a in-progress
+wt b feat-b needs-decision
+wt c feat-c in-progress
+pr 1 feat-a MERGEABLE SUCCESS CLEAN
+pr 2 feat-b MERGEABLE SUCCESS CLEAN
+pr 3 feat-c MERGEABLE SUCCESS BLOCKED
+run
+run
+check "未読と「マージ可」を付けて In review に (1 回だけ)" [ "$(count "worktree set --worktree path:$(p a) --comment マージ可: #1 --json --unread --workspace-status in-review")" = 1 ]
+check "別の理由で Needs decision にあるカードは動かさない" not_called "path:$(p b) "
+check "マージできない PR には付けない" not_called "マージ可: #3"
+check "Needs decision には置かない" not_called "needs-decision"
+
+setup "以前の版が Needs decision に置いた「マージ判断」のカード"
+wt a feat-a needs-decision "[]" "マージ判断: #1（CLEAN・auto-merge なし）"
+wt b feat-b needs-decision "[]" "どちらの案にしますか"
+pr 1 feat-a CONFLICTING SUCCESS DIRTY
+pr 2 feat-b CONFLICTING SUCCESS DIRTY
+run
+check "In review に戻す (コメントと未読は変えない)" called "worktree set --worktree path:$(p a) --workspace-status in-review --json"
+check "戻した回から、conflict に対応する" launched a
+check "質問のカードは動かさない" not_called "path:$(p b) --workspace-status in-review"
+check "質問のカードの PR には起動しない" not_launched b
+
+setup "「マージ判断」のカードを戻せない (列の内部名が変わった)"
+wt a feat-a needs-decision "[]" "マージ判断: #1（CLEAN・auto-merge なし）"
+pr 1 feat-a CONFLICTING SUCCESS DIRTY
+echo '{"ok":true,"result":{"warnings":["unknown status"]}}' >"$FAKE/set.json"
+run
+check "戻せていないカードの PR には起動しない" no_launch
+
+setup "「マージ判断」のカードと DRY_RUN"
+wt a feat-a needs-decision "[]" "マージ判断: #1（CLEAN・auto-merge なし）"
+pr 1 feat-a CONFLICTING SUCCESS DIRTY
+render
+DRY_RUN=1 bash "$script" >"$base/out" 2>&1
+check "カードは動かさない" not_called "worktree set"
+check "動かす予定を出す" logged "DRY-RUN: board マージ判断のカードを In review に戻す"
+
+setup "branch の無い worktree (detached HEAD)"
+wt a feat-a in-progress
+pr 1 feat-a CONFLICTING SUCCESS DIRTY
+jq -c '.branch = null | .workspaceStatus = "needs-decision"' "$FAKE/wts" >"$FAKE/wts.new" && mv "$FAKE/wts.new" "$FAKE/wts"
+run
+check "exit 0" [ "$rc" = 0 ]
+check "対象にしない" no_launch
 
 # ---- 起動の結果 ----
 setup "起動が失敗を返す"
