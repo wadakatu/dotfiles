@@ -1243,7 +1243,7 @@ qwt() {
 # qcreated <番号> [列] [エージェントの JSON 配列]: 前の回に偽の Orca が作った worktree を、一覧に出す
 qcreated() {
     git init -q "$ORCA_ROOT/r/issue-$1-fix-thing-$1"
-    git -C "$ORCA_ROOT/r/issue-$1-fix-thing-$1" remote add origin https://github.com/o/r.git
+    git -C "$ORCA_ROOT/r/issue-$1-fix-thing-$1" remote add origin https://github.com/o/r.git 2>/dev/null || true # 偽の Orca が作った worktree には既にある
     git -C "$ORCA_ROOT/r/issue-$1-fix-thing-$1" commit -q --allow-empty -m init
     jq -cn --arg p "$ORCA_ROOT/r/issue-$1-fix-thing-$1" --arg b "refs/heads/issue-$1-fix-thing-$1" --argjson n "$1" --arg s "${2:-in-progress}" --argjson a "${3:-[]}" \
         '{worktreeId: ("r::" + $p), path: $p, branch: $b, workspaceStatus: $s, isMainWorktree: false, agents: $a, repoId: "r", linkedIssue: $n, createdAt: 1}' >>"$FAKE/wts"
@@ -1455,6 +1455,31 @@ run
 check "止める" no_create
 check "理由を出す" logged "queue 見送り o/r#1 (max_wip (1/1))"
 
+q_setup "max_wip: この回に PR 対応を起動した worktree も数える (エージェントの状態は回の最初に読んだきり)"
+issue 1
+qwt w6 6 in-review
+pr 60 issue-6-fix MERGEABLE FAILURE BLOCKED
+queue_config 'max_wip=1\n'
+run
+check "PR 対応は起動する" called "--prompt /fix-ci https://github.com/o/r/pull/60"
+check "新しい着手は止める" no_create
+check "理由を出す" logged "queue 見送り o/r#1 (max_wip (1/1))"
+
+q_setup "max_wip: この回に Needs decision に上げた worktree も数える"
+qwt w6 6 in-review
+pr 60 issue-6-fix MERGEABLE FAILURE BLOCKED
+echo '{"ok":false,"error":{"code":"x"}}' >"$FAKE/launch.json"
+echo 1 >"$FAKE/launch.json.rc"
+queue_config 'max_wip=1\n'
+run
+run
+run # PR 対応の起動に 3 回失敗 (まだ人には上げていない)
+rm "$FAKE/launch.json" "$FAKE/launch.json.rc"
+issue 1
+run
+check "この回に人に上げる" called "自動の /fix-ci の起動に 3 回失敗: #60"
+check "新しい着手は止める" no_create
+
 q_setup "max_per_day (今日の JST の creating を数える)"
 issue 1
 now=$(date +%s)
@@ -1567,7 +1592,9 @@ done
 q_setup "作成の結果が分からないまま待つ上限を過ぎ、worktree も現れない: 失敗として閉じ、作り直す"
 issue 1
 qrow 100 creating - 1
+render
 DRY_RUN=1 bash "$script" >"$base/out" 2>&1
+check "DRY_RUN でもキューまで回る" logged "keep  o/r#1 (worktree が見えない。最後の記録: creating。作り直さない)"
 check "DRY_RUN では閉じない" [ "$(states)" = "creating " ]
 run
 check "失敗として閉じ、同じ T で作り直す" [ "$(states)" = "creating fail creating launching launched " ]
