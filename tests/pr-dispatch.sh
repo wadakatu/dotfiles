@@ -40,6 +40,8 @@ case "$1 $2" in
     "worktree ps") reply ps.json ;;
     "worktree set") reply set.json ;;
     "terminal list") reply terms.json ;;
+    "terminal read") cat "$FAKE/read.json" 2>/dev/null || echo '{"result":{"terminal":{"tail":[]}}}' ;;
+    "repo show") cat "$FAKE/repo.json" 2>/dev/null || echo '{"result":{"repo":{"hookSettings":{"scripts":{"setup":""}}}}}' ;;
     "terminal create") echo '{"ok":true,"result":{"terminal":{"handle":"term_new","paneKey":"tabn:leafn"}}}' ;;
     "worktree create")
         # create.json があればそれを返す (失敗や、読めない返事)。無ければ本物の git worktree を作る。
@@ -731,7 +733,8 @@ check "PR の branch に切り替わっている" [ "$(git -C "$ORCA_ROOT/r/pr-1
 check "PR の head を指している" [ "$(git -C "$ORCA_ROOT/r/pr-1" rev-parse HEAD)" = "$sha" ]
 check "仮のブランチは消す" [ -z "$(git -C "$M" branch --list pr-1)" ]
 check "PR を結び付け直し、In review に置く" called "worktree set --worktree path:$ORCA_ROOT/r/pr-1 --pr 1 --workspace-status in-review --display-name r: PR の題名 1 --comment auto: PR #1 の対応のために worktree を作成 --json"
-check "記録する" [ "$(cut -f2 "$S/adopts.tsv" | tr '\n' ' ')" = "creating created " ]
+check "push できるように upstream を付ける" [ "$(git -C "$ORCA_ROOT/r/pr-1" rev-parse --abbrev-ref 'feat-x@{upstream}')" = origin/feat-x ]
+check "記録する (setup の無いリポは、すぐ ready)" [ "$(cut -f2 "$S/adopts.tsv" | tr '\n' ' ')" = "creating created ready " ]
 check "同じ回にはエージェントを起動しない" no_launch
 check "検索に、登録したリポを入れる" called "repo:o/r"
 cp "$FAKE/wts" "$FAKE/wts.before"
@@ -744,6 +747,70 @@ git -C "$M" worktree remove --force "$ORCA_ROOT/r/pr-1"
 cp "$FAKE/wts.before" "$FAKE/wts"
 run
 check "一度作った PR には、worktree を人が消しても作り直さない" [ "$(count 'worktree create')" = 1 ]
+
+# adopted <番号> <branch> <列>: 作った worktree を、Orca の一覧に出す (偽の Orca は一覧を自分では増やさない)。
+adopted() {
+    jq -cn --arg p "$ORCA_ROOT/r/pr-$1" --arg b "refs/heads/$2" --arg s "$3" '{worktreeId: ("r::" + $p), path: $p, branch: $b, workspaceStatus: $s, isMainWorktree: false, agents: [], repoId: "r", linkedPR: null}' >>"$FAKE/wts"
+}
+setup "作った worktree の setup が終わるまで、エージェントを起動しない"
+mainrepo
+sha=$(remote_branch feat-x)
+pr 1 feat-x CONFLICTING SUCCESS DIRTY "" false "$sha"
+adopt_config
+echo '{"result":{"repo":{"hookSettings":{"scripts":{"setup":"make setup && echo \"Orca setup done: ok\""}}}}}' >"$FAKE/repo.json"
+run
+check "作った時点では ready にしない" [ "$(cut -f2 "$S/adopts.tsv" | tr '\n' ' ')" = "creating created " ]
+adopted 1 feat-x in-review
+term term_setup pr-1 | terms
+echo '{"result":{"terminal":{"tail":["installing dependencies...","still running"]}}}' >"$FAKE/read.json"
+run
+run
+check "setup の途中は起動しない" no_launch
+check "端末の出力を読んで確かめる" called "terminal read --terminal term_setup --limit 200 --json"
+echo '{"result":{"terminal":{"tail":["installing dependencies...","Orca setup done: ok"]}}}' >"$FAKE/read.json"
+run
+check "終わった印が出たら起動する" launched pr-1
+check "ready を記録する" [ "$(cut -f2 "$S/adopts.tsv" | tr '\n' ' ')" = "creating created ready " ]
+
+setup "作った worktree の setup が、待っても終わらない"
+mainrepo
+sha=$(remote_branch feat-x)
+pr 1 feat-x CONFLICTING SUCCESS DIRTY "" false "$sha"
+adopt_config
+echo '{"result":{"repo":{"hookSettings":{"scripts":{"setup":"make setup"}}}}}' >"$FAKE/repo.json"
+run
+cp "$FAKE/wts" "$FAKE/wts.before"
+adopted 1 feat-x in-review
+echo '{"ok":true,"result":{"warnings":["unknown status"]}}' >"$FAKE/set.json"
+ADOPT_SETUP_WAIT=0 run
+check "人に知らせられるまで、ready にしない" [ "$(cut -f2 "$S/adopts.tsv" | tr '\n' ' ')" = "creating created " ]
+echo '{"ok":true}' >"$FAKE/set.json"
+ADOPT_SETUP_WAIT=0 run
+check "人に上げる" called "PR #1: worktree の setup が終わったか確認できない"
+check "その回は起動しない" no_launch
+cp "$FAKE/wts.before" "$FAKE/wts"
+adopted 1 feat-x needs-decision
+run
+check "Needs decision のあいだは起動しない" no_launch
+cp "$FAKE/wts.before" "$FAKE/wts"
+adopted 1 feat-x in-review
+run
+check "人がカードを戻したら起動する" launched pr-1
+
+setup "作った worktree と DRY_RUN"
+mainrepo
+sha=$(remote_branch feat-x)
+pr 1 feat-x CONFLICTING SUCCESS DIRTY "" false "$sha"
+adopt_config
+echo '{"result":{"repo":{"hookSettings":{"scripts":{"setup":"make setup"}}}}}' >"$FAKE/repo.json"
+run
+adopted 1 feat-x in-review
+echo '{"result":{"terminal":{"tail":["Orca setup done: ok"]}}}' >"$FAKE/read.json"
+term term_setup pr-1 | terms
+render
+DRY_RUN=1 bash "$script" >"$base/out" 2>&1
+check "記録を書かない" [ "$(cut -f2 "$S/adopts.tsv" | tr '\n' ' ')" = "creating created " ]
+check "起動を予定しない" [ -z "$(grep 'DRY-RUN: launch' "$base/out")" ]
 
 setup "設定が無ければ作らない"
 mainrepo
