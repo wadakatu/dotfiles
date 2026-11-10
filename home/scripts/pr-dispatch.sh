@@ -96,7 +96,8 @@ adopt_on=0
 
 flagged=0
 # この回に Needs decision に上げた worktree (改行区切り)。カードの列は回の最初に読んだきりなので、同じ worktree に当たる
-# 別の PR (同じ branch から base の違う PR) が、上げた直後に起動されないよう、この回の残りでも Needs decision として扱う。
+# 別の PR (同じ branch から base の違う PR) が、上げた直後に起動したりカードを In review に戻したりしないよう、
+# この回の残りでも Needs decision として扱う。
 raised=""
 # board <path> <reason> <sig> <status|-> <comment>
 # (path, reason, sig) を初めて見たときだけボードに書く。status が - なら列は動かさず未読とコメントだけ付ける。
@@ -449,6 +450,8 @@ while IFS=$'\t' read -r slug branch num url head mergeable ci threads merge_stat
     [ -n "$line" ] || continue
     wt=$(printf '%s' "$line" | cut -f3)
     board=$(printf '%s' "$line" | cut -f4)
+    # この回に Needs decision に上げた worktree は、読んだ列が古い。起動にも「マージ可」にも、Needs decision として扱う。
+    ! printf '%s' "$raised" | grep -qxF -- "$wt" || board=needs-decision
     pr="$slug#$num"
 
     if [ "$mergeable" = "CONFLICTING" ]; then
@@ -471,7 +474,7 @@ while IFS=$'\t' read -r slug branch num url head mergeable ci threads merge_stat
     fi
 
     [ "$braked" = 0 ] || continue
-    if [ "$board" = "needs-decision" ] || printf '%s' "$raised" | grep -qxF -- "$wt"; then
+    if [ "$board" = "needs-decision" ]; then
         vlog "keep  $pr ($action 候補だが Needs decision でユーザーの判断待ち)"
         continue
     fi
@@ -663,8 +666,10 @@ if [ "$adopt_on" = 1 ] && [ "$braked" = 0 ]; then
             ([.result.worktrees[] | select(.isMainWorktree and .path == $m) | .repoId][0]) as $r
             | [.result.worktrees[] | select((.isMainWorktree | not) and .repoId == $r and .linkedPR == $n) | .path][0] // empty' <<<"$wt_json")
         if [ -n "$linked" ]; then
-            if [ "$last" = "creating" ]; then
+            if [ "$last" = "creating" ] || [ "$last" = "fail" ]; then
                 # 前の回が、worktree を作ってから branch を切り替えるまでの間で止まった。自動では続けない。
+                # fail も同じに扱う。Orca は応答待ちの時間切れや切断でも失敗を返すので、失敗と記録した作成で
+                # worktree が出来ていることがある。エラーの種類では分けず、出来ているかどうかを見て決める。
                 board "$linked" adopt-stuck "$last_oid" needs-decision "PR #$num の取り込みが途中で止まった（branch が $branch になっていない）"
             else
                 vlog "adopt 見送り $pr (この PR に結び付いた worktree が別の branch で既にある: $linked)"

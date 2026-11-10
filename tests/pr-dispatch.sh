@@ -897,6 +897,19 @@ ADOPT_SETUP_WAIT=0 run
 check "人に上げる" called "worktree の setup が終わったか確認できない"
 check "上げた回は、もう 1 本の PR にも起動しない" no_launch
 
+setup "同じ branch の PR が 2 本あり、setup が待っても終わらず、もう 1 本はマージできる"
+mainrepo
+sha=$(remote_branch feat-x)
+pr 1 feat-x CONFLICTING SUCCESS DIRTY "" false "$sha"
+adopt_config
+echo '{"result":{"repo":{"hookSettings":{"scripts":{"setup":"make setup"}}}}}' >"$FAKE/repo.json"
+run
+adopted 1 feat-x in-review
+pr 2 feat-x MERGEABLE SUCCESS CLEAN "" false "$sha"
+ADOPT_SETUP_WAIT=0 run
+check "人に上げる" called "worktree の setup が終わったか確認できない"
+check "上げたカードを、同じ回に「マージ可」で In review に戻さない" not_called "マージ可: #2"
+
 setup "branch を切り替えたあと、記録を書く前に落ちた"
 mainrepo
 sha=$(remote_branch feat-x)
@@ -1109,6 +1122,22 @@ run
 check "もう 1 つは作らない" no_create
 check "自動では続けず、人に上げる (1 回だけ)" [ "$(count 'PR #1 の取り込みが途中で止まった')" = 1 ]
 check "勝手に branch を切り替えない" [ "$(git -C "$ORCA_ROOT/r/pr-1" branch --show-current)" = pr-1 ]
+
+setup "作成が失敗を返したが、worktree は出来ていた (応答待ちの時間切れ)"
+mainrepo
+sha=$(remote_branch feat-x)
+pr 1 feat-x CONFLICTING SUCCESS DIRTY "" false "$sha"
+adopt_config
+echo '{"ok":false,"error":{"code":"runtime_timeout"}}' >"$FAKE/create.json"
+echo 1 >"$FAKE/create.json.rc"
+run
+check "失敗と記録する" [ "$(cut -f2 "$S/adopts.tsv" | tr '\n' ' ')" = "creating fail " ]
+git -C "$M" worktree add -q -b pr-1 "$ORCA_ROOT/r/pr-1" origin/feat-x
+jq -cn --arg p "$ORCA_ROOT/r/pr-1" '{worktreeId: ("r::" + $p), path: $p, branch: "refs/heads/pr-1", workspaceStatus: "in-progress", isMainWorktree: false, agents: [], repoId: "r", linkedPR: 1}' >>"$FAKE/wts"
+run
+run
+check "試し直さない" [ "$(count 'worktree create')" = 1 ]
+check "出来ていた worktree を人に上げる (1 回だけ)" [ "$(count 'PR #1 の取り込みが途中で止まった')" = 1 ]
 
 setup "この PR に結び付いた worktree を、人が別の branch で作っている"
 mainrepo
