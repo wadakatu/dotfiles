@@ -27,7 +27,7 @@ BASE=$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name)
    60 秒おきに最長 20 分待つ。生成物の有無では判定しない。
    - 行が無く、Setup タブが終わっている（`connected == false` か行が消えた）ときだけ、`"$(git rev-parse --git-dir)/setup-retry"` が無ければ
      それを置いて（commit に入らない場所）1 回だけ同じ script を流す:
-     `orca repo show --repo "path:$(git rev-parse --path-format=absolute --git-common-dir | xargs dirname)" --json | jq -r '.result.repo.hookSettings.scripts.setup' | ORCA_WORKTREE_PATH="$PWD" bash`
+     `orca repo show --repo "path:$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")" --json | jq -r '.result.repo.hookSettings.scripts.setup' | ORCA_WORKTREE_PATH="$PWD" bash`
    - `connected == true` の間は待つだけ。それでも印が出なければ止まる（「setup が終わらない: <末尾の行>」）。
 2. **再確認**: `"$PD" check <N> <T>`。T の内容のまま進めてよいかだけを見る（ラベルが外れている、この worktree がある、は止める理由にしない）。
    - exit 0（`ok`）→ 続ける。

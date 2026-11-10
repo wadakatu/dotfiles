@@ -1608,6 +1608,18 @@ check "同じ依頼を出し直す" called "--json --model opus --effort high --
 check "出し直しの指示も同じ印" [ "$(grep -c "pr-dispatch による自動起動 $(awk -F'\t' '$2 == "launching" { print $1; exit }' "$S/launches.tsv")。" "$FAKE/calls")" = 2 ]
 check "通ったらラベルを外す" called "gh issue edit 1 -R o/r --remove-label $LBL"
 
+q_setup "返事を失った起動の出し直しが通っても、付け直したラベルは外さない"
+relabeled 1
+qcreated 1
+qrow 100 creating - 1
+qrow "$(date +%s)" launching - 1
+qrow "$(date +%s)" lost op_1 1
+run
+check "前の T の依頼を出し直す" called "--prompt /issue-worker 1 --approved-at $T1"
+check "同じ operationId で" called "--retry-launch op_1"
+check "新しい T では起動しない" not_called "--approved-at $T2"
+check "付け直したラベルは残す (前の T の worker は着手前の再確認で止まる)" not_called "issue edit"
+
 q_setup "起動が 3 回失敗する"
 issue 1
 echo '{"ok":false,"error":{"code":"x"}}' >"$FAKE/launch.json"
