@@ -61,8 +61,9 @@ LAUNCH_UNKNOWN_AFTER="${LAUNCH_UNKNOWN_AFTER:-1800}"
 #   adopt_prs=true      worktree の無い PR に worktree を作る
 #   max_worktrees=<数>  Orca の worktree (主 checkout 以外) がこの数に達していたら作らない。無ければ作らない
 CONFIG_FILE="$STATE_ROOT/pr-dispatch/config"
-# worktree を作った記録 (追記のみ)。<時刻> <creating|created|ready|fail|refused> <PR> <head の SHA>
-# created は作れた、ready は setup が終わった (か、setup の無いリポ)。creating / created のあいだは、その worktree に起動しない。
+# worktree を作った記録 (追記のみ)。<時刻> <creating|created|ready|fail|refused> <PR> <head の SHA> [<worktree>]
+# creating は作る前と、worktree が出来た直後 (path 付き) の 2 回書く。created は PR の branch への切り替えまで済んだ、
+# ready は setup が終わった (か、setup の無いリポ)。path 付きの行が creating で止まっている worktree には起動しない。
 ADOPTS_FILE="$STATE_ROOT/pr-dispatch/adopts.tsv"
 # これより古い PR には worktree を作らない (日)。放置された PR のために環境を立ち上げない。
 # Dependabot が 30 日動きの無い PR の rebase をやめるのを参考にした、独自の線。
@@ -390,9 +391,11 @@ launch_agent() {
 }
 
 # ---- worktree を作った記録 (作るのは下の「worktree の無い PR」の節) ----
-adopt_log() { printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "$2" "$1" "$3" >>"$ADOPTS_FILE"; } # adopt_log <PR> <状態> <SHA>
+adopt_log() { printf '%s\t%s\t%s\t%s\t%s\n' "$(date +%s)" "$2" "$1" "$3" "${4:-}" >>"$ADOPTS_FILE"; } # adopt_log <PR> <状態> <SHA> [worktree]
 # adopt_last <PR>: その PR の最後の行の "<状態> <SHA> <時刻>"。無ければ空。
 adopt_last() { awk -F'\t' -v p="$1" '$3 == p { l = $2 FS $4 FS $1 } END { if (l != "") print l }' "$ADOPTS_FILE"; }
+# adopt_wt_last <worktree>: その worktree の最後の行の "<状態> <PR> <時刻>"。自分で作った worktree でなければ空。
+adopt_wt_last() { awk -F'\t' -v w="$1" '$5 == w { l = $2 FS $3 FS $1 } END { if (l != "") print l }' "$ADOPTS_FILE"; }
 # setup_done <worktree>: その worktree の端末のどれかに、setup script が最後に出す行が出ている。
 # 途中の生成物の有無では判定しない (issue-worker skill の setup 待ちと同じ印)。
 setup_done() {
@@ -404,33 +407,33 @@ setup_done() {
     done < <(orca terminal list --worktree "path:$1" --json 2>/dev/null | jq -r --arg p "$1" '.result.terminals[]? | select((.worktreePath // $p) == $p) | .handle')
     return 1
 }
-# adopt_ready <PR> <worktree> <番号>: この worktree に起動してよいか。自分で作った worktree は、setup が終わるまで待つ
+# adopt_ready <worktree>: この worktree に起動してよいか。自分で作った worktree は、setup が終わるまで待つ
 # (環境を作っている最中にエージェントを動かすと、依存の導入などが重なる)。作っていない worktree は、いつでも 0。
+# 記録は PR ではなく worktree で引く。同じ branch から base の違う PR を出していると、どの PR もこの worktree に当たる。
 adopt_ready() {
-    local st="" t="" rid
-    IFS=$'\t' read -r st _ t <<<"$(adopt_last "$1")" || true
-    # creating も待つ。branch を切り替えたあと、created を書く前に落ちると、記録は creating のまま worktree だけが出来ている。
-    case "$st" in created | creating) ;; *) return 0 ;; esac
+    local st="" apr="" t="" rid
+    IFS=$'\t' read -r st apr t <<<"$(adopt_wt_last "$1")" || true
+    [ "$st" = "creating" ] || return 0
     [ "$DRY_RUN" != "1" ] || return 1
     # setup script の無いリポは、待つものが無い。無いと判断するのは、Orca の返事を読めて local の script が空で、
     # checkout の orca.yaml にも setup が無いときだけ (取れなかったときに「無い」と見なすと、setup の最中に起動してしまう)。
     # Orca は local に script が無ければ checkout の orca.yaml の setup を走らせる。repo show に出るのは local の分だけ。
     # リポは worktree の一覧から引く (worktree を作る設定を消したあとも、作った worktree の判定は続ける)。
-    rid=$(jq -r --arg p "$2" '[.result.worktrees[] | select(.path == $p) | .repoId // empty][0] // empty' <<<"$wt_json")
-    if { [ ! -e "$2/orca.yaml" ] || [ "$(grep -Ec "setup[\"']?[[:space:]]*:" "$2/orca.yaml" 2>/dev/null)" = 0 ]; } &&
+    rid=$(jq -r --arg p "$1" '[.result.worktrees[] | select(.path == $p) | .repoId // empty][0] // empty' <<<"$wt_json")
+    if { [ ! -e "$1/orca.yaml" ] || [ "$(grep -Ec "setup[\"']?[[:space:]]*:" "$1/orca.yaml" 2>/dev/null)" = 0 ]; } &&
         orca repo show --repo "id:$rid" --json 2>/dev/null |
         jq -e '(.result.repo | type == "object") and ((.result.repo.hookSettings.scripts.setup // "") == "")' >/dev/null 2>&1; then
-        adopt_log "$1" ready - || true
+        adopt_log "$apr" ready - "$1" || true
         return 0
     fi
-    if setup_done "$2"; then
-        adopt_log "$1" ready - || true
+    if setup_done "$1"; then
+        adopt_log "$apr" ready - "$1" || true
         return 0
     fi
     if [ "$(($(date +%s) - t))" -ge "$ADOPT_SETUP_WAIT" ]; then
         # setup が終わった印が出ない (失敗したか、印を出さない script)。人に上げ、カードが Needs decision から戻されたら起動する。
-        board "$2" adopt-setup "$t" needs-decision "PR #$3: worktree の setup が終わったか確認できない（終わっていたら、カードを In review に戻す）"
-        ! grep -qxF -- "$2"$'\t'"adopt-setup"$'\t'"$t" "$BOARD_FILE" || adopt_log "$1" ready - || true
+        board "$1" adopt-setup "$t" needs-decision "PR #${apr#*#}: worktree の setup が終わったか確認できない（終わっていたら、カードを In review に戻す）"
+        ! grep -qxF -- "$1"$'\t'"adopt-setup"$'\t'"$t" "$BOARD_FILE" || adopt_log "$apr" ready - "$1" || true
     fi
     return 1
 }
@@ -472,7 +475,7 @@ while IFS=$'\t' read -r slug branch num url head mergeable ci threads merge_stat
         vlog "keep  $pr ($action 候補だが、再開したセッションに指示が入るのを待っている)"
         continue
     fi
-    if ! adopt_ready "$pr" "$wt" "$num"; then
+    if ! adopt_ready "$wt"; then
         vlog "keep  $pr ($action 候補だが、作ったばかりの worktree の setup が終わるのを待っている)"
         continue
     fi
@@ -599,6 +602,8 @@ adopt_pr() {
         log "WARN: adopt $pr: worktree を作れなかった ($(adopt_last "$pr" | cut -f1))"
         return 1
     fi
+    # setup 待ち (adopt_ready) は worktree ごとに見るので、出来た worktree の path を付けてもう 1 行書く。
+    adopt_log "$pr" creating "$oid" "$wt" || log "WARN: adopt $pr: setup 待ちの記録を書けない ($wt)"
     tmp=$(jq -r '.result.worktree.branch // empty' <<<"$out" 2>/dev/null | sed 's#^refs/heads/##')
     # ③ PR の branch に切り替える。①で揃えてあるので同じコミットの間の切り替えで、setup の最中でもファイルは変わらない。
     if ! git -C "$wt" switch -q "$branch" 2>/dev/null || [ "$(git -C "$wt" rev-parse HEAD 2>/dev/null)" != "$fetched" ]; then
