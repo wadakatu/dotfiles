@@ -57,8 +57,9 @@ Codex の設定を変えるときは `~/.codex/config.toml` ではなくこち�
 （逆方向のコピーは `~/www/personal/dotfiles/README.md` の手順を参照）。
 
 自作の skill は dotfiles の `agents/skills/`（Claude と Codex の両方）、`agents/claude/skills/`、`agents/codex/skills/` が実体で、
-`~/.claude/skills/<name>` と `~/.agents/skills/<name>` はそこへの symlink（Home Manager が張る）。直すときは dotfiles 側を編集する。
-skill を足したり消したりしたら、`darwin-rebuild switch` でリンクを張り直す。
+`~/.claude/skills/<name>` と `~/.agents/skills/<name>` は、その `origin/main` の写し（読み取り専用）への symlink（Home Manager が張る）。
+`~/.claude/rules` と `~/.claude/agents` も同じ。その場では直せないので、dotfiles 側を編集して PR にする。マージすれば 15 分ほどで効く
+（rebuild は要らない）。skill を足したり消したりしたときだけ、`darwin-rebuild switch` でリンクを張り直す。
 
 dotfiles は公開リポジトリで、仕事とは無関係。個人で試す道具は置いてよいが、汎用に書く。仕事のリポジトリ名・社内のパス・
 issue / PR 番号・社内ツールの ID・仕事のリポジトリのスクリプトの中身は書かない。対象のリポジトリは引数で受け取り、
