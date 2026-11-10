@@ -1,8 +1,9 @@
 { config, pkgs, dotfilesDir, ... }: {
   # 自分の OPEN な PR を数分ごとに見て、conflict / CI 失敗 / 未対応のレビューがあれば
   # Orca のタブでエージェントを起動する LaunchAgent。対象は Orca に worktree がある非 draft の PR。
-  # あわせて、人の判断待ち (マージ判断、自動対応の上限超え、入力待ちや質問で止まったエージェント) を
-  # Orca のボードに出す。PR がマージ・クローズされた worktree のカードは、worktree-gc が消すまで Done に置く。
+  # あわせて、人の判断待ち (自動対応の上限超え、入力待ちや質問で止まったエージェント) を
+  # Orca のボードに出す。マージできる PR のカードは In review に置いて未読と「マージ可」を付け、
+  # PR がマージ・クローズされた worktree のカードは、worktree-gc が消すまで Done に置く。
   # 毎回の最初に、Mac の再起動で止まった Claude のセッションの再開 (home/scripts/agent-resume.sh) も行う。
   # 再開と PR 対応を 1 つの LaunchAgent にまとめたのは、同じ worktree に両方のエージェントを並べないため
   # (再開を先に済ませ、再開したセッションに指示が入るまで、その worktree への PR 対応を待つ)。
