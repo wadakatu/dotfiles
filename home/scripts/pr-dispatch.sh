@@ -173,6 +173,15 @@ def verdict($me; $label; $t0; $al; $aw):
       else "ok" end,
       $t ];'
 
+# queue_issue <repo> <番号>: 1 件の issue を、キューの判定に使う形で取る。
+queue_issue() {
+    # shellcheck disable=SC2016  # GraphQL の変数
+    gh api graphql -F n="$2" -f owner="${1%%/*}" -f name="${1#*/}" -f query='
+query($owner: String!, $name: String!, $n: Int!) {
+  viewer { login }
+  repository(owner: $owner, name: $name) { issue(number: $n) { ...Q } }
+}'"$QUEUE_FRAGMENT" 2>/dev/null
+}
 # check <N> <T>: worker が着手の直前に呼ぶ。リポは呼んだ場所 (worker の worktree) の origin から取る。
 # ロックは取らず、状態も書かない (ループの最中でも呼べる)。
 queue_check() {
@@ -185,12 +194,7 @@ queue_check() {
     [ -n "$queue_label" ] || { echo "確かめられない: config に queue_label が無い"; return 2; }
     slug=$(git remote get-url origin 2>/dev/null | sed -E 's#^.*github\.com[:/]##; s#\.git$##') || slug=""
     [ -n "$slug" ] || { echo "確かめられない: ここの origin が GitHub のリポでない"; return 2; }
-    # shellcheck disable=SC2016  # GraphQL の変数
-    json=$(gh api graphql -F n="$n" -f owner="${slug%%/*}" -f name="${slug#*/}" -f query='
-query($owner: String!, $name: String!, $n: Int!) {
-  viewer { login }
-  repository(owner: $owner, name: $name) { issue(number: $n) { ...Q } }
-}'"$QUEUE_FRAGMENT" 2>/dev/null) || { echo "確かめられない: GitHub から issue を取れない"; return 2; }
+    json=$(queue_issue "$slug" "$n") || { echo "確かめられない: GitHub から issue を取れない"; return 2; }
     res=$(jq -r --arg label "$queue_label" --arg t "$t" --arg al "$(cfg ask_labels "")" --arg aw "$(cfg ask_title_words "$DEFAULT_TITLE_WORDS")" \
         "$QUEUE_JQ"' .data.viewer.login as $me | .data.repository.issue
         | if . == null then "issue が無い" else verdict($me; $label; $t; $al; $aw)[0] end' <<<"$json" 2>/dev/null) ||
@@ -914,10 +918,19 @@ slugify() {
     s=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | LC_ALL=C sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' | cut -c1-30 | sed 's/-$//')
     printf '%s' "${s:-work}"
 }
-# queue_unlabel <repo> <番号>: 起動できた issue のラベルを外す。外せなくても、同じ T では起動し直さない (次の回に外し直す)。
+# queue_unlabel <repo> <番号> <T>: 起動できた issue のラベルを外す。外せなくても、同じ T では起動し直さない (次の回に外し直す)。
+# 外す直前に、今のラベルの T を取り直す。起動した T と違えば外さない: 付け直す前の T の依頼を出し直したときと、
+# issue を読んでから起動するまでの間に人が付け直したときは、それが新しい承認なので残す (その worker は着手前の check で止まる)。
 queue_unlabel() {
+    local cur
     if [ "$DRY_RUN" = "1" ]; then
         log "DRY-RUN: queue ラベルを外す → $1#$2"
+        return 0
+    fi
+    cur=$(queue_issue "$1" "$2" | jq -r --arg label "$queue_label" "$QUEUE_JQ"'
+        .data.viewer.login as $me | .data.repository.issue | verdict($me; $label; ""; ""; "")[1]' 2>/dev/null) || cur=""
+    if [ "$cur" != "$3" ]; then
+        log "queue: ラベルを外さない → $1#$2 (今のラベルは、起動した承認 $3 のものでないか、確かめられない)"
         return 0
     fi
     if gh issue edit "$2" -R "$1" --remove-label "$queue_label" >/dev/null 2>&1; then
@@ -926,12 +939,10 @@ queue_unlabel() {
         log "WARN: queue: ラベルを外せない → $1#$2 (次回に外し直す。同じ T では起動し直さない)"
     fi
 }
-# queue_launch <key> <worktree> <番号> <T> <operationId|-> <印の時刻|空> <repo> [今のラベルの T]: worker を起動し、起動できたらラベルを外す。
-# 外すのは、起動した T が今のラベルの T と同じときだけ。付け直す前の T の依頼を出し直したときは、新しい承認のラベルを残す
-# (その worker は着手前の check で止まるので、外すと付け直した承認がキューから消える)。
+# queue_launch <key> <worktree> <番号> <T> <operationId|-> <印の時刻|空> <repo>: worker を起動し、起動できたらラベルを外す。
 # T は起動の引数で渡す (worker は取り直さない。setup を待つ間の変更を、着手の直前の check で拾うため)。
 queue_launch() {
-    local key=$1 wt=$2 n=$3 t=$4 op=$5 t0=$6 slug=$7 t_label=${8:-$4} prompt
+    local key=$1 wt=$2 n=$3 t=$4 op=$5 t0=$6 slug=$7 prompt
     t0=${t0:-$(date +%s)}
     prompt="/issue-worker $n --approved-at $t
 
@@ -939,7 +950,7 @@ queue_launch() {
     if launch_agent "$key" "$wt" "$prompt" "$op" "$t0" --model opus --effort high --surface chat; then
         log "queue: worker を起動 → $slug#$n"
         launched=$((launched + 1))
-        [ "$t" != "$t_label" ] || queue_unlabel "$slug" "$n"
+        queue_unlabel "$slug" "$n" "$t"
     else
         log "WARN: queue: worker を起動できなかった → $slug#$n ($(launch_last "$key" | cut -f2)。失敗なら次回に試し直し、返事を失ったなら同じ依頼を出し直す。分からなければ起動し直さない)"
     fi
@@ -1038,7 +1049,6 @@ query($q: String!, $endCursor: String) {
             continue
         fi
         key="$iss"$'\t'"issue-worker"$'\t'"$t"
-        t_label=$t
         main=$(printf '%s' "$mains" | awk -F'\t' -v s="$slug" '$1 == s { print $2; exit }')
         if [ -z "$main" ]; then
             vlog "queue 対象外 $iss (主 checkout が Orca に登録されていない)"
@@ -1069,7 +1079,7 @@ query($q: String!, $endCursor: String) {
             case "$last" in
             launched)
                 # 起動できたのにラベルが残っている (外し損ねた)。
-                queue_unlabel "$slug" "$n"
+                queue_unlabel "$slug" "$n" "$t"
                 continue
                 ;;
             unknown)
@@ -1085,7 +1095,7 @@ query($q: String!, $endCursor: String) {
                 if [ -n "$wt" ] && launch_seen "$wt" "$o_time"; then
                     launch_close "$o_key" launched
                     log "queue: worker を起動できていた → $iss (返事は読めなかったが、この起動のエージェントを確認)"
-                    [ "$o_key" != "$key" ] || queue_unlabel "$slug" "$n"
+                    queue_unlabel "$slug" "$n" "$o_sig"
                     continue
                 fi
                 if [ "$(($(date +%s) - o_time))" -ge "$LAUNCH_UNKNOWN_AFTER" ]; then
@@ -1130,6 +1140,12 @@ query($q: String!, $endCursor: String) {
                     board "$wt" queue-not-ready "$t" needs-decision "起動の前に対象外になった: #$n ($verdict)"
                     continue
                 fi
+                # 人の作業を踏まない。作ったあと起動の前に、人がエージェントを使わずに編集していることがある (PR 対応と同じ見方。
+                # 状態を読めないときも起動しない)。出し直し (op あり) は、最初の依頼で動き出した worker の変更がありうるので見ない。
+                if [ "$op" = "-" ] && { ! dirty=$(git -C "$wt" --no-optional-locks status --porcelain 2>/dev/null) || [ -n "$dirty" ]; }; then
+                    board "$wt" queue-dirty "$t" - "未コミットの変更があるので、worker の起動を見送り: #$n"
+                    continue
+                fi
                 [ "$braked" = 0 ] || continue
                 if [ "$(jq -r --arg p "$wt" '[.result.worktrees[] | select(.path == $p) | .workspaceStatus // ""][0] // ""' <<<"$ps_json")" = "needs-decision" ] ||
                     printf '%s' "$raised" | grep -qxF -- "$wt"; then
@@ -1149,7 +1165,7 @@ query($q: String!, $endCursor: String) {
                     launched=$((launched + 1))
                     continue
                 fi
-                queue_launch "$key" "$wt" "$n" "$t" "$op" "$t0" "$slug" "$t_label"
+                queue_launch "$key" "$wt" "$n" "$t" "$op" "$t0" "$slug"
                 continue
             fi
         fi
