@@ -26,6 +26,10 @@ check() { # check <説明> <コマンド...>
 for f in pr-dispatch agent-resume dispatch-lock; do
     direct=$(grep -v '^[[:space:]]*#' "$root/home/scripts/$f.sh" | grep 'HOME/Library' | grep -vc '^STATE_ROOT="\${STATE_ROOT:-')
     [ "$direct" = 0 ] || { echo "$f.sh が STATE_ROOT を通さずに状態の場所を決めている。中止"; exit 1; }
+    # 日本語の文中の変数は ${VAR} と書く。UTF-8 のロケールの bash は、変数名の直後の全角文字を名前の一部として読み、
+    # set -u で落ちる。launchd とこのテストは C ロケールで動くので、実行しても見つからない (手で動かしたときだけ落ちる)。
+    unbraced=$(grep -v '^[[:space:]]*#' "$root/home/scripts/$f.sh" | LC_ALL=C grep -cE '\$[A-Za-z_][A-Za-z0-9_]*[^ -~]' || true)
+    [ "$unbraced" = 0 ] || { echo "FAIL $f.sh: 全角文字の直前の変数が波括弧で囲まれていない ($unbraced 行)"; fail=1; }
 done
 
 # ---- 偽のコマンド ----
@@ -1269,6 +1273,16 @@ check "起動し直さない" no_launch
 check "作り直さない" no_create
 check "ラベルを外す" called "gh issue edit 1 -R o/r --remove-label $LBL"
 
+q_setup "ラベルの履歴が欠けていれば、記録の続きもしない (見えている最後の T が、付け直した T とは限らない)"
+issue 1 '.labeled.pageInfo.hasNextPage = true'
+qcreated 1 in-progress "$(agent working t1:l1 "/issue-worker 1")"
+qrow 100 creating - 1
+qrow 101 launching - 1
+qrow 102 launched - 1
+run
+check "ラベルを外さない" not_called "gh issue edit 1"
+check "理由を出す" logged "queue 対象外 o/r#1 (内側の一覧が欠けている)"
+
 setup "キュー: 設定が無ければキューは無効"
 mainrepo
 wt a feat-a in-progress # worktree が無いと、キューの前に終わる回になって確かめられない
@@ -1357,8 +1371,8 @@ for how in linked url branch; do
 done
 
 q_setup "古い順に、1 回に 1 件"
+issue 1 # 検索の返す並びには頼らない (新しい方を先に返す)
 issue 2 '.createdAt = "2025-11-01T00:00:00Z"'
-issue 1
 run
 check "古い方 (#2) を作る" q_created 2
 check "1 回に 1 件" [ "$(count 'worktree create')" = 1 ]
@@ -1399,6 +1413,15 @@ check "理由を出す" logged "queue 見送り o/r#1 (max_wip (3/3))"
 queue_config 'max_wip=4\n'
 run
 check "線を上げれば作る" q_created 1
+
+q_setup "max_wip: PR があっても、エージェントが動いていれば数える"
+issue 1
+qwt w6 6 in-review "$(agent working)"
+pr 60 issue-6-fix MERGEABLE SUCCESS BLOCKED
+queue_config 'max_wip=1\n'
+run
+check "止める" no_create
+check "理由を出す" logged "queue 見送り o/r#1 (max_wip (1/1))"
 
 q_setup "max_per_day (今日の JST の creating を数える)"
 issue 1

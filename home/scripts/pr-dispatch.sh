@@ -1075,7 +1075,7 @@ query($q: String!, $endCursor: String) {
             if [ -z "$wt" ]; then
                 # 作成がはっきり失敗した (creating の直後の fail) ときだけ、同じ T で 3 回まで作り直す。
                 # creating のまま (結果が分からない) は作り直さずに待つ (作れていたら 2 つになる。枠は占有する)。
-                if [ "$last" != "fail" ] || [ "$(launch_prev "$key")" != "creating" ] || [ "$verdict" != "ok" ] ||
+                if [ "$(launch_prev "$key") $last" != "creating fail" ] || [ "$verdict" != "ok" ] ||
                     [ "$(queue_fails "$key" creating)" -ge "$MAX_ATTEMPTS" ]; then
                     vlog "keep  $iss (worktree が見えない。最後の記録: ${last}。作り直さない)"
                     continue
