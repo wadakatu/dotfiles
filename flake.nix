@@ -83,7 +83,8 @@
       #   name        : darwinConfigurations の属性名 (--flake .#<name>)
       #   username    : macOS の short user name
       #   dotfilesPath: ホームから見たこのリポジトリのクローン先
-      mkDarwin = { name, username, dotfilesPath }:
+      #   extraModules: そのマシンだけに入れる nix-darwin モジュール (省略時は無し)
+      mkDarwin = { name, username, dotfilesPath, extraModules ? [ ] }:
         let
           homeDirectory = "/Users/${username}";
           dotfilesDir = "${homeDirectory}/${dotfilesPath}";
@@ -117,7 +118,7 @@
               home-manager.backupFileExtension = "before-hm";
               home-manager.users.${username} = import ./home/default.nix;
             }
-          ];
+          ] ++ extraModules;
         };
     in
     {
@@ -128,6 +129,8 @@
           name = "work";
           username = "wadakatu";
           dotfilesPath = "www/personal/dotfiles";
+          # 夜間に自動処理を動かすので、充電器につないでいる間はスリープさせない。
+          extraModules = [ ./system/power.nix ];
         };
         personal = mkDarwin {
           name = "personal";
