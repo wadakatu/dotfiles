@@ -1283,6 +1283,28 @@ run
 check "ラベルを外さない" not_called "gh issue edit 1"
 check "理由を出す" logged "queue 対象外 o/r#1 (内側の一覧が欠けている)"
 
+# relabeled <番号>: T1 に付けたラベルを、T2 に自分が付け直した issue
+relabeled() { issue "$1" '.labeled.nodes += [{createdAt: "'"$T2"'", actor: {login: "me"}, label: {name: $l}}]'; }
+q_setup "ラベルを付け直しても、前の T の起動の結果が分かるまでは作らない (worktree が見えない)"
+relabeled 1
+qrow 100 creating - 1
+qrow "$(date +%s)" launching - 1
+run
+check "作らない" no_create
+check "起動しない" no_launch
+check "前の起動は結果待ちのまま" [ "$(states)" = "creating launching " ]
+
+q_setup "ラベルを付け直した: 前の T の起動を閉じた次の回に、新しい T で作る"
+relabeled 1
+qrow 100 creating - 1
+qrow 101 launching - 1 # 待つ上限を過ぎている
+run
+check "この回は閉じるだけ" no_create
+check "前の起動を unknown で閉じる" [ "$(states)" = "creating launching unknown " ]
+run
+check "次の回に作る" q_created 1
+check "新しい T を渡す" q_launched 1 "$T2"
+
 setup "キュー: 設定が無ければキューは無効"
 mainrepo
 wt a feat-a in-progress # worktree が無いと、キューの前に終わる回になって確かめられない
@@ -1461,6 +1483,16 @@ check "2 つで止める" no_create
 queue_config 'max_worktrees=3\n'
 run
 check "線を上げれば作る" q_created 1
+
+q_setup "max_worktrees: 同じ回に PR の取り込みで作った worktree も数える"
+sha=$(remote_branch feat-x)
+pr 1 feat-x CONFLICTING SUCCESS DIRTY "" false "$sha"
+issue 1
+queue_config 'adopt_prs=true\nmax_worktrees=1\n'
+run
+check "PR の worktree を作る" created 1
+check "キューは作らない" not_created_issue 1
+check "理由を出す" logged "queue 見送り o/r#1 (max_worktrees (1/1))"
 
 q_setup "max_open_prs と max_worktrees を書いていなければ作らない"
 issue 1
