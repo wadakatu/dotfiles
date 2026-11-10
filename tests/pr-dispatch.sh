@@ -735,7 +735,7 @@ check "PR の head を指している" [ "$(git -C "$ORCA_ROOT/r/pr-1" rev-parse
 check "仮のブランチは消す" [ -z "$(git -C "$M" branch --list pr-1)" ]
 check "PR を結び付け直し、In review に置く" called "worktree set --worktree path:$ORCA_ROOT/r/pr-1 --pr 1 --workspace-status in-review --display-name r: PR の題名 1 --comment auto: PR #1 の対応のために worktree を作成 --json"
 check "push できるように upstream を付ける" [ "$(git -C "$ORCA_ROOT/r/pr-1" rev-parse --abbrev-ref 'feat-x@{upstream}')" = origin/feat-x ]
-check "記録する" [ "$(cut -f2 "$S/adopts.tsv" | tr '\n' ' ')" = "creating created " ]
+check "記録する" [ "$(cut -f2 "$S/adopts.tsv" | tr '\n' ' ')" = "creating creating created " ]
 check "同じ回にはエージェントを起動しない" no_launch
 check "検索に、登録したリポを入れる" called "repo:o/r"
 cp "$FAKE/wts" "$FAKE/wts.before"
@@ -743,7 +743,7 @@ jq -cn --arg p "$ORCA_ROOT/r/pr-1" '{worktreeId: ("r::" + $p), path: $p, branch:
 run
 check "次の回から、PR の対応が効く (setup script の無いリポは待たない)" launched pr-1
 check "setup script が無いことを Orca に確かめる" called "repo show --repo id:r --json"
-check "ready を記録する" [ "$(cut -f2 "$S/adopts.tsv" | tr '\n' ' ')" = "creating created ready " ]
+check "ready を記録する" [ "$(cut -f2 "$S/adopts.tsv" | tr '\n' ' ')" = "creating creating created ready " ]
 check "もう 1 つは作らない" [ "$(count 'worktree create')" = 1 ]
 # 人がその worktree を消した。
 git -C "$M" worktree remove --force "$ORCA_ROOT/r/pr-1"
@@ -762,7 +762,7 @@ pr 1 feat-x CONFLICTING SUCCESS DIRTY "" false "$sha"
 adopt_config
 echo '{"result":{"repo":{"hookSettings":{"scripts":{"setup":"make setup && echo \"Orca setup done: ok\""}}}}}' >"$FAKE/repo.json"
 run
-check "作った時点では ready にしない" [ "$(cut -f2 "$S/adopts.tsv" | tr '\n' ' ')" = "creating created " ]
+check "作った時点では ready にしない" [ "$(cut -f2 "$S/adopts.tsv" | tr '\n' ' ')" = "creating creating created " ]
 adopted 1 feat-x in-review
 term term_setup pr-1 | terms
 echo '{"result":{"terminal":{"tail":["installing dependencies...","still running"]}}}' >"$FAKE/read.json"
@@ -773,7 +773,7 @@ check "端末の出力を読んで確かめる" called "terminal read --terminal
 echo '{"result":{"terminal":{"tail":["installing dependencies...","Orca setup done: ok"]}}}' >"$FAKE/read.json"
 run
 check "終わった印が出たら起動する" launched pr-1
-check "ready を記録する" [ "$(cut -f2 "$S/adopts.tsv" | tr '\n' ' ')" = "creating created ready " ]
+check "ready を記録する" [ "$(cut -f2 "$S/adopts.tsv" | tr '\n' ' ')" = "creating creating created ready " ]
 
 setup "作った worktree の setup が、待っても終わらない"
 mainrepo
@@ -786,7 +786,7 @@ cp "$FAKE/wts" "$FAKE/wts.before"
 adopted 1 feat-x in-review
 echo '{"ok":true,"result":{"warnings":["unknown status"]}}' >"$FAKE/set.json"
 ADOPT_SETUP_WAIT=0 run
-check "人に知らせられるまで、ready にしない" [ "$(cut -f2 "$S/adopts.tsv" | tr '\n' ' ')" = "creating created " ]
+check "人に知らせられるまで、ready にしない" [ "$(cut -f2 "$S/adopts.tsv" | tr '\n' ' ')" = "creating creating created " ]
 echo '{"ok":true}' >"$FAKE/set.json"
 ADOPT_SETUP_WAIT=0 run
 check "人に上げる" called "PR #1: worktree の setup が終わったか確認できない"
@@ -813,7 +813,7 @@ check "無いとは見なさない (起動しない)" no_launch
 echo '{"ok":false,"error":{"code":"x"}}' >"$FAKE/repo.json"
 run
 check "失敗の返事でも、無いとは見なさない" no_launch
-check "ready にしない" [ "$(cut -f2 "$S/adopts.tsv" | tr '\n' ' ')" = "creating created " ]
+check "ready にしない" [ "$(cut -f2 "$S/adopts.tsv" | tr '\n' ' ')" = "creating creating created " ]
 
 setup "setup が checkout の orca.yaml にだけある"
 mainrepo
@@ -827,7 +827,7 @@ term term_setup pr-1 | terms
 echo '{"result":{"terminal":{"tail":["installing dependencies..."]}}}' >"$FAKE/read.json"
 run
 check "local に script が無くても、待つ" no_launch
-check "ready にしない" [ "$(cut -f2 "$S/adopts.tsv" | tr '\n' ' ')" = "creating created " ]
+check "ready にしない" [ "$(cut -f2 "$S/adopts.tsv" | tr '\n' ' ')" = "creating creating created " ]
 echo '{"result":{"terminal":{"tail":["Orca setup done: ok"]}}}' >"$FAKE/read.json"
 run
 check "終わった印が出たら起動する" launched pr-1
@@ -841,6 +841,8 @@ run
 adopted 1 feat-x in-review
 run
 check "待たずに起動する" launched pr-1
+run
+check "ready は 1 回だけ記録する (次の回からは Orca に聞き直さない)" [ "$(grep -c "	ready	" "$S/adopts.tsv")" = 1 ]
 
 setup "worktree を作ったあとで、作る設定を消した"
 mainrepo
@@ -854,13 +856,34 @@ run
 check "作った worktree の PR の対応は続ける (setup script の無いリポは待たない)" launched pr-1
 check "新しくは作らない" [ "$(count 'worktree create')" = 1 ]
 
+setup "同じ branch から base の違う PR を 2 本出している"
+mainrepo
+sha=$(remote_branch feat-x)
+pr 1 feat-x CONFLICTING SUCCESS DIRTY "" false "$sha"
+pr 2 feat-x CONFLICTING SUCCESS DIRTY "" false "$sha"
+adopt_config
+echo '{"result":{"repo":{"hookSettings":{"scripts":{"setup":"make setup"}}}}}' >"$FAKE/repo.json"
+run
+check "worktree は 1 つだけ作る" [ "$(count 'worktree create')" = 1 ]
+adopted 1 feat-x in-review
+term term_setup pr-1 | terms
+echo '{"result":{"terminal":{"tail":["installing dependencies..."]}}}' >"$FAKE/read.json"
+run
+check "setup の途中は、どちらの PR にも起動しない" no_launch
+echo '{"result":{"terminal":{"tail":["Orca setup done: ok"]}}}' >"$FAKE/read.json"
+run
+check "終わった印が出たら起動する" launched pr-1
+check "ready は worktree に 1 回だけ記録する" [ "$(grep -c "	ready	o/r#1	-	$ORCA_ROOT/r/pr-1\$" "$S/adopts.tsv")" = 1 ]
+check "もう 1 本の PR の名前では記録しない" [ -z "$(grep 'o/r#2' "$S/adopts.tsv")" ]
+
 setup "branch を切り替えたあと、記録を書く前に落ちた"
 mainrepo
 sha=$(remote_branch feat-x)
 pr 1 feat-x CONFLICTING SUCCESS DIRTY "" false "$sha"
 adopt_config
 echo '{"result":{"repo":{"hookSettings":{"scripts":{"setup":"make setup"}}}}}' >"$FAKE/repo.json"
-printf '%s\tcreating\to/r#1\t%s\n' "$(/bin/date +%s)" "$sha" >"$S/adopts.tsv"
+# 作る前の行と、worktree が出来た直後の行 (path 付き) まで書かれている。
+printf '%s\tcreating\to/r#1\t%s\t%s\n' "$(/bin/date +%s)" "$sha" "" "$(/bin/date +%s)" "$sha" "$ORCA_ROOT/r/pr-1" >"$S/adopts.tsv"
 git -C "$M" fetch -q origin feat-x:feat-x
 git -C "$M" worktree add -q "$ORCA_ROOT/r/pr-1" feat-x
 adopted 1 feat-x in-progress
@@ -885,7 +908,7 @@ echo '{"result":{"terminal":{"tail":["Orca setup done: ok"]}}}' >"$FAKE/read.jso
 term term_setup pr-1 | terms
 render
 DRY_RUN=1 bash "$script" >"$base/out" 2>&1
-check "記録を書かない" [ "$(cut -f2 "$S/adopts.tsv" | tr '\n' ' ')" = "creating created " ]
+check "記録を書かない" [ "$(cut -f2 "$S/adopts.tsv" | tr '\n' ' ')" = "creating creating created " ]
 check "起動を予定しない" [ -z "$(grep 'DRY-RUN: launch' "$base/out")" ]
 
 setup "設定が無ければ作らない"
@@ -1050,7 +1073,7 @@ adopt_config
 : >"$FAKE/create-then-block"
 run
 check "人に上げる" called "worktree set --worktree path:$ORCA_ROOT/r/pr-1 --comment PR #1 の取り込みが途中で止まった（branch が feat-x になっていない） --json --unread --workspace-status needs-decision"
-check "作れたとは記録しない" [ "$(cut -f2 "$S/adopts.tsv" | tr '\n' ' ')" = "creating " ]
+check "作れたとは記録しない" [ "$(cut -f2 "$S/adopts.tsv" | tr '\n' ' ')" = "creating creating " ]
 
 setup "前の回が、worktree を作ってから切り替えるまでの間で止まった"
 mainrepo
