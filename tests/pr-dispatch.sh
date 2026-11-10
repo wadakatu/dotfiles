@@ -99,10 +99,10 @@ wt() {
 p() { echo "$ORCA_ROOT/r/$1"; }
 # agent <state> [paneKey] [prompt] [stateStartedAt (ミリ秒)]
 agent() { jq -cn --arg s "$1" --arg k "${2:-t0:l0}" --arg q "${3-x}" --argjson at "${4:-1}" '[{state: $s, paneKey: $k, prompt: $q, stateStartedAt: $at, updatedAt: $at}]'; }
-# pr <番号> <branch> <mergeable> <CI> <mergeStateStatus> [未対応のコメント ID] [スレッドが 100 を超えるか]
+# pr <番号> <branch> <mergeable> <CI> <mergeStateStatus> [未対応のコメント ID] [スレッドが 100 を超えるか] [head の SHA]
 pr() {
-    jq -cn --argjson n "$1" --arg b "$2" --arg m "$3" --arg ci "$4" --arg ms "$5" --arg c "${6:-}" --argjson more "${7:-false}" '
-        {number: $n, url: ("https://github.com/o/r/pull/" + ($n | tostring)), headRefName: $b, headRefOid: ("sha" + ($n | tostring)),
+    jq -cn --argjson n "$1" --arg b "$2" --arg m "$3" --arg ci "$4" --arg ms "$5" --arg c "${6:-}" --argjson more "${7:-false}" --arg sha "${8:-sha$1}" '
+        {number: $n, url: ("https://github.com/o/r/pull/" + ($n | tostring)), headRefName: $b, headRefOid: $sha,
          mergeable: $m, mergeStateStatus: $ms, autoMergeRequest: null, repository: {nameWithOwner: "o/r"},
          commits: {nodes: [{commit: {statusCheckRollup: {state: $ci}}}]},
          reviewThreads: {pageInfo: {hasNextPage: $more},
@@ -337,6 +337,109 @@ check "まだ人には上げない" not_called "起動できたか分からな�
 LAUNCH_UNKNOWN_AFTER=0 run
 check "時間が経ったら人に上げる" called "自動の /sync-pr を起動できたか分からない: #1"
 check "それでも起動し直さない" [ "$(count 'agent launch')" = 1 ]
+check "記録を閉じる" [ "$(cut -f2 "$S/launches.tsv" | tr '\n' ' ')" = "launching unknown " ]
+jq -c '.workspaceStatus = "in-progress"' "$FAKE/wts" >"$FAKE/wts.new" && mv "$FAKE/wts.new" "$FAKE/wts"
+LAUNCH_UNKNOWN_AFTER=0 run
+check "人がカードを戻しても、同じ状態には起動し直さない" [ "$(count 'agent launch')" = 1 ]
+check "知らせるのは 1 回" [ "$(count '起動できたか分からない')" = 1 ]
+
+setup "結果の分からない起動を閉じる前に、ボードに書けない"
+wt a feat-a in-progress
+pr 1 feat-a CONFLICTING SUCCESS DIRTY
+: >"$FAKE/launch.json"
+echo 1 >"$FAKE/launch.json.rc"
+run
+echo '{"ok":true,"result":{"warnings":["unknown status"]}}' >"$FAKE/set.json"
+LAUNCH_UNKNOWN_AFTER=0 run
+check "人に知らせられるまで、記録は閉じない" [ "$(cut -f2 "$S/launches.tsv" | tr '\n' ' ')" = "launching " ]
+check "起動し直さない" [ "$(count 'agent launch')" = 1 ]
+
+setup "結果の分からない起動のあとに、PR の状態が変わる"
+wt a feat-a in-progress
+pr 1 feat-a CONFLICTING SUCCESS DIRTY
+: >"$FAKE/launch.json"
+echo 1 >"$FAKE/launch.json.rc"
+run
+echo '{"ok":true}' >"$FAKE/launch.json"
+echo 0 >"$FAKE/launch.json.rc"
+: >"$FAKE/nodes"
+pr 1 feat-a CONFLICTING SUCCESS DIRTY "" false sha-new
+run
+check "結果が分かるまで、新しい状態にも起動しない" [ "$(count 'agent launch')" = 1 ]
+LAUNCH_UNKNOWN_AFTER=0 run
+check "待っても現れなければ、新しい状態に起動する" [ "$(count 'agent launch')" = 2 ]
+check "状態が変わっているので、人には上げない" not_called "起動できたか分からない"
+check "前の起動は閉じる" has "$S/launches.tsv" "	unknown	-	o/r#1	sync-pr	sha1"
+check "新しい状態を起動済みにする" has "$S/dispatched.tsv" "o/r#1	sync-pr	sha-new"
+
+setup "Orca が結果不明と答える (operationId なし)"
+wt a feat-a in-progress
+pr 1 feat-a CONFLICTING SUCCESS DIRTY
+echo '{"ok":false,"error":{"code":"agent_session_operation_unknown","message":"x"}}' >"$FAKE/launch.json"
+echo 1 >"$FAKE/launch.json.rc"
+run
+check "失敗とは記録しない" [ "$(cut -f2 "$S/launches.tsv" | tr '\n' ' ')" = "launching " ]
+run
+check "起動し直さない" [ "$(count 'agent launch')" = 1 ]
+
+setup "出し直しが、operationId の無い失敗を返す"
+wt a feat-a in-progress
+pr 1 feat-a CONFLICTING SUCCESS DIRTY
+echo '{"ok":false,"error":{"code":"reply_lost","data":{"operationId":"op_1"}}}' >"$FAKE/launch.json"
+echo 1 >"$FAKE/launch.json.rc"
+run
+echo '{"ok":false,"error":{"code":"forbidden","message":"x"}}' >"$FAKE/launch.json"
+run
+check "失敗とは記録しない (最初の依頼が通っていないとは言えない)" lacks "$S/launches.tsv" "	fail	"
+check "operationId を持ったまま残す" [ "$(cut -f2,3 "$S/launches.tsv" | tr '\t\n' '  ')" = "launching - lost op_1 launching op_1 lost op_1 " ]
+run
+check "次の回も、新しい起動ではなく同じ依頼を出し直す" [ "$(count '--retry-launch op_1')" = 2 ]
+check "起動の呼び出しは 3 回 (新しい起動 1 + 出し直し 2)" [ "$(count 'agent launch')" = 3 ]
+LAUNCH_UNKNOWN_AFTER=0 run
+check "期限を過ぎたら出し直しをやめる" [ "$(count 'agent launch')" = 3 ]
+check "人に上げる" called "自動の /sync-pr を起動できたか分からない: #1"
+
+setup "出し直しを繰り返しても、期限は最初の時刻から数える"
+wt a feat-a in-progress
+pr 1 feat-a CONFLICTING SUCCESS DIRTY
+now=$(date +%s)
+{
+    printf '%s\tlaunching\t-\to/r#1\tsync-pr\tsha1\n' "$((now - 4000))"
+    printf '%s\tlost\top_1\to/r#1\tsync-pr\tsha1\n' "$((now - 3990))"
+    printf '%s\tlaunching\top_1\to/r#1\tsync-pr\tsha1\n' "$((now - 10))"
+    printf '%s\tlost\top_1\to/r#1\tsync-pr\tsha1\n' "$((now - 9))"
+} >"$S/launches.tsv"
+run
+check "出し直さない" no_launch
+check "人に上げる" called "自動の /sync-pr を起動できたか分からない: #1"
+
+setup "出し直しの途中で落ちた (launching <operationId> のまま)"
+wt a feat-a in-progress
+pr 1 feat-a CONFLICTING SUCCESS DIRTY
+now=$(date +%s)
+{
+    printf '%s\tlaunching\t-\to/r#1\tsync-pr\tsha1\n' "$((now - 60))"
+    printf '%s\tlost\top_1\to/r#1\tsync-pr\tsha1\n' "$((now - 59))"
+    printf '%s\tlaunching\top_1\to/r#1\tsync-pr\tsha1\n' "$((now - 30))"
+} >"$S/launches.tsv"
+run
+check "同じ operationId で出し直す" called "--json --retry-launch op_1"
+
+setup "返事を失った起動のあとに、PR の状態が変わる"
+wt a feat-a in-progress
+pr 1 feat-a CONFLICTING SUCCESS DIRTY
+echo '{"ok":false,"error":{"code":"reply_lost","data":{"operationId":"op_1"}}}' >"$FAKE/launch.json"
+echo 1 >"$FAKE/launch.json.rc"
+run
+echo '{"ok":true}' >"$FAKE/launch.json"
+echo 0 >"$FAKE/launch.json.rc"
+: >"$FAKE/nodes"
+pr 1 feat-a MERGEABLE FAILURE BLOCKED "" false sha-new
+run
+check "今の状態 (/fix-ci) ではなく、失った依頼 (/sync-pr) を出し直す" called "--prompt /sync-pr https://github.com/o/r/pull/1"
+check "新しい対応はまだ起動しない" not_called "--prompt /fix-ci"
+check "出し直しは同じ operationId" called "--json --retry-launch op_1"
+check "失った依頼を起動済みにする" has "$S/dispatched.tsv" "o/r#1	sync-pr	sha1"
 
 setup "結果は分からなかったが、起動後に動き出したエージェントが居る"
 wt a feat-a in-progress
