@@ -18,7 +18,7 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 | Ghostty と設定 | Homebrew cask + Home Manager |
 | herdr の設定 | `home/config/herdr/config.toml` を Home Manager が out-of-store symlink（本体は Nix 管理外） |
 | worktree / コンテナ掃除 | Home Manager `launchd.agents`（1 時間ごと、`home/scripts/worktree-gc.sh`） |
-| PR の自動対応（conflict / CI 失敗 / 未対応のレビューにエージェントを起動）と、人の判断待ちのボード表示（質問は Needs decision、マージできる PR は In review に未読と「マージ可」） | Home Manager `launchd.agents`（ログイン時と 3 分ごと、`home/scripts/pr-dispatch.sh`）。止めるときは `~/Library/Application Support/pr-dispatch/BRAKE` を置く（再開と起動が止まり、ボードの更新は続く）。同じ場所の `config` に `adopt_prs=true` と `max_worktrees=<数>` を書くと、Orca に登録したリポの worktree の無い PR にも、対応が要るときに worktree を作る（1 回に 1 つ。無ければ作らない） |
+| PR の自動対応（conflict / CI 失敗 / 未対応のレビューにエージェントを起動）と、人の判断待ちのボード表示（質問は Needs decision、マージできる PR は In review に未読と「マージ可」） | Home Manager `launchd.agents`（ログイン時と 3 分ごと、`home/scripts/pr-dispatch.sh`）。止めるときは `~/Library/Application Support/pr-dispatch/BRAKE` を置く（再開と起動が止まり、ボードの更新は続く）。同じ場所の `config` に `adopt_prs=true` と `max_worktrees=<数>` を書くと、Orca に登録したリポの worktree の無い PR にも、対応が要るときに worktree を作る（1 回に 1 つ。無ければ作らない）。同じループが、自分がラベルを付けた自分の issue（キュー）に worktree を作って worker を起動する（下の「PR の自動対応と issue のキュー」） |
 | 再起動で止まった Claude の再開、Needs decision で会話が開いていないカードの開き直し（同じセッションには 1 回だけ。人が閉じたタブは開き直さない） | Home Manager `launchd.agents` の pr-dispatch が毎回の最初に呼ぶ（ログイン時と 3 分ごと、`home/scripts/agent-resume.sh`）＋ SessionStart hook `agents/claude/hooks/session-marker.sh`。再開したセッションに指示が入るまで、その worktree への PR の自動対応は待つ |
 | 放置された Claude / Codex のセッションの通知と、確かめたものの停止（Orca の端末に /exit） | Home Manager `launchd.agents`（10 分ごと、`home/scripts/agent-gc.sh`）＋ CLI `~/.local/bin/agent-gc`。設計は `docs/agent-gc-design.md` |
 | Claude Code の auto memory の整理（重複・陳腐化・共有への移動、昇格は 1 件ずつ PR） | Home Manager `launchd.agents`（毎日 04:30、`home/scripts/memory-maintenance.sh`）。設計は `docs/memory-maintenance-design.md` |
@@ -62,7 +62,7 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 │   ├── neovim.nix
 │   ├── packages.nix
 │   ├── worktree-gc.nix
-│   ├── pr-dispatch.nix  # PR の自動対応と、再起動で止まったセッションの再開
+│   ├── pr-dispatch.nix  # PR の自動対応、issue のキュー、再起動で止まったセッションの再開
 │   ├── agent-gc.nix
 │   ├── memory-maintenance.nix
 │   ├── run-from-main.nix  # LaunchAgent が origin/main のスクリプトを動かす起動スクリプト
@@ -448,6 +448,36 @@ launchctl kickstart -k gui/$(id -u)/org.nix-community.home.worktree-gc  # 即時
 
 閾値や除外を変えるだけなら `darwin-rebuild` は不要（LaunchAgent は `origin/main` のスクリプトを動かすので、
 マージすれば次の実行から効く）。実行時刻を変えるときだけ `worktree-gc.nix` を直して rebuild する。
+
+## PR の自動対応と issue のキュー
+
+`home/scripts/pr-dispatch.sh`（3 分ごと）は、自分の PR の保守（conflict・CI 失敗・未対応のレビュー）に加えて、
+**キュー**を回す。キューは「自分がラベルを付けた自分の issue」で、ラベルを付けた時点の内容への承認として扱う。
+ループは ready な issue に worktree を作って `/issue-worker <N> --approved-at <T>` を起動し、起動できたらラベルを外す。
+worker は着手の直前に `pr-dispatch.sh check <N> <T>` で、その時点から内容が変わっていないことを確かめ、draft PR で終わる。
+ready にするのは人。キューへの供給は `/issue-queue plan` と `/issue-queue groom`。
+
+設定は `~/Library/Application Support/pr-dispatch/config`（追跡しない。`key=value` を 1 行ずつ。同じキーは後の行が勝つ）。
+
+| キー | 中身 | 無いとき |
+|---|---|---|
+| `queue_repos` | キューの対象のリポ（`owner/repo` をカンマ区切り）。主 checkout を Orca に登録しておく | キューは無効 |
+| `queue_label` | キューのラベルの名前 | キューは無効 |
+| `max_wip` | キュー由来の worktree のうち、open の PR が無い・エージェントが動いている・Needs decision のものの数の線（作成の結果待ちも数える） | 4 |
+| `max_per_day` | 1 日（JST）に作る worktree の数の線 | 2 |
+| `max_open_prs` | 自分の open PR 全部（draft・古いものを含む）の数の線 | 0（キューは何も起動しない） |
+| `max_worktrees` | Orca の worktree（主 checkout 以外）の数の線。PR の取り込みと共通 | 0（作らない） |
+| `ask_title_words` / `ask_labels` | 題名に入る語・付いたラベル（カンマ区切り）で、ラベルがあっても起動しない issue | 語は `DEFAULT_TITLE_WORDS`、ラベルは無し |
+| `adopt_prs` | `true` で、Orca に登録したリポの worktree の無い PR にも、対応が要るときに worktree を作る | 作らない |
+
+線はどれも「新しい着手を止める線」で、厳密な上限ではない。対象外の issue と理由は
+`DRY_RUN=1 VERBOSE=1 ~/www/personal/dotfiles/home/scripts/pr-dispatch.sh` で出る。
+
+止め方:
+
+- **新しい着手だけ止める**: `queue_repos` を空にする（行を消す）。動いている worker と、その PR の保守・ボードは続く。
+- **起動を全部止める**: `~/Library/Application Support/pr-dispatch/BRAKE` を置く（空でよい）。再開・PR の保守・キューの起動が止まり、ボードの更新は続く。
+- 1 件だけ止める: その issue のラベルを外す。起動済みのものは、worker のタブを閉じる。失敗した issue をやり直させるのは、ラベルの付け直し（古い worktree を消してから）。
 
 ## 放置セッションの検出と停止
 
