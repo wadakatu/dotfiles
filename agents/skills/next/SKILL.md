@@ -33,7 +33,10 @@ PR の状態確認 → （マージ済みなら）default ブランチ同期 →
         2. エピック issue / tracking issue のチェックリストの未完了項目
         3. ユーザーの直前の指示
     - すでに誰かが着手している項目は飛ばす。open の PR がある項目（issue なら `gh issue view <N> --json closedByPullRequestsReferences`、それ以外は `gh pr list --state open` の題名とブランチ名）と、worktree が既にある項目（`git worktree list`、Orca なら `orca worktree list --json`）
-    - 自動のキューのラベル（`~/Library/Application Support/pr-dispatch/config` の `queue_label`）が付いた issue は選ばない（pr-dispatch が worker を起動する）
+    - 自動のキュー（pr-dispatch）が扱う issue は選ばない。次のどれかに当たるもの:
+        - キューのラベル（`~/Library/Application Support/pr-dispatch/config` の `queue_label`）が付いている（起動待ち）
+        - 起動済み（ラベルは起動のときに外れる）: `git worktree list --porcelain` に `issue-<番号>-` で始まる branch がある、
+          または `gh issue view <番号> --json closedByPullRequestsReferences` に open の PR がある
     - 候補が複数ある・特定できない場合は、候補を並べてユーザーに確認する（勝手に選ばない）
 
 4. **マージ前の PR に依存するかの判定**（この計画の PR で、まだマージされていないものがあるときだけ）

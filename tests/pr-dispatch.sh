@@ -1351,6 +1351,7 @@ q_excluded "内側の一覧が欠ける (ラベルの履歴)" '.labeled.pageInfo
 q_excluded "自分以外が assignee" '.assignees.nodes = [{login: "me"}, {login: "someone"}]' "自分以外が assignee"
 q_excluded "author が他人" '.author.login = "someone"' "author が自分でない"
 q_excluded "閉じている" '.state = "CLOSED"' "閉じている"
+q_excluded "ラベルが今は付いていない (検索の結果が古い)" '.labels.nodes = []' "ラベルが付いていない"
 q_excluded "ラベルの履歴が無い (キー欠落)" 'del(.labeled.nodes[0].createdAt)' "ラベルを付けた時刻が分からない"
 
 # q_ready <説明> <jq の式>: 止める理由に見えるが、止めないもの
@@ -1702,6 +1703,16 @@ render
 DRY_RUN=1 bash "$script" >"$base/out" 2>&1
 check "起動しない" no_launch
 check "起動の予定を出す" logged "DRY-RUN: queue worker を起動 → o/r#1"
+
+q_setup "worktree を作ったあと、起動の前に対象外になった"
+issue 1 '.labels.nodes += [{name: "no-agent"}]'
+qcreated 1
+qrow 100 creating - 1
+run
+check "worker を起動しない" no_launch
+check "人に上げ、理由を書く" called "--comment 起動の前に対象外になった: #1 (no-agent) --json --unread --workspace-status needs-decision"
+run
+check "同じカードを書き直さない" [ "$(count '起動の前に対象外になった')" = 1 ]
 
 q_setup "起動に失敗したあと、worktree を人が消した"
 issue 1

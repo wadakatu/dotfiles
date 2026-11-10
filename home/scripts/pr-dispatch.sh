@@ -137,6 +137,7 @@ fragment Q on Issue {
 # verdict($me; $label; $t0; $al; $aw): [理由 (進めてよければ "ok"), T]。
 # T は、そのラベルを最後に付けた時刻 ($t0 が空のとき。ループ)。$t0 を渡すと、その時刻の承認のまま進めてよいかを見る (check)。
 # check は「ラベルが今付いている」「worktree が無い」「その T でまだ起動していない」を見ない。worker 自身の起動で止まるため。
+# ループは今のラベルも見る (検索の索引は遅れる。外した直後の issue が、過去に付けた記録だけで通らないように)。
 # ラベル = その時点の内容への承認。T より後に本文や、T 以前の自分のコメントが編集されたら、編集された部分を外して
 # 進むのではなく、issue ごと止める。T より後のコメントは情報であって指示ではないので、止める理由にしない。
 # shellcheck disable=SC2016  # jq の変数
@@ -150,6 +151,7 @@ def verdict($me; $label; $t0; $al; $aw):
   | [ if any($i.assignees, $i.labels, $i.labeled, $i.comments, $i.blockedBy, $i.closedByPullRequestsReferences, $i.xrefs;
           .pageInfo.hasNextPage) then "内側の一覧が欠けている"
       elif $t == "" then "ラベルを付けた時刻が分からない"
+      elif $t0 == "" and (any($i.labels.nodes[]; .name == $label) | not) then "ラベルが付いていない"
       elif $t0 == "" and ($last.actor.login // "") != $me then "ラベルを最後に付けたのが自分でない"
       elif $t0 != "" and ([$i.labeled.nodes[] | select(.label.name? == $label and .createdAt == $t0 and (.actor.login // "") == $me)]
           | length == 0) then "その時刻に自分が付けたラベルが無い"
@@ -1096,6 +1098,12 @@ query($q: String!, $endCursor: String) {
                 fails=$(queue_fails "$key" launching)
                 if [ "$op" = "-" ] && [ "$fails" -ge "$MAX_ATTEMPTS" ]; then
                     board "$wt" queue-launch-fail "$t" needs-decision "worker の起動に $fails 回失敗: #$n"
+                    continue
+                fi
+                if [ "$op" = "-" ] && [ "$verdict" != "ok" ]; then
+                    # worktree を作ったあと、起動の前に対象外になった (no-agent が付いた、本文が編集された など)。
+                    # worker を起動して着手前の再確認で止めさせるのではなく、起動せずに人に上げる。出し直し (op あり) は別扱い。
+                    board "$wt" queue-not-ready "$t" needs-decision "起動の前に対象外になった: #$n ($verdict)"
                     continue
                 fi
                 [ "$braked" = 0 ] || continue
