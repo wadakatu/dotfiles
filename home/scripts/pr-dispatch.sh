@@ -43,7 +43,8 @@ BOARD_FILE="$STATE_ROOT/pr-dispatch/board.tsv"
 MAX_LAUNCHES="${MAX_LAUNCHES:-3}"
 # 同じ PR に同じ対応を起動する回数の上限。超えたら人に上げる (自動の修正が空回りし続けないため)。
 MAX_ATTEMPTS="${MAX_ATTEMPTS:-3}"
-# 起動の前後を 1 行ずつ足す (追記のみ)。<時刻> <launching|launched|lost|fail> <operationId|-> <PR> <対応> <状態>
+# 起動の前後を 1 行ずつ足す (追記のみ)。<時刻> <launching|launched|lost|fail|unknown> <operationId|-> <PR> <対応> <状態>
+# unknown は、結果が分からないまま LAUNCH_UNKNOWN_AFTER が過ぎて閉じた起動。
 # 起動の返事を失ったときに、新しく起動し直さず、同じ依頼を出し直すための記録。
 LAUNCHES_FILE="$STATE_ROOT/pr-dispatch/launches.tsv"
 # あれば、再開と起動を全部止める (ボードの更新は続ける)。
@@ -271,6 +272,24 @@ launch_log() { printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "$2" "$3" "$1" >>"$LAUNCH
 launch_last() {
     awk -F'\t' -v k="$1" '$4 FS $5 FS $6 == k { l = $1 FS $2 FS $3 } END { if (l != "") print l }' "$LAUNCHES_FILE"
 }
+# launch_open <PR>: その PR の最後の起動が結果待ち (最後の行が launching か lost) なら
+# "<最初に結果が分からなくなった時刻> <operationId|-> <対応> <状態>"。そうでなければ空。
+# PR ごとに見る (状態ごとではない)。push やレビューで状態が変わっても、前の起動の結果が分かるまでは次を起動しないため。
+# 出し直し (launching <id> → lost <id>) が続いても、時刻は最初のものを返す (出し直すたびに期限が延びないように)。
+launch_open() {
+    awk -F'\t' -v p="$1" '
+        $4 == p {
+            if (st != "launching" && st != "lost") t0 = $1
+            st = $2; op = $3; a = $5; s = $6
+        }
+        END { if (st == "launching" || st == "lost") print t0 FS op FS a FS s }' "$LAUNCHES_FILE"
+}
+# launch_close <key> <launched|unknown>: 結果待ちの起動を閉じ、起動済みとして覚える (同じ状態には起動し直さない)。
+launch_close() {
+    [ "$DRY_RUN" = "1" ] && return 0
+    launch_log "$1" "$2" - || true
+    grep -qxF -- "$1" "$STATE_FILE" || printf '%s\n' "$1" >>"$STATE_FILE"
+}
 # launch_agent <key> <worktree> <prompt> <operationId|->: エージェントを起動する。起動できたら 0。
 # 起動の前に launching、結果が分かったら launched / lost / fail を書く。どれも書かれなければ結果不明。
 launch_agent() {
@@ -291,7 +310,12 @@ launch_agent() {
     newop=$(jq -r '[.. | .operationId? // empty | strings][0] // empty' <<<"$out" 2>/dev/null || true)
     if [ -n "$newop" ]; then
         launch_log "$key" lost "$newop" || true
-    elif [ "$(jq -r '.ok' <<<"$out" 2>/dev/null || true)" = "false" ]; then
+    elif [ "$op" != "-" ]; then
+        # 出し直しが通らなくても、最初の依頼が通っていないとは言えない。operationId を持ったまま結果待ちに残す
+        # (fail にすると、次の回に新しい起動として出し、最初の依頼が通っていたら 2 体並ぶ)。
+        launch_log "$key" lost "$op" || true
+    elif jq -e '.ok == false and ((.error.code // "") | test("^agent_session_operation_(unknown|expired)$") | not)' <<<"$out" >/dev/null 2>&1; then
+        # はっきり失敗と分かるものだけ fail にする。上の 2 つのコードは、Orca の CLI 自身が「結果不明」に分類している。
         launch_log "$key" fail - || true
     fi
     return 1
@@ -334,29 +358,38 @@ while IFS=$'\t' read -r slug branch num url head mergeable ci threads merge_stat
     fi
     key="$pr"$'\t'"$action"$'\t'"$sig"
 
-    # 前の回の起動がどうなったかを先に見る。結果が分からないまま (launching で止まっている) なら、起動し直さない。
-    l_time="" l_state="" l_op=""
-    IFS=$'\t' read -r l_time l_state l_op <<<"$(launch_last "$key")" || true
+    # この PR の前の起動の結果が分かっていなければ、それを先に片付ける。push やレビューで状態が変わっていても、
+    # 結果が分かるまで別の起動はしない (起動できていたら 2 体並ぶ)。
+    o_time="" o_op="" o_action="" o_sig=""
+    IFS=$'\t' read -r o_time o_op o_action o_sig <<<"$(launch_open "$pr")" || true
     op=-
-    case "$l_state" in
-    launching)
-        if jq -e --arg p "$wt" --argjson t "$((l_time * 1000))" \
+    if [ -n "$o_time" ]; then
+        o_key="$pr"$'\t'"$o_action"$'\t'"$o_sig"
+        if jq -e --arg p "$wt" --argjson t "$((o_time * 1000))" \
             '[.result.worktrees[] | select(.path == $p) | .agents[]? | select((.stateStartedAt // 0) >= $t)] | length > 0' <<<"$ps_json" >/dev/null; then
             # 起動の後に動き出したエージェントが居る (前から居て終わっているエージェントは数えない)。起動できていた。
-            if [ "$DRY_RUN" != "1" ]; then
-                launch_log "$key" launched - || true
-                grep -qxF -- "$key" "$STATE_FILE" || printf '%s\n' "$key" >>"$STATE_FILE"
-            fi
-            log "launch $action → $pr (返事は読めなかったが、起動後のエージェントを確認)"
-        elif [ "$(($(date +%s) - l_time))" -ge "$LAUNCH_UNKNOWN_AFTER" ]; then
-            board "$wt" "launch-unknown-$action" "$sig" needs-decision "自動の /$action を起動できたか分からない: #$num"
-        else
-            vlog "keep  $pr ($action: 前の起動の結果が分からない。起動し直さずに待つ)"
+            launch_close "$o_key" launched
+            log "launch $o_action → $pr (返事は読めなかったが、起動後のエージェントを確認)"
+            continue
         fi
-        continue
-        ;;
-    lost) op=$l_op ;;
-    esac
+        if [ "$(($(date +%s) - o_time))" -ge "$LAUNCH_UNKNOWN_AFTER" ]; then
+            # 待っても起動後のエージェントが現れない。これ以上は待たず、出し直しもせず、起動したものとして閉じる
+            # (同じ状態には二度と起動しない)。状態が変わっていなければ PR は直らないまま残るので、人に上げてから閉じる。
+            # 状態が変わっていれば、閉じたあと新しい起動として下へ進む。
+            if [ "$o_key" = "$key" ]; then
+                board "$wt" "launch-unknown-$o_action" "$o_sig" needs-decision "自動の /$o_action を起動できたか分からない: #$num"
+                grep -qxF -- "$wt"$'\t'"launch-unknown-$o_action"$'\t'"$o_sig" "$BOARD_FILE" || continue
+            fi
+            launch_close "$o_key" unknown
+            [ "$o_key" != "$key" ] || continue
+        elif [ "$o_op" = "-" ]; then
+            vlog "keep  $pr ($o_action: 前の起動の結果が分からない。起動し直さずに待つ)"
+            continue
+        else
+            # 返事を失った起動。今の状態ではなく、失った依頼そのものを同じ operationId で出し直す。
+            action=$o_action sig=$o_sig key=$o_key op=$o_op
+        fi
+    fi
 
     busy=$(jq -r --arg p "$wt" '[.result.worktrees[] | select(.path == $p) | .agents[]?.state | select(. != "done")] | join(",")' <<<"$ps_json")
     if [ -n "$busy" ]; then
