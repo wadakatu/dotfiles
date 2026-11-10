@@ -694,6 +694,14 @@ check "起動しない" no_launch
 check "再開待ちの記録を書き換えない" has "$R/resume-pending.tsv" "term_gone"
 check "起動の記録を書かない" [ ! -s "$S/launches.tsv" ]
 
+setup "同じ branch の PR が 2 本あり、1 本はマージできて、もう 1 本は conflict"
+wt a feat-a in-review
+pr 1 feat-a MERGEABLE SUCCESS CLEAN
+pr 2 feat-a CONFLICTING SUCCESS DIRTY
+run
+check "マージできる PR はカードに書く" called "マージ可: #1"
+check "同じ回に、conflict の PR には起動する (Needs decision に上げたのではない)" launched a
+
 # ---- worktree の無い PR に worktree を作る ----
 # mainrepo: Orca に登録したリポの主 checkout を作る。origin は手元の bare リポジトリ
 # (path に github.com/o/r を入れて、スクリプトが origin の URL から o/r を読めるようにする)。
@@ -875,6 +883,19 @@ run
 check "終わった印が出たら起動する" launched pr-1
 check "ready は worktree に 1 回だけ記録する" [ "$(grep -c "	ready	o/r#1	-	$ORCA_ROOT/r/pr-1\$" "$S/adopts.tsv")" = 1 ]
 check "もう 1 本の PR の名前では記録しない" [ -z "$(grep 'o/r#2' "$S/adopts.tsv")" ]
+
+setup "同じ branch の PR が 2 本あり、setup が待っても終わらない"
+mainrepo
+sha=$(remote_branch feat-x)
+pr 1 feat-x CONFLICTING SUCCESS DIRTY "" false "$sha"
+pr 2 feat-x CONFLICTING SUCCESS DIRTY "" false "$sha"
+adopt_config
+echo '{"result":{"repo":{"hookSettings":{"scripts":{"setup":"make setup"}}}}}' >"$FAKE/repo.json"
+run
+adopted 1 feat-x in-review
+ADOPT_SETUP_WAIT=0 run
+check "人に上げる" called "worktree の setup が終わったか確認できない"
+check "上げた回は、もう 1 本の PR にも起動しない" no_launch
 
 setup "branch を切り替えたあと、記録を書く前に落ちた"
 mainrepo
