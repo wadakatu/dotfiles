@@ -824,7 +824,10 @@ if [ "$adopt_on" = 1 ] && [ "$braked" = 0 ]; then
         fi
         rc=0
         adopt_pr "$pr" "$num" "$branch" "$head" "$main" "$(printf '%s: %s' "${slug#*/}" "$title" | cut -c1-60)" || rc=$?
-        [ "$rc" = 2 ] || break
+        [ "$rc" != 2 ] || continue
+        # 作成を試みた (結果が分からないときも)。worktree の一覧は回の最初に読んだきりなので、同じ回のキューの線に数える。
+        n_wt=$((n_wt + 1))
+        break
     done <<<"$prs"
 fi
 
@@ -1017,8 +1020,8 @@ query($q: String!, $endCursor: String) {
         wt=$(printf '%s\n' "$iwts" | head -n 1)
         last=$(launch_last "$key" | cut -f2)
         op=- t0=""
-        if [ -z "$last" ]; then
-            # この T にはまだ手を付けていない。
+        if [ -z "$last" ] && [ -z "$(launch_open "$iss")" ]; then
+            # この T にはまだ手を付けておらず、前の T の起動で結果待ちのものも無い。
             if [ -n "$wt" ]; then
                 vlog "queue 対象外 $iss (Orca に worktree がある: ${wt#"$ORCA_ROOT"/})"
                 continue
@@ -1028,7 +1031,8 @@ query($q: String!, $endCursor: String) {
                 continue
             fi
         else
-            # この T で手を付けた issue。観測と記録の最後の行から続きを決める。
+            # この T で手を付けた issue か、ラベルを付け直す前の T の起動が結果待ちの issue。
+            # 観測と記録の最後の行から続きを決める (前の起動の結果が分かるまで、新しい T では作らない)。
             # 同じ issue の worktree が 2 つ以上あれば、古い方だけ使い、新しい方は人に上げる。
             while IFS= read -r extra; do
                 [ -z "$extra" ] || board "$extra" queue-dup "$t" needs-decision "同じ issue の worktree が 2 つある。こちらは自動では使わない: #$n"
@@ -1070,7 +1074,7 @@ query($q: String!, $endCursor: String) {
                     continue
                 fi
                 # 返事を失った起動。今の状態ではなく、失った依頼そのもの (同じ T、同じ印) を同じ operationId で出し直す。
-                key=$o_key t=$o_sig op=$o_op t0=$o_time
+                key=$o_key t=$o_sig op=$o_op t0=$o_time last=lost
             fi
             if [ -z "$wt" ]; then
                 # 作成がはっきり失敗した (creating の直後の fail) ときだけ、同じ T で 3 回まで作り直す。
