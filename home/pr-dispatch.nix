@@ -23,6 +23,8 @@
       # スリープ中と、前の回がまだ走っているときの起動は飛ばされる (man launchd.plist の StartInterval)。
       StartInterval = 180;
 
+      # AbandonProcessGroup は付けない (既定は false)。スクリプトが落ちたときに、呼び出し中の agent-resume.sh を
+      # launchd に片付けさせる。残ると、次の回がロックを回収して並んで動く (home/scripts/pr-dispatch.sh の「再開」の節)。
       StandardOutPath = "${config.home.homeDirectory}/Library/Logs/pr-dispatch.log";
       StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/pr-dispatch.log";
 
