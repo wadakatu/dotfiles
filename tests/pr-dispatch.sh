@@ -707,9 +707,10 @@ mainrepo() {
     git -C "$M" push -q origin trunk
     jq -cn --arg p "$M" '{worktreeId: ("r::" + $p), path: $p, branch: "refs/heads/trunk", workspaceStatus: "", isMainWorktree: true, agents: [], repoId: "r"}' >>"$FAKE/wts"
 }
-# remote_branch <branch>: origin にだけある branch を作り、その head の SHA を出す。
+# remote_branch <branch> [orca.yaml の中身]: origin にだけある branch を作り、その head の SHA を出す。
 remote_branch() {
     git -C "$M" switch -q -c "$1" trunk
+    [ -z "${2:-}" ] || { printf '%b' "$2" >"$M/orca.yaml" && git -C "$M" add orca.yaml; }
     git -C "$M" commit -q --allow-empty -m "work on $1"
     git -C "$M" push -q origin "$1"
     git -C "$M" rev-parse HEAD
@@ -741,7 +742,7 @@ cp "$FAKE/wts" "$FAKE/wts.before"
 jq -cn --arg p "$ORCA_ROOT/r/pr-1" '{worktreeId: ("r::" + $p), path: $p, branch: "refs/heads/feat-x", workspaceStatus: "in-review", isMainWorktree: false, agents: [], repoId: "r", linkedPR: 1}' >>"$FAKE/wts"
 run
 check "次の回から、PR の対応が効く (setup script の無いリポは待たない)" launched pr-1
-check "setup script が無いことを Orca に確かめる" called "repo show --repo path:$M --json"
+check "setup script が無いことを Orca に確かめる" called "repo show --repo id:r --json"
 check "ready を記録する" [ "$(cut -f2 "$S/adopts.tsv" | tr '\n' ' ')" = "creating created ready " ]
 check "もう 1 つは作らない" [ "$(count 'worktree create')" = 1 ]
 # 人がその worktree を消した。
@@ -813,6 +814,45 @@ echo '{"ok":false,"error":{"code":"x"}}' >"$FAKE/repo.json"
 run
 check "失敗の返事でも、無いとは見なさない" no_launch
 check "ready にしない" [ "$(cut -f2 "$S/adopts.tsv" | tr '\n' ' ')" = "creating created " ]
+
+setup "setup が checkout の orca.yaml にだけある"
+mainrepo
+sha=$(remote_branch feat-x 'scripts:\n  setup: |\n    make setup\n')
+pr 1 feat-x CONFLICTING SUCCESS DIRTY "" false "$sha"
+adopt_config
+run
+check "orca.yaml ごと checkout されている" [ -s "$ORCA_ROOT/r/pr-1/orca.yaml" ]
+adopted 1 feat-x in-review
+term term_setup pr-1 | terms
+echo '{"result":{"terminal":{"tail":["installing dependencies..."]}}}' >"$FAKE/read.json"
+run
+check "local に script が無くても、待つ" no_launch
+check "ready にしない" [ "$(cut -f2 "$S/adopts.tsv" | tr '\n' ' ')" = "creating created " ]
+echo '{"result":{"terminal":{"tail":["Orca setup done: ok"]}}}' >"$FAKE/read.json"
+run
+check "終わった印が出たら起動する" launched pr-1
+
+setup "orca.yaml はあるが、setup は書かれていない"
+mainrepo
+sha=$(remote_branch feat-x 'setupAgentStartupPolicy: wait-for-setup\ndefaultTabs:\n  - name: dev\n')
+pr 1 feat-x CONFLICTING SUCCESS DIRTY "" false "$sha"
+adopt_config
+run
+adopted 1 feat-x in-review
+run
+check "待たずに起動する" launched pr-1
+
+setup "worktree を作ったあとで、作る設定を消した"
+mainrepo
+sha=$(remote_branch feat-x)
+pr 1 feat-x CONFLICTING SUCCESS DIRTY "" false "$sha"
+adopt_config
+run
+adopted 1 feat-x in-review
+rm "$S/config"
+run
+check "作った worktree の PR の対応は続ける (setup script の無いリポは待たない)" launched pr-1
+check "新しくは作らない" [ "$(count 'worktree create')" = 1 ]
 
 setup "branch を切り替えたあと、記録を書く前に落ちた"
 mainrepo
@@ -1019,7 +1059,7 @@ pr 1 feat-x CONFLICTING SUCCESS DIRTY "" false "$sha"
 adopt_config
 printf '%s\tcreating\to/r#1\t%s\n' "$(/bin/date +%s)" "$sha" >"$S/adopts.tsv"
 git -C "$M" worktree add -q -b pr-1 "$ORCA_ROOT/r/pr-1" origin/feat-x
-jq -cn --arg p "$ORCA_ROOT/r/pr-1" '{worktreeId: ("r::" + $p), path: $p, branch: "refs/heads/pr-1", workspaceStatus: "in-progress", isMainWorktree: false, agents: [], repoId: "r", linkedPR: null, linkedItems: [{provider: "github", type: "pr", number: 1}]}' >>"$FAKE/wts"
+jq -cn --arg p "$ORCA_ROOT/r/pr-1" '{worktreeId: ("r::" + $p), path: $p, branch: "refs/heads/pr-1", workspaceStatus: "in-progress", isMainWorktree: false, agents: [], repoId: "r", linkedPR: 1, linkedItems: [{provider: "github", type: "pr", number: 1}]}' >>"$FAKE/wts"
 run
 run
 check "もう 1 つは作らない" no_create
@@ -1036,6 +1076,17 @@ jq -cn --arg p "$ORCA_ROOT/r/follow-up" '{worktreeId: ("r::" + $p), path: $p, br
 run
 check "作らない" no_create
 check "カードには触らない" not_called "worktree set"
+
+setup "同じ worktree から出した前の PR (参照だけが残っている)"
+mainrepo
+sha=$(remote_branch feat-x)
+pr 1 feat-x CONFLICTING SUCCESS DIRTY "" false "$sha"
+adopt_config
+# その worktree は、いまは別の branch で別の PR (2) の作業をしている。PR 1 は参照として残っているだけ。
+git -C "$M" worktree add -q -b feat-next "$ORCA_ROOT/r/busy" trunk
+jq -cn --arg p "$ORCA_ROOT/r/busy" '{worktreeId: ("r::" + $p), path: $p, branch: "refs/heads/feat-next", workspaceStatus: "in-progress", isMainWorktree: false, agents: [], repoId: "r", linkedPR: 2, linkedItems: [{provider: "github", type: "pr", number: 1}, {provider: "github", type: "pr", number: 2}]}' >>"$FAKE/wts"
+run
+check "worktree を失った PR として、作る" created 1
 
 setup "worktree の作成が失敗を返す"
 mainrepo
