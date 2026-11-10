@@ -26,8 +26,8 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 | Dock / Finder / キーボード / スクリーンショット | nix-darwin `system.defaults` |
 | Claude Code の設定 | `agents/claude/` に実体を置き手動コピー（Nix 管理外） |
 | Codex の設定 | 手で書いた設定と branch-guard は nix-darwin `environment.etc` で `/etc/codex/`（system 層、`modules/codex.nix`）。`AGENTS.md` は Home Manager の out-of-store symlink。Codex が自分で書く状態は `~/.codex/config.toml` に残す |
-| Claude Code / Codex のスキル | `agents/` に実体を置き、Home Manager がスキルごとに out-of-store symlink（`home/agent-skills.nix`） |
-| Claude Code のエージェント定義 | `agents/claude/agents/` を `~/.claude/agents` へ out-of-store symlink（`home/agent-skills.nix`）。複数リポジトリの入口になる `orchestrator` は Orca の folder workspace で `claude --agent orchestrator` |
+| Claude Code / Codex のスキル | `agents/` に実体を置き、Home Manager がスキルごとに `origin/main` の写しへ symlink（`home/agent-skills.nix`） |
+| Claude Code のエージェント定義と rules | `agents/claude/agents/` と `agents/claude/rules/` を、`origin/main` の写しから `~/.claude/agents` と `~/.claude/rules` へ symlink（`home/agent-skills.nix`）。複数リポジトリの入口になる `orchestrator` は Orca の folder workspace で `claude --agent orchestrator` |
 | シークレット、アプリデータ、ブラウザデータ | Keychain / 1Password / バックアップ |
 
 ## 構成
@@ -215,9 +215,15 @@ chmod +x ~/.claude/hooks/*.sh
 
 ### スキル（Home Manager の symlink）
 
-スキルは `home/agent-skills.nix` が、スキルごとに作業ツリーの実体へ out-of-store symlink を張る。
-実体を直接指すので読み取り専用にはならず、スキルを直すと rebuild なしで両方のエージェントに効く。
-スキルを足したり消したりしたときだけ `darwin-rebuild switch` する。
+スキル・エージェント定義・rules は、作業ツリーではなく `origin/main` の写し
+（`~/.local/share/dotfiles-live/current/agents/`。`home/scripts/live-sync.sh` が作り、LaunchAgent のスクリプトと共通）から読む。
+`home/agent-skills.nix` がそこへ symlink を張る。
+
+- 効くのは main にマージした版。checkout が別のブランチに居ても変わらず、レビュー前の変更は効かない。
+- 直したら PR にしてマージする。LaunchAgent が 15 分に 1 回 fetch して写しを進めるので、rebuild は要らない。
+  すぐ効かせたいときは dotfiles の checkout で `git fetch origin main` する（LaunchAgent の次の実行、3 分以内に進む）。
+- 写しは読み取り専用。その場では直せず、`/agents` で定義を作ることもできない（リポジトリに置いて PR にする）。
+- スキルを足したり消したりしたときだけ `darwin-rebuild switch` する（リンクはスキルごとに張るため）。
 
 | リポジトリ | 配置先 |
 |---|---|
@@ -351,8 +357,11 @@ memory-maintenance）も同じ値を見るので、クローン先を変える�
 `darwin-rebuild switch` する。
 
 これらの LaunchAgent は作業ツリーのスクリプトを直接は動かさない。`home/run-from-main.nix` の起動スクリプトが
-`origin/main` の `home/scripts` を `~/Library/Caches/<名前>-script/` に取り出し、その写しを実行する
-（fetch は 15 分に 1 回まで）。checkout でブランチ作業をしていても無人で動くのはマージ済みのスクリプトだけで、
+`home/scripts/live-sync.sh` で `origin/main` の `home/scripts` と `agents` を `~/.local/share/dotfiles-live/<コミット>/` に取り出し、
+その写しを実行する（fetch は 15 分に 1 回まで）。`current` が最新の版を指す symlink で、スキルと rules もここから読む。
+取り出しに失敗したときは前の版で動く。古い版は自動では消さないので、溜まったら `current` が指す版以外を手で消す
+（読み取り専用なので `chmod -R u+w` してから）。`live-sync.sh` 自身は nix store から動くので、直したら rebuild が要る。
+checkout でブランチ作業をしていても無人で動くのはマージ済みのスクリプトだけで、
 スクリプトの変更はマージすれば次の実行から効く。`DRY_RUN=1 .../home/scripts/<名前>.sh` の手動実行は作業ツリーのスクリプトを動かす。
 
 なお、herdr が書き換え時に「一時ファイル + rename」方式を使う場合は
