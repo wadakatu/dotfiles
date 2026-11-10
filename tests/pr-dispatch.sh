@@ -734,13 +734,15 @@ check "PR の head を指している" [ "$(git -C "$ORCA_ROOT/r/pr-1" rev-parse
 check "仮のブランチは消す" [ -z "$(git -C "$M" branch --list pr-1)" ]
 check "PR を結び付け直し、In review に置く" called "worktree set --worktree path:$ORCA_ROOT/r/pr-1 --pr 1 --workspace-status in-review --display-name r: PR の題名 1 --comment auto: PR #1 の対応のために worktree を作成 --json"
 check "push できるように upstream を付ける" [ "$(git -C "$ORCA_ROOT/r/pr-1" rev-parse --abbrev-ref 'feat-x@{upstream}')" = origin/feat-x ]
-check "記録する (setup の無いリポは、すぐ ready)" [ "$(cut -f2 "$S/adopts.tsv" | tr '\n' ' ')" = "creating created ready " ]
+check "記録する" [ "$(cut -f2 "$S/adopts.tsv" | tr '\n' ' ')" = "creating created " ]
 check "同じ回にはエージェントを起動しない" no_launch
 check "検索に、登録したリポを入れる" called "repo:o/r"
 cp "$FAKE/wts" "$FAKE/wts.before"
 jq -cn --arg p "$ORCA_ROOT/r/pr-1" '{worktreeId: ("r::" + $p), path: $p, branch: "refs/heads/feat-x", workspaceStatus: "in-review", isMainWorktree: false, agents: [], repoId: "r", linkedPR: 1}' >>"$FAKE/wts"
 run
-check "次の回から、PR の対応が効く" launched pr-1
+check "次の回から、PR の対応が効く (setup script の無いリポは待たない)" launched pr-1
+check "setup script が無いことを Orca に確かめる" called "repo show --repo path:$M --json"
+check "ready を記録する" [ "$(cut -f2 "$S/adopts.tsv" | tr '\n' ' ')" = "creating created ready " ]
 check "もう 1 つは作らない" [ "$(count 'worktree create')" = 1 ]
 # 人がその worktree を消した。
 git -C "$M" worktree remove --force "$ORCA_ROOT/r/pr-1"
@@ -796,6 +798,40 @@ cp "$FAKE/wts.before" "$FAKE/wts"
 adopted 1 feat-x in-review
 run
 check "人がカードを戻したら起動する" launched pr-1
+
+setup "setup script があるかを Orca から取れない"
+mainrepo
+sha=$(remote_branch feat-x)
+pr 1 feat-x CONFLICTING SUCCESS DIRTY "" false "$sha"
+adopt_config
+run
+adopted 1 feat-x in-review
+: >"$FAKE/repo.json"
+run
+check "無いとは見なさない (起動しない)" no_launch
+echo '{"ok":false,"error":{"code":"x"}}' >"$FAKE/repo.json"
+run
+check "失敗の返事でも、無いとは見なさない" no_launch
+check "ready にしない" [ "$(cut -f2 "$S/adopts.tsv" | tr '\n' ' ')" = "creating created " ]
+
+setup "branch を切り替えたあと、記録を書く前に落ちた"
+mainrepo
+sha=$(remote_branch feat-x)
+pr 1 feat-x CONFLICTING SUCCESS DIRTY "" false "$sha"
+adopt_config
+echo '{"result":{"repo":{"hookSettings":{"scripts":{"setup":"make setup"}}}}}' >"$FAKE/repo.json"
+printf '%s\tcreating\to/r#1\t%s\n' "$(/bin/date +%s)" "$sha" >"$S/adopts.tsv"
+git -C "$M" fetch -q origin feat-x:feat-x
+git -C "$M" worktree add -q "$ORCA_ROOT/r/pr-1" feat-x
+adopted 1 feat-x in-progress
+echo '{"result":{"terminal":{"tail":["installing dependencies..."]}}}' >"$FAKE/read.json"
+term term_setup pr-1 | terms
+run
+check "setup が終わるまで起動しない" no_launch
+check "もう 1 つは作らない" no_create
+echo '{"result":{"terminal":{"tail":["Orca setup done: ok"]}}}' >"$FAKE/read.json"
+run
+check "終わった印が出たら起動する" launched pr-1
 
 setup "作った worktree と DRY_RUN"
 mainrepo

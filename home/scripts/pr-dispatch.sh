@@ -62,7 +62,7 @@ LAUNCH_UNKNOWN_AFTER="${LAUNCH_UNKNOWN_AFTER:-1800}"
 #   max_worktrees=<数>  Orca の worktree (主 checkout 以外) がこの数に達していたら作らない。無ければ作らない
 CONFIG_FILE="$STATE_ROOT/pr-dispatch/config"
 # worktree を作った記録 (追記のみ)。<時刻> <creating|created|ready|fail|refused> <PR> <head の SHA>
-# created は作れた、ready は setup が終わった (か、setup の無いリポ)。ready になるまで、その worktree には起動しない。
+# created は作れた、ready は setup が終わった (か、setup の無いリポ)。creating / created のあいだは、その worktree に起動しない。
 ADOPTS_FILE="$STATE_ROOT/pr-dispatch/adopts.tsv"
 # これより古い PR には worktree を作らない (日)。放置された PR のために環境を立ち上げない。
 # Dependabot が 30 日動きの無い PR の rebase をやめるのを参考にした、独自の線。
@@ -407,10 +407,19 @@ setup_done() {
 # adopt_ready <PR> <worktree> <番号>: この worktree に起動してよいか。自分で作った worktree は、setup が終わるまで待つ
 # (環境を作っている最中にエージェントを動かすと、依存の導入などが重なる)。作っていない worktree は、いつでも 0。
 adopt_ready() {
-    local st="" t=""
+    local st="" t="" main
     IFS=$'\t' read -r st _ t <<<"$(adopt_last "$1")" || true
-    [ "$st" = "created" ] || return 0
+    # creating も待つ。branch を切り替えたあと、created を書く前に落ちると、記録は creating のまま worktree だけが出来ている。
+    case "$st" in created | creating) ;; *) return 0 ;; esac
     [ "$DRY_RUN" != "1" ] || return 1
+    # setup script の無いリポは、待つものが無い。無いと判断するのは、Orca の返事を読めて、script が空のときだけ
+    # (取れなかったときに「無い」と見なすと、setup の最中に起動してしまう)。
+    main=$(printf '%s' "$mains" | awk -F'\t' -v s="${1%#*}" '$1 == s { print $2; exit }')
+    if [ -n "$main" ] && orca repo show --repo "path:$main" --json 2>/dev/null |
+        jq -e '(.result.repo | type == "object") and ((.result.repo.hookSettings.scripts.setup // "") == "")' >/dev/null 2>&1; then
+        adopt_log "$1" ready - || true
+        return 0
+    fi
     if setup_done "$2"; then
         adopt_log "$1" ready - || true
         return 0
@@ -604,10 +613,7 @@ adopt_pr() {
     orca_set --worktree "path:$wt" --pr "$num" --workspace-status in-review --display-name "$name" \
         --comment "auto: PR #$num の対応のために worktree を作成" --json ||
         log "WARN: adopt $pr: カードを書けない ($wt)"
-    adopt_log "$pr" created "$oid" || true
-    # setup script の無いリポは、待つものが無い。あるリポは、終わった印が出るまで起動を待つ (adopt_ready)。
-    [ -n "$(orca repo show --repo "path:$main" --json 2>/dev/null | jq -r '.result.repo.hookSettings.scripts.setup // ""' 2>/dev/null)" ] ||
-        adopt_log "$pr" ready - || true
+    adopt_log "$pr" created "$oid" || true # 起動は、setup が終わってから (adopt_ready)
     log "adopt $pr → ${wt#"$ORCA_ROOT"/}"
     return 0
 }
