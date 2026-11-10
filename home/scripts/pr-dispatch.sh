@@ -120,6 +120,10 @@ fi
 
 # ---- 再開。観測より先に動かす ----
 # ロックは持ったまま渡す (agent-resume.sh は自分では取らない)。失敗しても続ける。
+# ロックが指すのは自分の pid だけなので、自分だけが落ちて子が残ると、次の回がロックを回収して子と並んで動く。
+# launchd の下では起きない。ジョブが死ぬと、launchd が同じプロセスグループの残りを kill する
+# (man launchd.plist の AbandonProcessGroup。2026-11-10 に実機で、親だけを kill -9 すると子も 2 秒以内に消えるのを確かめた)。
+# ponytail: 端末から手で動かして親だけを kill したときは守られない。そういう使い方をするなら、子の pid もロックに持たせる
 # 再開しそこねたセッションの worktree は、下の「前の起動の印」で飛ばす。
 if [ "$braked" = 0 ]; then
     DISPATCH_LOCK_HELD=1 STATE_ROOT="$STATE_ROOT" bash "$(dirname "${BASH_SOURCE[0]}")/agent-resume.sh" ||
