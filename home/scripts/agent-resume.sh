@@ -42,16 +42,65 @@ if [ "${1:-}" = "launch" ]; then
 fi
 
 # launchd の PATH は /usr/sbin:/usr/bin:/sbin:/bin だけで、orca も jq も入らない。
-PATH="/etc/profiles/per-user/${USER}/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+# 後ろに足す (worktree-gc.sh と同じ)。テストが偽の orca を先に効かせられるようにするため。
+PATH="$PATH:/etc/profiles/per-user/${USER}/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 export PATH
 export LC_ALL=en_US.UTF-8
 
 STATE_DIR="${STATE_DIR:-$HOME/Library/Application Support/agent-resume}"
+CLAUDE_HOME="${CLAUDE_HOME:-$HOME/.claude}"
 # 再開の間隔。ログイン直後に claude を一斉に立ち上げて、Orca のターミナル起動の制限に掛からないため。
 LAUNCH_INTERVAL="${LAUNCH_INTERVAL:-5}"
 DRY_RUN="${DRY_RUN:-0}"
 
 log() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
+
+# pr-dispatch.sh と同時には動かない。再開を依頼している間に、同じ worktree へ PR 対応のエージェントを
+# 起動させないため。DRY_RUN は何も起動しないので、ロックを取らない。
+# shellcheck source=home/scripts/dispatch-lock.sh
+. "$(dirname "${BASH_SOURCE[0]}")/dispatch-lock.sh"
+if [ "$DRY_RUN" != "1" ]; then
+    dispatch_lock || exit 0
+fi
+
+# 指示を渡して再開したタブの記録。1 行が <handle> <paneKey> <worktreeId> <sid> <時刻> (タブ区切り)。
+# pr-dispatch.sh が、そのタブに指示が入るまで同じ worktree への起動を待つために読む (今はまだ書くだけ)。
+# 手が空いていたセッションは会話を開くだけで自分からは動かないので、書かない。
+PENDING_FILE="$STATE_DIR/resume-pending.tsv"
+
+# open_tab <worktreeId> <sid> <kind> <cwd>: 再開のタブを作る。作れたら 0。
+# タブを作る前に handle の無い行 (- -) を書き、作れたら handle と paneKey を補う。作った直後に落ちても、
+# 再開を依頼したかもしれないという記録が残る。Orca が失敗を返したときだけ行を消す。返事が読めないときは残す。
+open_tab() {
+    local wtid=$1 sid=$2 kind=$3 cwd=$4 now out rc=0 handle pane
+    now=$(date +%s)
+    if [ "$kind" != "idle" ]; then
+        # 同じセッションの handle の無い行は 1 つまで (失敗して次の回に試し直しても増えない)。
+        pending_fill "$wtid" "$sid" "" "" ""
+        printf -- '-\t-\t%s\t%s\t%s\n' "$wtid" "$sid" "$now" >>"$PENDING_FILE"
+    fi
+    out=$(orca terminal create --worktree "id:$wtid" --title "再開" \
+        --command "bash '${BASH_SOURCE[0]}' launch '$sid' '$kind' '$cwd'" --json 2>/dev/null) || rc=$?
+    [ "$kind" != "idle" ] || return "$rc"
+    handle=$(jq -r '.result.terminal.handle // empty' <<<"$out" 2>/dev/null || true)
+    pane=$(jq -r '.result.terminal.paneKey // empty' <<<"$out" 2>/dev/null || true)
+    if [ "$rc" = 0 ] && [ -n "$handle" ]; then
+        pending_fill "$wtid" "$sid" "$now" "$handle" "${pane:--}"
+    elif [ "$(jq -r '.ok' <<<"$out" 2>/dev/null || true)" = "false" ]; then
+        pending_fill "$wtid" "$sid" "$now" "" ""
+    fi
+    return "$rc"
+}
+
+# pending_fill <worktreeId> <sid> <時刻> <handle> <paneKey>: handle の無い行に handle と paneKey を補う。
+# handle が空なら、その行を消す (時刻も空なら、そのセッションの handle の無い行を全部消す)。
+pending_fill() {
+    touch "$PENDING_FILE"
+    awk -F'\t' -v OFS='\t' -v w="$1" -v s="$2" -v t="$3" -v h="$4" -v p="$5" '
+        $1 == "-" && $3 == w && $4 == s && (t == "" || $5 == t) { if (h == "") next; $1 = h; $2 = p }
+        { print }' "$PENDING_FILE" >"$PENDING_FILE.tmp"
+    mv "$PENDING_FILE.tmp" "$PENDING_FILE"
+}
 
 # 会話記録の末尾から、止まったときの状態を question / work / idle で返す。
 classify() {
@@ -120,8 +169,7 @@ for f in "$STATE_DIR/sessions"/*; do
     # 先に印をどける。再開したセッションの SessionStart が同じ名前で新しい印を書くので、
     # 起動の後で消すと新しい印を消しかねない。
     mv "$f" "$STATE_DIR/resumed/$sid"
-    if orca terminal create --worktree "id:$wtid" --title "再開" \
-        --command "bash '${BASH_SOURCE[0]}' launch '$sid' '$kind' '$cwd'" --json >/dev/null; then
+    if open_tab "$wtid" "$sid" "$kind" "$cwd"; then
         log "resume $sid ($kind) → $cwd"
     else
         log "failed to resume $sid → $cwd"
@@ -143,7 +191,7 @@ while IFS=$'\t' read -r wtid wt; do
     printf '%s' "$launched" | grep -qxF -- "$wtid" && continue
 
     # 最新の対話セッション (claude -p の sdk-cli は除く)。
-    dir="$HOME/.claude/projects/$(printf '%s' "$wt" | sed 's/[^A-Za-z0-9]/-/g')"
+    dir="$CLAUDE_HOME/projects/$(printf '%s' "$wt" | sed 's/[^A-Za-z0-9]/-/g')"
     sid=-
     while IFS= read -r x; do
         # 記録は行単位で読み、最初に entrypoint が出たところで止める (先頭の 1 行が長くても切らない)。
@@ -166,8 +214,7 @@ while IFS=$'\t' read -r wtid wt; do
         continue
     fi
     # 記録は開けたときだけ。失敗したものは次の回にもう一度試す。
-    if orca terminal create --worktree "id:$wtid" --title "再開" \
-        --command "bash '${BASH_SOURCE[0]}' launch '$sid' recheck '$wt'" --json >/dev/null; then
+    if open_tab "$wtid" "$sid" recheck "$wt"; then
         printf '%s\n' "$key" >>"$ORPHANS_FILE"
         log "recheck $sid → $wt"
     else

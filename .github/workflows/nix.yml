@@ -46,6 +46,12 @@ jobs:
       # 無人で worktree とエージェントを起動するスクリプトなので、勝手に起動しないことと復旧を CI で見張る。
       - name: issue-autopilot script
         run: bash tests/issue-autopilot.sh
+      # 2 つのスクリプトが同じ worktree にエージェントを同時に起動しないことと、残ったロックで止まり続けないことを CI で見張る。
+      - name: dispatch-lock
+        run: bash tests/dispatch-lock.sh
+      # 再開を依頼したのに記録が無い、を作らないことを CI で見張る (記録は pr-dispatch が起動を待つのに使う)。
+      - name: agent-resume script
+        run: bash tests/agent-resume.sh
 
   # ── 現 Mac と同系統の macOS 26 / arm64 で実ビルド ─────────
   build-darwin:
