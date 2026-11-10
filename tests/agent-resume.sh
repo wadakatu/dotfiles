@@ -26,7 +26,7 @@ cat >"$base/bin/orca" <<'EOF'
 echo "orca $*" >>"$FAKE/calls"
 case "$1 $2" in
     "terminal create")
-        cat "$STATE_DIR/resume-pending.tsv" >"$FAKE/pending-at-create" 2>/dev/null
+        cat "$STATE_ROOT/agent-resume/resume-pending.tsv" >"$FAKE/pending-at-create" 2>/dev/null
         cat "$FAKE/create-response" 2>/dev/null
         exit "$(cat "$FAKE/create-rc" 2>/dev/null || echo 0)"
         ;;
@@ -49,7 +49,9 @@ for c in orca sysctl; do
 done
 
 export FAKE="$base/fake" CLAUDE_HOME="$base/claude"
-export STATE_DIR="$base/state" DISPATCH_LOCK="$base/lock" DISPATCH_LOCK_WAIT=0 LAUNCH_INTERVAL=0
+# 状態は全部この下に置かせる。向け忘れると、スクリプトが実際の状態 (セッションの印など) を書き換える。
+export STATE_ROOT="$base/root" DISPATCH_LOCK_WAIT=0 LAUNCH_INTERVAL=0
+STATE_DIR="$STATE_ROOT/agent-resume"
 pending="$STATE_DIR/resume-pending.tsv"
 wt="$base/wt"
 wtid="repo::$wt"

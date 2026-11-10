@@ -9,7 +9,14 @@
 #   入力待ち (waiting) のエージェント → Needs decision
 #   文章で質問して止まったエージェント (Orca では done に見える) → 未読と「要確認」のコメントだけ付ける
 #   PR がマージ・クローズされた worktree → Done (worktree-gc が消すまでの置き場所)
-# launchd から数分ごとに実行される。定義は home/pr-dispatch.nix。
+# launchd からログイン時と数分ごとに実行される。定義は home/pr-dispatch.nix。
+#
+# 1 回の流れ: ロック → 再開 (agent-resume.sh) → 観測 (Orca と GitHub) → 再開待ちの解除 → PR 対応の起動 → ボード。
+# 再開を先に、同じロックの中で動かすのは、再開するセッションと PR 対応のエージェントを同じ worktree に並べないため。
+# 観測が欠けた回 (Orca や GitHub に届かない、一覧が途中で切れた) は何も起動しない。
+# 結果の分からない起動は、自動ではやり直さない (起動できていたら 2 体並ぶ)。
+#
+# 止めるとき: ~/Library/Application Support/pr-dispatch/BRAKE を置く (空でよい)。再開と起動が止まり、ボードの更新は続く。
 #
 # 手で確認するとき:
 #   DRY_RUN=1 ~/www/personal/dotfiles/home/scripts/pr-dispatch.sh
@@ -24,16 +31,30 @@ export PATH
 export LC_ALL=en_US.UTF-8
 
 ORCA_ROOT="${ORCA_ROOT:-$HOME/orca/workspaces}"
+# 状態の置き場所。テストはこの 1 つを一時ディレクトリに向ける (dispatch-lock.sh のコメントを参照)。
+STATE_ROOT="${STATE_ROOT:-$HOME/Library/Application Support}"
 # 起動済みの (PR, 対応, 状態) を 1 行ずつ覚える。直せなかった状態に周期ごと起動し直さないため。
 # 状態が変われば (新しい push、新しいレビュー) キーが変わり、また起動する。
-STATE_FILE="${STATE_FILE:-$HOME/Library/Application Support/pr-dispatch/dispatched.tsv}"
+STATE_FILE="$STATE_ROOT/pr-dispatch/dispatched.tsv"
 # ボードに書いた (worktree, 理由, 状態) を 1 行ずつ覚える。数分ごとに同じ状態を書き直して、
 # 人が消した未読の印を付け直さないため。
-BOARD_FILE="${BOARD_FILE:-$HOME/Library/Application Support/pr-dispatch/board.tsv}"
+BOARD_FILE="$STATE_ROOT/pr-dispatch/board.tsv"
 # 1 回の実行で起動する上限。base の更新で conflict が一斉に出たときに、エージェントを並べすぎない。
 MAX_LAUNCHES="${MAX_LAUNCHES:-3}"
 # 同じ PR に同じ対応を起動する回数の上限。超えたら人に上げる (自動の修正が空回りし続けないため)。
 MAX_ATTEMPTS="${MAX_ATTEMPTS:-3}"
+# 起動の前後を 1 行ずつ足す (追記のみ)。<時刻> <launching|launched|lost|fail> <operationId|-> <PR> <対応> <状態>
+# 起動の返事を失ったときに、新しく起動し直さず、同じ依頼を出し直すための記録。
+LAUNCHES_FILE="$STATE_ROOT/pr-dispatch/launches.tsv"
+# あれば、再開と起動を全部止める (ボードの更新は続ける)。
+BRAKE_FILE="$STATE_ROOT/pr-dispatch/BRAKE"
+# agent-resume.sh の状態。指示を渡して再開したタブの記録 (resume-pending.tsv) と、セッションの印 (sessions/)。
+RESUME_STATE_DIR="$STATE_ROOT/agent-resume"
+PENDING_FILE="$RESUME_STATE_DIR/resume-pending.tsv"
+# 再開したセッションに指示が入らないまま、これだけ経ったらカードで知らせる (秒)。待ち自体は時間では解かない。
+PENDING_NOTICE_AFTER="${PENDING_NOTICE_AFTER:-3600}"
+# 起動の結果が分からないまま、これだけ経ったら人に上げる (秒)。
+LAUNCH_UNKNOWN_AFTER="${LAUNCH_UNKNOWN_AFTER:-1800}"
 DRY_RUN="${DRY_RUN:-0}"
 VERBOSE="${VERBOSE:-0}"
 
@@ -54,10 +75,13 @@ board() {
         flagged=$((flagged + 1))
         return 0
     fi
-    local args=(--worktree "path:$wt" --comment "$comment" --json)
+    local args=(--worktree "path:$wt" --comment "$comment" --json) out
     [ "$status" = "completed" ] || args+=(--unread)
     [ "$status" = "-" ] || args+=(--workspace-status "$status")
-    if orca worktree set "${args[@]}" >/dev/null 2>&1; then
+    # 列を作り直して内部名が変わると、exit 0 でも warnings が返って列は動かない。
+    # 書けたことにして覚えると、その通知は二度と出ないので、warnings があれば書けていない扱いにする。
+    if out=$(orca worktree set "${args[@]}" 2>/dev/null) &&
+        jq -e '[.. | objects | .warnings? // empty | .[]?] | length == 0' <<<"$out" >/dev/null 2>&1; then
         printf '%s\n' "$key" >>"$BOARD_FILE"
         log "board $reason → ${wt#"$ORCA_ROOT"/}: $comment"
         flagged=$((flagged + 1))
@@ -82,26 +106,47 @@ if [ "$DRY_RUN" != "1" ]; then
     dispatch_lock || exit 0
 fi
 
+braked=0
+if [ -e "$BRAKE_FILE" ]; then
+    braked=1
+    vlog "BRAKE がある。再開と起動は止め、ボードだけ更新する"
+fi
+
 if ! orca status --json 2>/dev/null | jq -e '.result.runtime.reachable == true' >/dev/null 2>&1; then
     log "Orca のランタイムに届かない。見送り (次回に拾う)"
     exit 0
 fi
 
-me=$(gh api user -q .login)
-mkdir -p "$(dirname "$STATE_FILE")" "$(dirname "$BOARD_FILE")"
-touch "$STATE_FILE" "$BOARD_FILE"
+# ---- 再開。観測より先に動かす ----
+# ロックは持ったまま渡す (agent-resume.sh は自分では取らない)。失敗しても続ける。
+# 再開しそこねたセッションの worktree は、下の「前の起動の印」で飛ばす。
+if [ "$braked" = 0 ]; then
+    DISPATCH_LOCK_HELD=1 STATE_ROOT="$STATE_ROOT" bash "$(dirname "${BASH_SOURCE[0]}")/agent-resume.sh" ||
+        log "WARN: agent-resume.sh が失敗した (PR の対応は続ける)"
+fi
+
+me=$(gh api user -q .login 2>/dev/null) || {
+    log "WARN: GitHub に届かない。見送り"
+    exit 0
+}
+mkdir -p "$(dirname "$STATE_FILE")" "$(dirname "$BOARD_FILE")" "$(dirname "$LAUNCHES_FILE")"
+touch "$STATE_FILE" "$BOARD_FILE" "$LAUNCHES_FILE"
 
 # ---- Orca の worktree: "<owner/repo>\t<branch>\t<path>\t<board status>" ----
+wt_json=$(orca worktree list --json 2>/dev/null) || {
+    log "WARN: Orca の worktree の一覧を取れない。見送り"
+    exit 0
+}
 worktrees=""
 while IFS=$'\t' read -r wt_path branch status; do
     [ -n "$branch" ] || continue
     slug=$(git -C "$wt_path" remote get-url origin 2>/dev/null | sed -E 's#^.*github\.com[:/]##; s#\.git$##') || continue
     [ -n "$slug" ] || continue
     worktrees="$worktrees$slug"$'\t'"$branch"$'\t'"$wt_path"$'\t'"$status"$'\n'
-done < <(orca worktree list --json | jq -r --arg root "$ORCA_ROOT" '
+done < <(jq -r --arg root "$ORCA_ROOT" '
     .result.worktrees[]
     | select((.isMainWorktree | not) and (.path | startswith($root + "/")))
-    | [.path, ((.branch // "") | sub("^refs/heads/"; "")), (.workspaceStatus // "")] | @tsv')
+    | [.path, ((.branch // "") | sub("^refs/heads/"; "")), (.workspaceStatus // "")] | @tsv' <<<"$wt_json")
 
 if [ -z "$worktrees" ]; then
     log "Orca の worktree が無い。終了"
@@ -111,10 +156,13 @@ fi
 # ---- PR の状態を 1 回の問い合わせで取る (検索は worktree のあるリポに絞る) ----
 repos=$(printf '%s' "$worktrees" | cut -f1 | sort -u | sed 's/^/repo:/' | tr '\n' ' ')
 search="is:pr is:open draft:false archived:false author:$me $repos"
-# shellcheck disable=SC2016  # $q は GraphQL の変数。シェルに展開させない
-prs_json=$(gh api graphql -f q="$search" -f query='
-query($q: String!) {
-  search(query: $q, type: ISSUE, first: 100) {
+# 100 件を超えても全部読む。--paginate は、$endCursor を受け取り pageInfo を返す query を、ページごとに打ち直す
+# (https://cli.github.com/manual/gh_api)。出力はページごとの JSON が並ぶ。
+# shellcheck disable=SC2016  # $q と $endCursor は GraphQL の変数。シェルに展開させない
+prs_json=$(gh api graphql --paginate -f q="$search" -f query='
+query($q: String!, $endCursor: String) {
+  search(query: $q, type: ISSUE, first: 100, after: $endCursor) {
+    pageInfo { hasNextPage endCursor }
     nodes {
       ... on PullRequest {
         number
@@ -127,6 +175,7 @@ query($q: String!) {
         repository { nameWithOwner }
         commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
         reviewThreads(first: 100) {
+          pageInfo { hasNextPage }
           nodes { isResolved comments(last: 1) { nodes { id author { login } } } }
         }
       }
@@ -138,13 +187,115 @@ query($q: String!) {
 }
 # 未対応のレビュー = 未解決のスレッドのうち、最後の発言が自分以外のもの。その発言 ID の並びを状態に使う。
 # 無いときは "-"。空欄にすると read がタブの連続を 1 つに詰め、後ろの列がずれる。
+# スレッドが 100 を超えて全部は読めていないときは "?" (未対応が無いとは言えないので、その PR には何もしない)。
 prs=$(jq -r --arg me "$me" '.data.search.nodes[]
     | [ .repository.nameWithOwner, .headRefName, (.number | tostring), .url, .headRefOid, .mergeable,
         (.commits.nodes[0].commit.statusCheckRollup.state // "NONE"),
-        ([.reviewThreads.nodes[] | select((.isResolved | not) and (.comments.nodes[0].author.login != $me))
-          | .comments.nodes[0].id] | sort | join(",") | if . == "" then "-" else . end),
-        .mergeStateStatus, (if .autoMergeRequest then "auto" else "manual" end) ] | @tsv' <<<"$prs_json")
-ps_json=$(orca worktree ps --json 2>/dev/null || echo '{}')
+        (if .reviewThreads.pageInfo.hasNextPage then "?" else
+          ([.reviewThreads.nodes[] | select((.isResolved | not) and (.comments.nodes[0].author.login != $me))
+            | .comments.nodes[0].id] | sort | join(",") | if . == "" then "-" else . end) end),
+        .mergeStateStatus, (if .autoMergeRequest then "auto" else "manual" end) ] | @tsv' <<<"$prs_json") || {
+    log "WARN: GitHub の返事を読めない。見送り"
+    exit 0
+}
+
+# ---- Orca の観測: 端末 → エージェントの順に取る ----
+# 端末の一覧は、再開待ちの記録があるときだけ要る。取れない・途中で切れているときは、この回は何も解除しない。
+terms_json=""
+if [ -s "$PENDING_FILE" ]; then
+    terms_json=$(orca terminal list --json 2>/dev/null) || terms_json=""
+    jq -e '(.result.terminals | type == "array") and (.result.truncated != true)' <<<"$terms_json" >/dev/null 2>&1 || terms_json=""
+fi
+# エージェントの状態が分からない回は、何も起動しない。
+# 以前は取れないと {} で続け、動いているエージェントの居る worktree にも起動していた。
+ps_json=$(orca worktree ps --json 2>/dev/null) || ps_json=""
+if ! jq -e '(.result.worktrees | type == "array") and (.result.truncated != true)' <<<"$ps_json" >/dev/null 2>&1; then
+    log "WARN: Orca のエージェントの状態を取れない (失敗か、一覧が途中で切れた)。見送り"
+    exit 0
+fi
+wt_path_of() { jq -r --arg w "$1" '[.result.worktrees[] | select(.worktreeId == $w) | .path][0] // empty' <<<"$ps_json"; }
+
+# ---- 再開待ち ----
+# agent-resume.sh は、指示を渡して再開したタブを resume-pending.tsv に書く。そのタブに指示が入るまで
+# (Orca がエージェントの prompt を返すまで)、同じ worktree には起動しない。
+# 解除は、この回に取った観測だけで決める。state では決めない (数秒で終わる指示の working は、数分おきの観測では見逃す)。
+# hold: この回は起動しない worktree の path。この回に解除した行の worktree も含める。
+hold=""
+if [ -s "$PENDING_FILE" ]; then
+    keep=""
+    now=$(date +%s)
+    while IFS=$'\t' read -r handle pane wtid sid t; do
+        [ -n "$wtid" ] || continue
+        case "$t" in '' | *[!0-9]*) t=0 ;; esac # 時刻が読めない行は、古いものとして扱う (すぐ知らせる)
+        path=$(wt_path_of "$wtid")
+        [ -z "$path" ] || hold="$hold$path"$'\n'
+        why=""
+        if [ -n "$terms_json" ]; then
+            if [ "$handle" = "-" ]; then
+                # タブを作れたか分からない行。その worktree の端末が 1 つも無くなるまで待つ (タイトルは実行中に変わるので見ない)。
+                jq -e --arg w "$wtid" '[.result.terminals[] | select(.worktreeId == $w)] | length == 0' <<<"$terms_json" >/dev/null && why="端末が無い"
+            else
+                jq -e --arg h "$handle" '[.result.terminals[] | select(.handle == $h)] | length == 0' <<<"$terms_json" >/dev/null && why="タブが閉じた"
+            fi
+        fi
+        if [ -z "$why" ] && [ "$handle" != "-" ] && [ "$pane" != "-" ] &&
+            jq -e --arg p "$pane" '[.result.worktrees[].agents[]? | select(.paneKey == $p and ((.prompt // "") != ""))] | length > 0' <<<"$ps_json" >/dev/null; then
+            why="指示が入った"
+        fi
+        if [ -n "$why" ]; then
+            log "再開待ちを解除 $sid ($why)"
+            continue
+        fi
+        keep="$keep$handle"$'\t'"$pane"$'\t'"$wtid"$'\t'"$sid"$'\t'"$t"$'\n'
+        if [ -n "$path" ] && [ "$((now - t))" -ge "$PENDING_NOTICE_AFTER" ]; then
+            board "$path" resume-pending "$sid:$t" - "再開したセッションが始まらない。タブを閉じると PR の自動対応が再開する"
+        fi
+    done <"$PENDING_FILE"
+    if [ "$DRY_RUN" != "1" ]; then
+        printf '%s' "$keep" >"$PENDING_FILE.tmp" && mv "$PENDING_FILE.tmp" "$PENDING_FILE"
+    fi
+fi
+# 前の起動の印が残っている worktree も待つ。再開はこの回の最初に済ませているので、残るのは再開しそこねたとき。
+boot=$(sysctl -n kern.bootsessionuuid 2>/dev/null || true)
+for f in "$RESUME_STATE_DIR/sessions"/*; do
+    [ -f "$f" ] || continue
+    IFS=$'\t' read -r b _ wtid _ <"$f" || continue
+    [ "$b" = "$boot" ] && continue
+    path=$(wt_path_of "$wtid")
+    [ -z "$path" ] || hold="$hold$path"$'\n'
+done
+
+# ---- 起動の記録 ----
+launch_log() { printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "$2" "$3" "$1" >>"$LAUNCHES_FILE"; }
+# launch_last <key>: その (PR, 対応, 状態) の最後の行の "<時刻> <状態> <operationId>"。無ければ空。
+launch_last() {
+    awk -F'\t' -v k="$1" '$4 FS $5 FS $6 == k { l = $1 FS $2 FS $3 } END { if (l != "") print l }' "$LAUNCHES_FILE"
+}
+# launch_agent <key> <worktree> <prompt> <operationId|->: エージェントを起動する。起動できたら 0。
+# 起動の前に launching、結果が分かったら launched / lost / fail を書く。どれも書かれなければ結果不明。
+launch_agent() {
+    local key=$1 wt=$2 prompt=$3 op=$4 out rc=0 newop
+    local args=(agent launch --agent claude --worktree "path:$wt" --prompt "$prompt" --json)
+    # 返事を失った起動は、新しく起動し直さず、同じ依頼を出し直す (orca agent launch --help の --retry-launch)。
+    [ "$op" = "-" ] || args+=(--retry-launch "$op")
+    launch_log "$key" launching "$op" || {
+        log "WARN: 起動の記録を書けない。起動しない"
+        return 1
+    }
+    # --retry-launch は同じディレクトリからの再送を求めるので、呼び出し元の cwd によらず固定する。
+    out=$(cd "$HOME" && orca "${args[@]}" 2>/dev/null) || rc=$?
+    if [ "$rc" = 0 ] && jq -e '.ok == true' <<<"$out" >/dev/null 2>&1; then
+        launch_log "$key" launched - || true
+        return 0
+    fi
+    newop=$(jq -r '[.. | .operationId? // empty | strings][0] // empty' <<<"$out" 2>/dev/null || true)
+    if [ -n "$newop" ]; then
+        launch_log "$key" lost "$newop" || true
+    elif [ "$(jq -r '.ok' <<<"$out" 2>/dev/null || true)" = "false" ]; then
+        launch_log "$key" fail - || true
+    fi
+    return 1
+}
 
 launched=0
 while IFS=$'\t' read -r slug branch num url head mergeable ci threads merge_state merge_mode; do
@@ -159,6 +310,9 @@ while IFS=$'\t' read -r slug branch num url head mergeable ci threads merge_stat
         action="sync-pr"; sig="$head"
     elif [ "$ci" = "FAILURE" ] || [ "$ci" = "ERROR" ]; then
         action="fix-ci"; sig="$head"
+    elif [ "$threads" = "?" ]; then
+        vlog "keep  $pr (レビューのスレッドが 100 を超えて全部は読めない。何もしない)"
+        continue
     elif [ "$threads" != "-" ]; then
         action="review-pr-comments"; sig="$head:$threads"
     else
@@ -169,22 +323,65 @@ while IFS=$'\t' read -r slug branch num url head mergeable ci threads merge_stat
         continue
     fi
 
+    [ "$braked" = 0 ] || continue
     if [ "$board" = "needs-decision" ]; then
         vlog "keep  $pr ($action 候補だが Needs decision でユーザーの判断待ち)"
         continue
     fi
-    busy=$(jq -r --arg p "$wt" '[.result.worktrees[]? | select(.path == $p) | .agents[]?.state | select(. != "done")] | join(",")' <<<"$ps_json")
+    if printf '%s' "$hold" | grep -qxF -- "$wt"; then
+        vlog "keep  $pr ($action 候補だが、再開したセッションに指示が入るのを待っている)"
+        continue
+    fi
+    key="$pr"$'\t'"$action"$'\t'"$sig"
+
+    # 前の回の起動がどうなったかを先に見る。結果が分からないまま (launching で止まっている) なら、起動し直さない。
+    l_time="" l_state="" l_op=""
+    IFS=$'\t' read -r l_time l_state l_op <<<"$(launch_last "$key")" || true
+    op=-
+    case "$l_state" in
+    launching)
+        if jq -e --arg p "$wt" --argjson t "$((l_time * 1000))" \
+            '[.result.worktrees[] | select(.path == $p) | .agents[]? | select((.stateStartedAt // 0) >= $t)] | length > 0' <<<"$ps_json" >/dev/null; then
+            # 起動の後に動き出したエージェントが居る (前から居て終わっているエージェントは数えない)。起動できていた。
+            if [ "$DRY_RUN" != "1" ]; then
+                launch_log "$key" launched - || true
+                grep -qxF -- "$key" "$STATE_FILE" || printf '%s\n' "$key" >>"$STATE_FILE"
+            fi
+            log "launch $action → $pr (返事は読めなかったが、起動後のエージェントを確認)"
+        elif [ "$(($(date +%s) - l_time))" -ge "$LAUNCH_UNKNOWN_AFTER" ]; then
+            board "$wt" "launch-unknown-$action" "$sig" needs-decision "自動の /$action を起動できたか分からない: #$num"
+        else
+            vlog "keep  $pr ($action: 前の起動の結果が分からない。起動し直さずに待つ)"
+        fi
+        continue
+        ;;
+    lost) op=$l_op ;;
+    esac
+
+    busy=$(jq -r --arg p "$wt" '[.result.worktrees[] | select(.path == $p) | .agents[]?.state | select(. != "done")] | join(",")' <<<"$ps_json")
     if [ -n "$busy" ]; then
         vlog "keep  $pr ($action 候補だがエージェントが $busy)"
         continue
     fi
-    key="$pr"$'\t'"$action"$'\t'"$sig"
-    if grep -qxF -- "$key" "$STATE_FILE"; then
-        continue
-    fi
+    # 回数の上限を、起動済みの状態かどうかより先に見る。後に見ると、最後の起動が何も push せずに終わったとき
+    # (状態が変わらない) に、起動済みとして飛ばし続け、人に上がらない。
     attempts=$(grep -cF -- "$pr"$'\t'"$action"$'\t' "$STATE_FILE" || true)
     if [ "$attempts" -ge "$MAX_ATTEMPTS" ]; then
         board "$wt" "give-up-$action" "$sig" needs-decision "自動の /$action を $attempts 回起動しても直らない: #$num"
+        continue
+    fi
+    if grep -qxF -- "$key" "$STATE_FILE"; then
+        continue
+    fi
+    fails=$(awk -F'\t' -v k="$key" '$2 == "fail" && $4 FS $5 FS $6 == k' "$LAUNCHES_FILE" | wc -l | tr -d ' ')
+    if [ "$fails" -ge "$MAX_ATTEMPTS" ]; then
+        board "$wt" "launch-fail-$action" "$sig" needs-decision "自動の /$action の起動に $fails 回失敗: #$num"
+        continue
+    fi
+    # 人の作業を踏まない。エージェントが居なくても、未コミットの変更がある worktree には起動しない
+    # (状態を読めないときも起動しない)。
+    if ! dirty=$(git -C "$wt" status --porcelain 2>/dev/null) || [ -n "$dirty" ]; then
+        board "$wt" "dirty-$action" "$sig" - "未コミットの変更があるので、自動の /$action を見送り: #$num"
         continue
     fi
     if [ "$launched" -ge "$MAX_LAUNCHES" ]; then
@@ -200,13 +397,13 @@ while IFS=$'\t' read -r slug branch num url head mergeable ci threads merge_stat
         launched=$((launched + 1))
         continue
     fi
-    if orca agent launch --agent claude --worktree "path:$wt" --prompt "$prompt" --json 2>/dev/null | jq -e '.ok == true' >/dev/null; then
+    if launch_agent "$key" "$wt" "$prompt" "$op"; then
         printf '%s\n' "$key" >>"$STATE_FILE"
         orca worktree set --worktree "path:$wt" --comment "auto: $action (#$num)" --json >/dev/null 2>&1 || true
         log "launch $action → $pr"
         launched=$((launched + 1))
     else
-        log "WARN: 起動に失敗 $action → $pr (次回に再試行)"
+        log "WARN: 起動できなかった $action → $pr ($(launch_last "$key" | cut -f2)。失敗なら次回に試し直し、返事を失ったなら同じ依頼を出し直す。分からなければ起動し直さない)"
     fi
 done <<<"$prs"
 
@@ -214,11 +411,13 @@ done <<<"$prs"
 # worktree を消すのは worktree-gc (1 時間ごと) なので、それまでの間 In progress や In review に残って紛らわしい。
 # GitHub Projects の既定の自動化 (マージされた PR を Done にする) と同じ形。
 # worktree-gc が消さないもの (エージェントが作業中・入力待ち) と、同じブランチで OPEN の PR があるものは動かさない。
-closed_since=$(date -v-14d +%Y-%m-%d)
+# macOS の date は -v、テストを回す CI (Linux) の date は -d。
+closed_since=$(date -v-14d +%Y-%m-%d 2>/dev/null || date -d '14 days ago' +%Y-%m-%d)
 # shellcheck disable=SC2016  # $q は GraphQL の変数。シェルに展開させない
-closed_prs=$(gh api graphql -f q="is:pr is:closed author:$me closed:>=$closed_since $repos" -f query='
-query($q: String!) {
-  search(query: $q, type: ISSUE, first: 100) {
+closed_prs=$(gh api graphql --paginate -f q="is:pr is:closed author:$me closed:>=$closed_since $repos" -f query='
+query($q: String!, $endCursor: String) {
+  search(query: $q, type: ISSUE, first: 100, after: $endCursor) {
+    pageInfo { hasNextPage endCursor }
     nodes { ... on PullRequest { number state headRefName repository { nameWithOwner } } }
   }
 }' --jq '.data.search.nodes[] | [.repository.nameWithOwner, .headRefName, (.number | tostring), .state] | @tsv' 2>/dev/null) || {

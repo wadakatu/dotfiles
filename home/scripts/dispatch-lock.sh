@@ -11,7 +11,11 @@
 # ロックは「持ち主の pid を指す symlink」。symlink は作ると同時に中身 (pid) が入るので、
 # 「ロックはあるが持ち主がまだ書かれていない」瞬間が無い (ディレクトリ + pid ファイルだと、その瞬間に
 # 別のプロセスが「持ち主の無い古いロック」と見て消せてしまう)。
-DISPATCH_LOCK="${DISPATCH_LOCK:-$HOME/Library/Application Support/pr-dispatch/lock}"
+# 状態の置き場所は STATE_ROOT から決める (pr-dispatch.sh と agent-resume.sh も同じ)。
+# テストはこの 1 つを一時ディレクトリに向ける。個別のパスを差し替える形だと、パスを足したときに差し替え漏れが出て、
+# テストが実際の状態を書き換える。
+STATE_ROOT="${STATE_ROOT:-$HOME/Library/Application Support}"
+DISPATCH_LOCK="$STATE_ROOT/pr-dispatch/lock"
 # 相手が終わるのを待つ秒数。2 つの LaunchAgent は同じ間隔で同時に起きるので、待たないと毎回同じ側が負ける。
 DISPATCH_LOCK_WAIT="${DISPATCH_LOCK_WAIT:-60}"
 

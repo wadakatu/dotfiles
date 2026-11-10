@@ -57,10 +57,12 @@ for c in orca gh claude sysctl; do
 done
 
 export FAKE="$base/fake"
-export DISPATCH_LOCK="$base/state/lock" DISPATCH_LOCK_WAIT=0
-export STATE_DIR="$base/state/agent-resume" STATE_FILE="$base/state/dispatched.tsv" BOARD_FILE="$base/state/board.tsv"
+# 状態は全部この下に置かせる。向け忘れると、スクリプトが実際の状態 (セッションの印など) を書き換える。
+export STATE_ROOT="$base/state" DISPATCH_LOCK_WAIT=0
+DISPATCH_LOCK="$STATE_ROOT/pr-dispatch/lock"
+STATE_DIR="$STATE_ROOT/agent-resume"
 export ORCA_ROOT="$base/workspaces" LAUNCH_INTERVAL=0
-mkdir -p "$FAKE" "$base/state" "$ORCA_ROOT"
+mkdir -p "$FAKE" "$STATE_ROOT/pr-dispatch" "$ORCA_ROOT"
 
 reset() { # 記録とロックを消す
     # wait で回収しておく (しないと、bash が「Terminated」をテストの出力に混ぜる)。
@@ -282,7 +284,8 @@ check "pr-dispatch がロックを持つ (テストの前提)" owner "$dpid"
 WHO=resume bash "$resume" >"$base/out" 2>&1
 check "待たない設定なら見送る" not_called "resume orca"
 WHO=resume DISPATCH_LOCK_WAIT=20 bash "$resume" >"$base/out" 2>&1
-check "待てば、終わった後に動く" called "resume orca terminal create"
+check "待てば、終わった後に動く" called "resume orca worktree ps"
+check "再開は pr-dispatch が自分の回の中で済ませている" called "dispatch orca terminal create"
 # pr-dispatch の最後の呼び出しより後に、agent-resume の最初の呼び出しが来る。
 check "重ならない" [ "$(grep -n '^dispatch ' "$FAKE/calls" | tail -1 | cut -d: -f1)" -lt "$(grep -n '^resume ' "$FAKE/calls" | head -1 | cut -d: -f1)" ]
 wait "$dpid" 2>/dev/null

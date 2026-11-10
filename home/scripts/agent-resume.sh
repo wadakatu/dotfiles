@@ -14,7 +14,7 @@
 #
 # あわせて、Needs decision のカードで会話が開いていない (ターミナルが 1 つも無い) worktree は、
 # 最後の対話セッションを開き直し、判断待ちがまだ残っているかを確かめさせる (下の「Needs decision」の節)。
-# launchd からログイン時と 3 分ごとに実行される。定義は home/agent-resume.nix。
+# pr-dispatch.sh が、毎回の最初に呼ぶ (ログイン時と 3 分ごと)。
 #
 # 手で確認するとき:
 #   DRY_RUN=1 ~/www/personal/dotfiles/home/scripts/agent-resume.sh
@@ -47,7 +47,9 @@ PATH="$PATH:/etc/profiles/per-user/${USER}/bin:/usr/local/bin:/usr/bin:/bin:/usr
 export PATH
 export LC_ALL=en_US.UTF-8
 
-STATE_DIR="${STATE_DIR:-$HOME/Library/Application Support/agent-resume}"
+# 状態の置き場所。テストは STATE_ROOT を一時ディレクトリに向ける (dispatch-lock.sh のコメントを参照)。
+STATE_ROOT="${STATE_ROOT:-$HOME/Library/Application Support}"
+STATE_DIR="$STATE_ROOT/agent-resume"
 CLAUDE_HOME="${CLAUDE_HOME:-$HOME/.claude}"
 # 再開の間隔。ログイン直後に claude を一斉に立ち上げて、Orca のターミナル起動の制限に掛からないため。
 LAUNCH_INTERVAL="${LAUNCH_INTERVAL:-5}"
@@ -56,15 +58,16 @@ DRY_RUN="${DRY_RUN:-0}"
 log() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
 
 # pr-dispatch.sh と同時には動かない。再開を依頼している間に、同じ worktree へ PR 対応のエージェントを
-# 起動させないため。DRY_RUN は何も起動しないので、ロックを取らない。
+# 起動させないため。普段は pr-dispatch.sh が、自分のロックを持ったまま毎回の最初に呼ぶ (DISPATCH_LOCK_HELD=1)。
+# 手で動かしたときは自分で取る。DRY_RUN は何も起動しないので、取らない。
 # shellcheck source=home/scripts/dispatch-lock.sh
 . "$(dirname "${BASH_SOURCE[0]}")/dispatch-lock.sh"
-if [ "$DRY_RUN" != "1" ]; then
+if [ "$DRY_RUN" != "1" ] && [ "${DISPATCH_LOCK_HELD:-0}" != "1" ]; then
     dispatch_lock || exit 0
 fi
 
 # 指示を渡して再開したタブの記録。1 行が <handle> <paneKey> <worktreeId> <sid> <時刻> (タブ区切り)。
-# pr-dispatch.sh が、そのタブに指示が入るまで同じ worktree への起動を待つために読む (今はまだ書くだけ)。
+# pr-dispatch.sh が、そのタブに指示が入るまで同じ worktree への起動を待つために読み、指示が入ったら行を消す。
 # 手が空いていたセッションは会話を開くだけで自分からは動かないので、書かない。
 PENDING_FILE="$STATE_DIR/resume-pending.tsv"
 

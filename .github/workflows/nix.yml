@@ -52,6 +52,10 @@ jobs:
       # 再開を依頼したのに記録が無い、を作らないことを CI で見張る (記録は pr-dispatch が起動を待つのに使う)。
       - name: agent-resume script
         run: bash tests/agent-resume.sh
+      # 無人でエージェントを起動するスクリプトなので、起動してはいけないとき (観測が欠けた、人が作業中、
+      # 再開したセッションが始まる前、結果の分からない起動の後) に起動しないことを CI で見張る。
+      - name: pr-dispatch script
+        run: bash tests/pr-dispatch.sh
 
   # ── 現 Mac と同系統の macOS 26 / arm64 で実ビルド ─────────
   build-darwin:
