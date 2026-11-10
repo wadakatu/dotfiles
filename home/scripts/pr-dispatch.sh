@@ -567,6 +567,8 @@ adopt_ready() {
 }
 
 launched=0
+# この回に PR 対応を起動した worktree (改行区切り)。エージェントの状態は回の最初に読んだきりなので、キューの枠の数え方で使う。
+started=""
 while IFS=$'\t' read -r slug branch num url head mergeable ci threads merge_state merge_mode _; do
     [ -n "$slug" ] || continue
     line=$(printf '%s' "$worktrees" | awk -F'\t' -v s="$slug" -v b="$branch" '$1 == s && $2 == b { print; exit }')
@@ -684,6 +686,7 @@ while IFS=$'\t' read -r slug branch num url head mergeable ci threads merge_stat
     if [ "$DRY_RUN" = "1" ]; then
         log "DRY-RUN: launch $action → $pr ($wt)"
         launched=$((launched + 1))
+        started="$started$wt"$'\n'
         continue
     fi
     if launch_agent "$key" "$wt" "$prompt" "$op" "$t0"; then
@@ -691,6 +694,7 @@ while IFS=$'\t' read -r slug branch num url head mergeable ci threads merge_stat
         orca worktree set --worktree "path:$wt" --comment "auto: $action (#$num)" --json >/dev/null 2>&1 || true
         log "launch $action → $pr"
         launched=$((launched + 1))
+        started="$started$wt"$'\n'
     else
         log "WARN: 起動できなかった $action → $pr ($(launch_last "$key" | cut -f2)。失敗なら次回に試し直し、返事を失ったなら同じ依頼を出し直す。分からなければ起動し直さない)"
     fi
@@ -1015,11 +1019,13 @@ query($q: String!, $endCursor: String) {
     n_open=$(printf '%s' "$open_prs" | grep -c . || true)
     # WIP: キュー由来の worktree のうち、open の PR が無い・エージェントが動いている・Needs decision のどれか (Done は除く)。
     # 止まった worker も枠を占有し続ける (失敗が続けば WIP が埋まって新規が止まる)。
+    # この回に PR 対応を起動した・Needs decision に上げた worktree も数える (どちらも、回の最初に読んだ状態にはまだ出ていない)。
     wip=0
-    while IFS=$'\t' read -r q_slug _ q_branch _ q_status q_busy _; do
+    while IFS=$'\t' read -r q_slug q_path q_branch _ q_status q_busy _; do
         [ -n "$q_slug" ] || continue
         [ "$q_status" != "completed" ] || continue
-        if [ "$q_status" = "needs-decision" ] || [ "$q_busy" != "-" ] || [ -z "$(open_pr_of "$q_slug" "$q_branch")" ]; then
+        if [ "$q_status" = "needs-decision" ] || [ "$q_busy" != "-" ] || [ -z "$(open_pr_of "$q_slug" "$q_branch")" ] ||
+            printf '%s' "$started$raised" | grep -qxF -- "$q_path"; then
             wip=$((wip + 1))
         fi
     done <<<"$qwts"
