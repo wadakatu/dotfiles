@@ -27,10 +27,7 @@ if [ "${LIVE_SYNC_NO_FETCH:-0}" != "1" ] && [ -z "$(find "$repo/.git/FETCH_HEAD"
         echo "WARN: dotfiles の fetch に失敗。手元の origin/main で続ける" >&2
 fi
 
-sha=$("$git" -C "$repo" rev-parse --verify --quiet 'origin/main^{commit}') || {
-    echo "ERROR: $repo に origin/main が無い" >&2
-    exit 1
-}
+main_sha() { "$git" -C "$repo" rev-parse --verify --quiet 'origin/main^{commit}'; }
 
 mkdir -p "$live"
 tmp="$live/.tmp.$$"
@@ -44,24 +41,37 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if [ ! -d "$live/$sha" ]; then
-    mkdir "$tmp"
-    "$git" -C "$repo" archive "$sha" home/scripts agents | tar -xf - -C "$tmp"
-    chmod -R a-w "$tmp"
-    # 同じ版を別のプロセスが先に置いていたら、この mv は失敗する (置き先は読み取り専用で、中へは動かせない)。
-    # そのときは先に置かれたものを使う。
-    mv "$tmp" "$live/$sha" 2>/dev/null || [ -d "$live/$sha" ]
-fi
+# 張り替えた後で origin/main を読み直し、進んでいたらやり直す。
+# 同時に動く別の実行が fetch して新しい版を公開した後に、古い版を掴んでいたこちらが current を張り替えると、
+# 新しい版が古い版に戻る。排他はしない (止まった実行の残したロックで、以後の同期が全部止まるほうが困る)。
+for _ in 1 2 3; do
+    sha=$(main_sha) || {
+        echo "ERROR: $repo に origin/main が無い" >&2
+        exit 1
+    }
 
-if [ "$(readlink "$live/current" 2>/dev/null || true)" != "$sha" ]; then
-    ln -s "$sha" "$link"
-    # rename(2) で差し替える。ln -sfn は消してから作るので、その間 current が無くなる。
-    # 「symlink の指す先へ動かさず、symlink 自体を置き換える」指定は GNU が -T、BSD が -h。
-    if mv --version >/dev/null 2>&1; then
-        mv -fT "$link" "$live/current"
-    else
-        mv -fh "$link" "$live/current"
+    if [ ! -d "$live/$sha" ]; then
+        mkdir "$tmp"
+        "$git" -C "$repo" archive "$sha" home/scripts agents | tar -xf - -C "$tmp"
+        chmod -R a-w "$tmp"
+        # 同じ版を別のプロセスが先に置いていたら、この mv は失敗する (置き先は読み取り専用で、中へは動かせない)。
+        # そのときは先に置かれたものを使う。
+        mv "$tmp" "$live/$sha" 2>/dev/null || [ -d "$live/$sha" ]
     fi
-fi
+
+    if [ "$(readlink "$live/current" 2>/dev/null || true)" != "$sha" ]; then
+        ln -s "$sha" "$link"
+        # rename(2) で差し替える。ln -sfn は消してから作るので、その間 current が無くなる。
+        # 「symlink の指す先へ動かさず、symlink 自体を置き換える」指定は GNU が -T、BSD が -h。
+        if mv --version >/dev/null 2>&1; then
+            mv -fT "$link" "$live/current"
+        else
+            mv -fh "$link" "$live/current"
+        fi
+    fi
+    cleanup
+
+    [ "$(main_sha || true)" = "$sha" ] && break
+done
 
 printf '%s\n' "$live/$sha"

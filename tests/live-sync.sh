@@ -125,21 +125,49 @@ check "版の中に一時ディレクトリが入り込まない" [ -z "$(find "
 check "一時ファイルが残らない" no_leftover
 check "current がその版を指す" points_to "$sha4"
 
+CASE="取り出しの間に origin/main が進む"
+# 古い版を掴んだ実行 A が取り出している間に、別の実行 B が新しい版を公開する。
+# A が後から current を張り替えても、古い版に戻ったままにならないこと。
+commit v5
+sha_old=$(git -C "$repo" rev-parse origin/main)
+commit v6
+sha_new=$(git -C "$repo" rev-parse origin/main)
+git -C "$repo" update-ref refs/remotes/origin/main "$sha_old" # A から見える origin/main は古いほう
+cat >"$base/bin/git-advance-during-archive" <<'EOF'
+#!/usr/bin/env bash
+for a in "$@"; do
+    if [ "$a" = "archive" ] && [ ! -e "$RACE_DONE" ]; then
+        : >"$RACE_DONE"
+        git -C "$RACE_REPO" update-ref refs/remotes/origin/main "$RACE_NEW"
+        GIT=git LIVE_SYNC_NO_FETCH=1 bash "$RACE_SCRIPT" "$RACE_REPO" "$RACE_LIVE" >/dev/null
+    fi
+done
+exec git "$@"
+EOF
+chmod +x "$base/bin/git-advance-during-archive"
+out=$(RACE_DONE="$base/race-done" RACE_REPO="$repo" RACE_NEW="$sha_new" RACE_SCRIPT="$script" RACE_LIVE="$live" \
+    GIT="$base/bin/git-advance-during-archive" LIVE_SYNC_NO_FETCH=1 bash "$script" "$repo" "$live")
+check "割り込みが起きた (テストの前提)" [ -e "$base/race-done" ]
+check "古い版も取り出されている (テストの前提)" [ -d "$live/$sha_old" ]
+check "current は新しい版を指す" points_to "$sha_new"
+check "新しい版を出力する" [ "$out" = "$live/$sha_new" ]
+check "一時ファイルが残らない" no_leftover
+
 CASE="fetch"
 # リモートだけ進める (手元の origin/main は古いまま)。
 git clone -q "$base/origin.git" "$base/other" 2>/dev/null
-echo "echo v5" >"$base/other/home/scripts/hello.sh"
-git -C "$base/other" commit -q -am v5
+echo "echo v7" >"$base/other/home/scripts/hello.sh"
+git -C "$base/other" commit -q -am v7
 git -C "$base/other" push -q origin HEAD:main
-sha5=$(git -C "$base/other" rev-parse HEAD)
+sha7=$(git -C "$base/other" rev-parse HEAD)
 out=$(sync)
-check "LIVE_SYNC_NO_FETCH=1 なら fetch しない" [ "$out" = "$live/$sha4" ]
+check "LIVE_SYNC_NO_FETCH=1 なら fetch しない" [ "$out" = "$live/$sha_new" ]
 out=$(bash "$script" "$repo" "$live")
-check "直前に fetch していれば fetch しない (15 分に 1 回まで)" [ "$out" = "$live/$sha4" ]
+check "直前に fetch していれば fetch しない (15 分に 1 回まで)" [ "$out" = "$live/$sha_new" ]
 rm -f "$repo/.git/FETCH_HEAD"
 out=$(bash "$script" "$repo" "$live")
-check "しばらく fetch していなければ fetch して新しい版にする" [ "$out" = "$live/$sha5" ]
-check "current が進む" points_to "$sha5"
+check "しばらく fetch していなければ fetch して新しい版にする" [ "$out" = "$live/$sha7" ]
+check "current が進む" points_to "$sha7"
 
 CASE="origin/main が無い"
 git init -q "$base/empty"
