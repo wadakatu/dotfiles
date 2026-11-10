@@ -162,10 +162,13 @@ git -C "$REPO" fetch --prune --all --quiet 2>/dev/null || { fetch_ok=0; log "WAR
 removable=()
 # cwd が worktree の中にあるプロセス (シェル、エージェント、テスト) が居れば使用中とみなす。
 # ルートの mtime はサブディレクトリの編集では変わらないので、それだけでは見逃す。
-# lsof が使えないときは誰が使っているか分からないので、この節の削除を全部見送る。
-cwds_ok=1
-cwds=$(lsof -a -d cwd -Fn -u "$USER" 2>/dev/null | sed -n 's/^n//p') || cwds_ok=0
-[ -n "$cwds" ] || cwds_ok=0
+# lsof が使えないときは誰が使っているか分からないので、削除を全部見送る。
+cwd_snapshot() {
+    cwds_ok=1
+    cwds=$(lsof -a -d cwd -Fn -u "$USER" 2>/dev/null | sed -n 's/^n//p') || cwds_ok=0
+    [ -n "$cwds" ] || cwds_ok=0
+}
+cwd_snapshot
 in_use() { awk -v p="$1" '$0 == p || index($0, p "/") == 1 { f = 1; exit } END { exit !f }' <<<"$cwds"; }
 
 while read -r wt; do
@@ -250,6 +253,16 @@ else
         [ -d "$wt" ] || continue
         if is_dirty "$wt"; then
             log "keep  $wt (未コミットの変更あり、または git status 失敗)"
+            continue
+        fi
+        # エージェントの状態だけでは使用中か分からない。ターンを終えて次の指示を待つセッションは done になり、
+        # PR をマージした直後に同じ worktree で次の作業に入ることがある。$REPO の節と同じく、プロセスの cwd でも見る。
+        if [ "$cwds_ok" = "0" ]; then
+            log "keep  $wt (lsof でプロセスの cwd を取れず、使用中か判定できない)"
+            continue
+        fi
+        if in_use "$wt"; then
+            log "keep  $wt (cwd がこの中にあるプロセスが居る)"
             continue
         fi
         busy=$(agents_busy "$wt" "$ps_json")
@@ -355,6 +368,12 @@ for wt in ${orca_removable[@]+"${orca_removable[@]}"}; do
     busy=$(agents_busy "$wt" "$ps_now")
     if [ -n "$busy" ]; then
         log "keep  $wt (削除直前にエージェントが $busy)"
+        continue
+    fi
+    # 1 つ消すのに 1 分かかることがあるので、worktree ごとに取り直す。
+    cwd_snapshot
+    if [ "$cwds_ok" = "0" ] || in_use "$wt"; then
+        log "keep  $wt (削除直前に、cwd がこの中にあるプロセスを検出、または lsof で取れない)"
         continue
     fi
     stop_stacks "$wt"
