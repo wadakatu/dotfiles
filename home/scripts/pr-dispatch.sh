@@ -899,12 +899,12 @@ launch_prev() { awk -F'\t' -v k="$1" '$4 FS $5 FS $6 == k { p = c; c = $2 } END 
 queue_fails() { awk -F'\t' -v k="$1" -v s="$2" '$4 FS $5 FS $6 == k { if ($2 == "fail" && p == s) c++; p = $2 } END { print c + 0 }' "$LAUNCHES_FILE"; }
 # issue_wts <repo> <番号>: その issue の worktree の path (linkedIssue・linkedItems の URL・branch の接頭辞のどれか)。古い順。
 # リポは Orca の repoId で見る (worktree の git remote を読めないときも、見えている worktree を見落とさない)。
+# 同じリポの clone を Orca に複数登録していれば、その全部を見る (別の clone で進んでいる issue を、もう 1 つ作らない)。
 issue_wts() {
-    local rid
-    rid=$(printf '%s' "$mains" | awk -F'\t' -v s="$1" '$1 == s { print $3; exit }')
-    [ -n "$rid" ] || return 0
-    jq -r --arg rid "$rid" --arg n "$2" --arg url "https://github.com/$1/issues/$2" '
-        [.result.worktrees[] | select(.repoId == $rid and (.isMainWorktree | not))
+    local rids
+    rids=$(printf '%s' "$mains" | awk -F'\t' -v s="$1" '$1 == s { print $3 }' | jq -Rsc 'split("\n") | map(select(. != ""))')
+    jq -r --argjson rids "${rids:-[]}" --arg n "$2" --arg url "https://github.com/$1/issues/$2" '
+        [.result.worktrees[] | select((.repoId as $r | any($rids[]; . == $r)) and (.isMainWorktree | not))
          | select((((.linkedIssue // null) | if type == "object" then .number else . end) | tostring) == $n
              or any((.linkedItems // [])[]; .url == $url)
              or ((.branch // "") | sub("^refs/heads/"; "") | startswith("issue-" + $n + "-")))]
