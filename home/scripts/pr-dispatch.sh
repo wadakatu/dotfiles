@@ -194,7 +194,7 @@ done < <(jq -r --arg root "$ORCA_ROOT" '
     | [.path, (.branch | sub("^refs/heads/"; "")), (if (.comment // "") | startswith("マージ判断:") then "1" else "0" end),
        (.workspaceStatus // "")] | @tsv' <<<"$wt_json")
 
-# Orca に登録したリポ: "<owner/repo>\t<主 checkout の path>"。worktree を作るときだけ使う。
+# Orca に登録したリポ: "<owner/repo>\t<主 checkout の path>"。worktree を作るときだけ使う (作った worktree の扱いには使わない)。
 mains=""
 if [ "$adopt_on" = 1 ]; then
     while IFS= read -r main_path; do
@@ -407,15 +407,18 @@ setup_done() {
 # adopt_ready <PR> <worktree> <番号>: この worktree に起動してよいか。自分で作った worktree は、setup が終わるまで待つ
 # (環境を作っている最中にエージェントを動かすと、依存の導入などが重なる)。作っていない worktree は、いつでも 0。
 adopt_ready() {
-    local st="" t="" main
+    local st="" t="" rid
     IFS=$'\t' read -r st _ t <<<"$(adopt_last "$1")" || true
     # creating も待つ。branch を切り替えたあと、created を書く前に落ちると、記録は creating のまま worktree だけが出来ている。
     case "$st" in created | creating) ;; *) return 0 ;; esac
     [ "$DRY_RUN" != "1" ] || return 1
-    # setup script の無いリポは、待つものが無い。無いと判断するのは、Orca の返事を読めて、script が空のときだけ
-    # (取れなかったときに「無い」と見なすと、setup の最中に起動してしまう)。
-    main=$(printf '%s' "$mains" | awk -F'\t' -v s="${1%#*}" '$1 == s { print $2; exit }')
-    if [ -n "$main" ] && orca repo show --repo "path:$main" --json 2>/dev/null |
+    # setup script の無いリポは、待つものが無い。無いと判断するのは、Orca の返事を読めて local の script が空で、
+    # checkout の orca.yaml にも setup が無いときだけ (取れなかったときに「無い」と見なすと、setup の最中に起動してしまう)。
+    # Orca は local に script が無ければ checkout の orca.yaml の setup を走らせる。repo show に出るのは local の分だけ。
+    # リポは worktree の一覧から引く (worktree を作る設定を消したあとも、作った worktree の判定は続ける)。
+    rid=$(jq -r --arg p "$2" '[.result.worktrees[] | select(.path == $p) | .repoId // empty][0] // empty' <<<"$wt_json")
+    if { [ ! -e "$2/orca.yaml" ] || [ "$(grep -Ec "setup[\"']?[[:space:]]*:" "$2/orca.yaml" 2>/dev/null)" = 0 ]; } &&
+        orca repo show --repo "id:$rid" --json 2>/dev/null |
         jq -e '(.result.repo | type == "object") and ((.result.repo.hookSettings.scripts.setup // "") == "")' >/dev/null 2>&1; then
         adopt_log "$1" ready - || true
         return 0
@@ -643,11 +646,13 @@ if [ "$adopt_on" = 1 ] && [ "$braked" = 0 ]; then
         fi
         last="" last_oid=""
         IFS=$'\t' read -r last last_oid _ <<<"$(adopt_last "$pr")" || true
-        # この PR に結び付いた worktree が、別の branch で既にある。
+        # この PR が主な結び付き (linkedPR) になっている worktree が、別の branch で既にある。
+        # 参照 (linkedItems) では見ない。1 つの worktree から branch を切り替えて PR を何本も出すと、前の PR の参照が
+        # 全部その worktree に残る (実機で、1 つの worktree に 28 本)。それを「結び付いている」と数えると、
+        # worktree を失った PR、つまりここで作りたい PR を、ほぼ全部見送ってしまう。
         linked=$(jq -r --arg m "$main" --argjson n "$num" '
             ([.result.worktrees[] | select(.isMainWorktree and .path == $m) | .repoId][0]) as $r
-            | [.result.worktrees[] | select((.isMainWorktree | not) and .repoId == $r
-                and (.linkedPR == $n or any(.linkedItems[]?; .type == "pr" and .number == $n))) | .path][0] // empty' <<<"$wt_json")
+            | [.result.worktrees[] | select((.isMainWorktree | not) and .repoId == $r and .linkedPR == $n) | .path][0] // empty' <<<"$wt_json")
         if [ -n "$linked" ]; then
             if [ "$last" = "creating" ]; then
                 # 前の回が、worktree を作ってから branch を切り替えるまでの間で止まった。自動では続けない。
