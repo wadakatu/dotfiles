@@ -893,6 +893,11 @@ open_pr_of() { printf '%s' "$open_prs" | awk -F'\t' -v s="$1" -v b="$2" '$1 == s
 launch_prev() { awk -F'\t' -v k="$1" '$4 FS $5 FS $6 == k { p = c; c = $2 } END { print p }' "$LAUNCHES_FILE"; }
 # queue_fails <key> <creating|launching>: その T で、作成 (creating の直後) か起動 (launching の直後) が fail で終わった回数。
 queue_fails() { awk -F'\t' -v k="$1" -v s="$2" '$4 FS $5 FS $6 == k { if ($2 == "fail" && p == s) c++; p = $2 } END { print c + 0 }' "$LAUNCHES_FILE"; }
+# queue_pending <issue>: その issue の最後の記録が creating (作成の結果が分からない) なら "<時刻> <T>"。
+# T をまたいで見る (ラベルを付け直しても、前の作成の結果が分かるまでは次を作らないため)。
+queue_pending() {
+    awk -F'\t' -v p="$1" '$4 == p { t = $1; st = $2; s = $6 } END { if (st == "creating") print t FS s }' "$LAUNCHES_FILE"
+}
 slugify() {
     local s
     s=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | LC_ALL=C sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' | cut -c1-30 | sed 's/-$//')
@@ -941,9 +946,13 @@ queue_create() {
         --base-branch "origin/$base" --setup run --no-parent --json 2>/dev/null) || rc=$?
     wt=$(jq -r '.result.worktree.path // empty' <<<"$out" 2>/dev/null || true)
     if [ "$rc" != 0 ] || [ -z "$wt" ]; then
-        # はっきり失敗と分かるときだけ fail (次の回に試し直す)。返事が読めないときは creating のまま残し、作り直さない
-        # (作れていたら worktree が 2 つになる)。
-        [ "$(jq -r '.ok' <<<"$out" 2>/dev/null || true)" != "false" ] || launch_log "$key" fail - || true
+        # はっきり失敗と分かるときだけ fail (次の回に試し直す)。返事が読めないときと、Orca の CLI 自身が「結果不明」に
+        # 分類しているコード (応答待ちの時間切れ・切断・壊れた応答) は creating のまま残し、すぐには作り直さない
+        # (作れていたら worktree が 2 つになる。使用済みの branch 名には Orca が数字を足すので、名前では防げない)。
+        if jq -e '.ok == false and ((.error.code // "")
+            | test("^(runtime_unavailable|remote_runtime_unavailable|runtime_timeout|invalid_runtime_response)$") | not)' <<<"$out" >/dev/null 2>&1; then
+            launch_log "$key" fail - || true
+        fi
         log "WARN: queue $slug#$n: worktree を作れなかった ($(launch_last "$key" | cut -f2))"
         return 1
     fi
@@ -1025,8 +1034,20 @@ query($q: String!, $endCursor: String) {
         wt=$(printf '%s\n' "$iwts" | head -n 1)
         last=$(launch_last "$key" | cut -f2)
         op=- t0=""
-        if [ -z "$last" ] && [ -z "$(launch_open "$iss")" ]; then
-            # この T にはまだ手を付けておらず、前の T の起動で結果待ちのものも無い。
+        # 作成の結果が分からないままの記録。起動の結果待ち (launch_open) と同じく、T をまたいで issue ごとに見る。
+        p_time="" p_sig=""
+        IFS=$'\t' read -r p_time p_sig <<<"$(queue_pending "$iss")" || true
+        if [ -n "$p_time" ] && [ -z "$wt" ] && [ "$DRY_RUN" != "1" ] && [ "$(($(date +%s) - p_time))" -ge "$LAUNCH_UNKNOWN_AFTER" ]; then
+            # 待っても worktree が現れない。作れなかったものとして閉じる (同じ T なら、はっきりした失敗と同じ回数まで作り直す)。
+            # ponytail: 時間で見切る。Orca が一覧を返しているのに、これだけ前に頼んだ作成がまだ途中、ということは考えにくい。
+            # 外れると同じ issue の worktree が 2 つになる。Orca の作成に冪等キーが付いたら、それで出し直す形に替える。
+            launch_log "$iss"$'\t'"issue-worker"$'\t'"$p_sig" fail - || continue
+            log "queue: 作成の結果が分からないまま ${LAUNCH_UNKNOWN_AFTER} 秒たち、worktree も現れない。失敗として閉じる → $iss"
+            p_time=""
+            last=$(launch_last "$key" | cut -f2)
+        fi
+        if [ -z "$last" ] && [ -z "$(launch_open "$iss")" ] && [ -z "$p_time" ]; then
+            # この T にはまだ手を付けておらず、前の T の作成・起動で結果待ちのものも無い。
             if [ -n "$wt" ]; then
                 vlog "queue 対象外 $iss (Orca に worktree がある: ${wt#"$ORCA_ROOT"/})"
                 continue
@@ -1036,7 +1057,7 @@ query($q: String!, $endCursor: String) {
                 continue
             fi
         else
-            # この T で手を付けた issue か、ラベルを付け直す前の T の起動が結果待ちの issue。
+            # この T で手を付けた issue か、ラベルを付け直す前の T の作成・起動が結果待ちの issue。
             # 観測と記録の最後の行から続きを決める (前の起動の結果が分かるまで、新しい T では作らない)。
             # 同じ issue の worktree が 2 つ以上あれば、古い方だけ使い、新しい方は人に上げる。
             while IFS= read -r extra; do
@@ -1086,7 +1107,7 @@ query($q: String!, $endCursor: String) {
                 # creating のまま (結果が分からない) は作り直さずに待つ (作れていたら 2 つになる。枠は占有する)。
                 if [ "$(launch_prev "$key") $last" != "creating fail" ] || [ "$verdict" != "ok" ] ||
                     [ "$(queue_fails "$key" creating)" -ge "$MAX_ATTEMPTS" ]; then
-                    vlog "keep  $iss (worktree が見えない。最後の記録: ${last}。作り直さない)"
+                    vlog "keep  $iss (worktree が見えない。最後の記録: ${last:-前の T の creating}。作り直さない)"
                     continue
                 fi
             else

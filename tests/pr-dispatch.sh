@@ -1543,6 +1543,67 @@ run
 check "作り直さない (作れていたら 2 つになる)" [ "$(count 'worktree create')" = 1 ]
 check "creating のまま" [ "$(states)" = "creating " ]
 
+# Orca の CLI 自身が「結果不明」に分類しているコード。失敗の形 (ok: false) で返るが、作れていることがある。
+for code in runtime_unavailable remote_runtime_unavailable runtime_timeout invalid_runtime_response; do
+    q_setup "worktree の作成の結果が分からない ($code)"
+    issue 1
+    echo '{"ok":false,"error":{"code":"'"$code"'"}}' >"$FAKE/create.json"
+    echo 1 >"$FAKE/create.json.rc"
+    run
+    run
+    check "失敗とは記録しない" [ "$(states)" = "creating " ]
+    check "作り直さない (作れていたら 2 つになる)" [ "$(count 'worktree create')" = 1 ]
+done
+
+q_setup "作成の結果が分からないまま待つ上限を過ぎ、worktree も現れない: 失敗として閉じ、作り直す"
+issue 1
+qrow 100 creating - 1
+DRY_RUN=1 bash "$script" >"$base/out" 2>&1
+check "DRY_RUN では閉じない" [ "$(states)" = "creating " ]
+run
+check "失敗として閉じ、同じ T で作り直す" [ "$(states)" = "creating fail creating launching launched " ]
+check "理由を出す" logged "失敗として閉じる → o/r#1"
+
+q_setup "作成の結果が分からないまま: 上限の手前では閉じない"
+issue 1
+qrow "$(($(date +%s) - 60))" creating - 1
+LAUNCH_UNKNOWN_AFTER=3600 run
+check "creating のまま" [ "$(states)" = "creating " ]
+check "作り直さない" no_create
+
+q_setup "作成の結果が分からないまま上限を過ぎたが、worktree は現れている: 失敗にせず、起動に進む"
+issue 1
+qrow 100 creating - 1
+qcreated 1
+run
+check "失敗とは記録しない" [ "$(states)" = "creating launching launched " ]
+check "作り直さない" no_create
+
+q_setup "ラベルを付け直しても、前の T の作成の結果が分かるまでは作らない"
+relabeled 1
+qrow "$(date +%s)" creating - 1
+run
+check "作らない" no_create
+check "記録は増えない" [ "$(states)" = "creating " ]
+check "理由を出す" logged "keep  o/r#1 (worktree が見えない。最後の記録: 前の T の creating。作り直さない)"
+
+q_setup "ラベルを付け直した後に、前の T で頼んだ worktree が現れた: 作り直さず、新しい T で起動する"
+relabeled 1
+qrow "$(date +%s)" creating - 1
+qcreated 1
+run
+check "作り直さない" no_create
+check "新しい T を渡して起動する" q_launched 1 "$T2"
+check "ラベルを外す" called "gh issue edit 1 -R o/r --remove-label $LBL"
+
+q_setup "ラベルを付け直した: 前の T の作成が上限を過ぎても現れなければ、閉じて新しい T で作る"
+relabeled 1
+qrow 100 creating - 1
+run
+check "前の作成を失敗として閉じ、新しい T で作って起動する" [ "$(states)" = "creating fail creating launching launched " ]
+check "閉じるのは前の T の記録" [ "$(awk -F'\t' '$2 == "fail" { print $6 }' "$S/launches.tsv")" = "$T1" ]
+check "新しい T を渡す" q_launched 1 "$T2"
+
 q_setup "worktree の作成が失敗を返す"
 issue 1
 echo '{"ok":false,"error":{"code":"x"}}' >"$FAKE/create.json"
