@@ -57,7 +57,7 @@ for c in orca gh claude sysctl; do
 done
 
 export FAKE="$base/fake"
-export DISPATCH_LOCK="$base/state/lock.d" DISPATCH_LOCK_WAIT=0
+export DISPATCH_LOCK="$base/state/lock" DISPATCH_LOCK_WAIT=0
 export STATE_DIR="$base/state/agent-resume" STATE_FILE="$base/state/dispatched.tsv" BOARD_FILE="$base/state/board.tsv"
 export ORCA_ROOT="$base/workspaces" LAUNCH_INTERVAL=0
 mkdir -p "$FAKE" "$base/state" "$ORCA_ROOT"
@@ -72,9 +72,9 @@ reset() { # 記録とロックを消す
 }
 called() { grep -qF -- "$1" "$FAKE/calls"; }
 not_called() { ! grep -qF -- "$1" "$FAKE/calls"; }
-locked() { [ -d "$DISPATCH_LOCK" ]; }
-unlocked() { [ ! -e "$DISPATCH_LOCK" ]; }
-owner() { [ "$(cat "$DISPATCH_LOCK/pid" 2>/dev/null)" = "$1" ]; }
+# ロックは持ち主の pid を指す symlink。
+unlocked() { [ ! -L "$DISPATCH_LOCK" ] && [ ! -e "$DISPATCH_LOCK" ]; }
+owner() { [ "$(readlink "$DISPATCH_LOCK" 2>/dev/null)" = "$1" ]; }
 
 # ロックを持って動いている実行のふりをする。持ち主の判定はコマンドの名前も見るので、同じ名前のスクリプトを動かす。
 mkdir -p "$base/holder"
@@ -83,12 +83,11 @@ hold() { # hold [秒]: 生きている持ち主がロックを持っている状
     bash "$base/holder/pr-dispatch.sh" "${1:-30}" &
     bg="$bg $!"
     holder=$!
-    mkdir -p "$DISPATCH_LOCK"
-    echo "$holder" >"$DISPATCH_LOCK/pid"
+    ln -sn "$holder" "$DISPATCH_LOCK"
 }
 # ロックを取って、取れたら自分の pid と "got" を書いて抜ける。log の出力は $base/lib.log へ。
 try_lock() {
-    bash -c 'log() { echo "$*"; }; . "$1"; dispatch_lock && { echo got; cat "$DISPATCH_LOCK/pid"; echo $$; }' \
+    bash -c 'log() { echo "$*"; }; . "$1"; dispatch_lock && { echo got; readlink "$DISPATCH_LOCK"; echo $$; }' \
         pr-dispatch.sh "$lib" >"$base/lib.log" 2>&1
 }
 got() { grep -qx got "$base/lib.log"; }
@@ -111,11 +110,10 @@ check "持ち主のロックは残る" owner "$holder"
 
 CASE="持ち主が死んでいる"
 reset
-mkdir -p "$DISPATCH_LOCK"
 bash -c 'exit 0' &
 dead=$!
 wait "$dead"
-echo "$dead" >"$DISPATCH_LOCK/pid"
+ln -sn "$dead" "$DISPATCH_LOCK"
 try_lock
 check "回収して取れる" got
 check "回収をログに出す" grep -q "回収" "$base/lib.log"
@@ -125,25 +123,86 @@ CASE="持ち主の pid が別のプロセスに使い回された"
 reset
 sleep 30 &
 bg="$bg $!"
-mkdir -p "$DISPATCH_LOCK"
-echo "$!" >"$DISPATCH_LOCK/pid"
+ln -sn "$!" "$DISPATCH_LOCK"
 try_lock
 check "回収して取れる" got
 
-CASE="pid を書く前に死んだ"
+CASE="回収しようとした間に、別の実行が回収して取り直した"
+# 死んだ持ち主を読んだ後で、別の実行が先に回収して自分のロックを作った。その新しいロックを消してはいけない。
+# 「持ち主が生きているか」を見る瞬間に割り込みを起こす。
 reset
-mkdir -p "$DISPATCH_LOCK"
+bash -c 'exit 0' &
+dead=$!
+wait "$dead"
+ln -sn "$dead" "$DISPATCH_LOCK"
+bash "$base/holder/pr-dispatch.sh" 30 &
+bg="$bg $!"
+winner=$!
+SWAP_DONE="$base/swap-done" NEW_OWNER="$winner" bash -c '
+    log() { echo "$*"; }
+    . "$1"
+    eval "real_$(declare -f dispatch_lock_owner_alive)"
+    dispatch_lock_owner_alive() {
+        if [ ! -e "$SWAP_DONE" ]; then
+            : >"$SWAP_DONE"
+            rm -f "$DISPATCH_LOCK"
+            ln -sn "$NEW_OWNER" "$DISPATCH_LOCK"
+            return 1
+        fi
+        real_dispatch_lock_owner_alive "$@"
+    }
+    dispatch_lock && echo got' pr-dispatch.sh "$lib" >"$base/lib.log" 2>&1
+check "割り込みが起きた (テストの前提)" [ -e "$base/swap-done" ]
+check "取れない" [ -z "$(grep -x got "$base/lib.log")" ]
+check "取り直した側のロックは残る" owner "$winner"
+rm -f "$base/swap-done"
+
+CASE="別の実行が回収している最中"
+# 回収は 1 つずつ。回収中の印があれば、死んだロックでも手を出さない
+# (回収の途中で落ちて印が残ると止まり続ける。そのときは手で消す、とスクリプトに書いてある)。
+reset
+bash -c 'exit 0' &
+dead=$!
+wait "$dead"
+ln -sn "$dead" "$DISPATCH_LOCK"
+mkdir "$DISPATCH_LOCK.reclaim"
 try_lock
-check "できたばかりなら待つ (取らない)" [ $? -ne 0 ]
-check "ロックは残る" locked
-touch -t 202001010000 "$DISPATCH_LOCK"
-try_lock
-check "古ければ回収して取れる" got
+check "取れない" [ $? -ne 0 ]
+check "ロックに触らない" owner "$dead"
+check "止まっている理由をログに出す" grep -q "ロックが空かない" "$base/lib.log"
+
+CASE="持っている間に、別の持ち主に替わった"
+# 誤って回収されたときの保険。抜けるときに、自分のものでないロックを消さない。
+reset
+bash -c 'log() { echo "$*"; }; . "$1"; dispatch_lock && rm -f "$DISPATCH_LOCK" && ln -sn 999999 "$DISPATCH_LOCK"' \
+    pr-dispatch.sh "$lib" >"$base/lib.log" 2>&1
+check "別の持ち主のロックは残す" owner 999999
+
+CASE="死んだロックを 8 つが同時に取りに行く"
+# 回収と取得が重なっても、同時に入るのは 1 つだけ。
+reset
+bash -c 'exit 0' &
+dead=$!
+wait "$dead"
+ln -sn "$dead" "$DISPATCH_LOCK"
+: >"$base/crit"
+pids=""
+for _ in 1 2 3 4 5 6 7 8; do
+    DISPATCH_LOCK_WAIT=30 bash -c 'log() { :; }; . "$1"; dispatch_lock || exit 1
+        echo "in $$" >>"$2"; sleep 0.2; echo "out $$" >>"$2"' pr-dispatch.sh "$lib" "$base/crit" &
+    pids="$pids $!"
+done
+# shellcheck disable=SC2086  # $pids は pid の並び
+wait $pids
+check "8 つとも入った" [ "$(grep -c '^in ' "$base/crit")" = 8 ]
+# in と out が同じ pid で交互に並ぶ = 重なっていない。
+check "重ならない" awk '$1 == "in" { if (cur != "") exit 1; cur = $2 } $1 == "out" { if (cur != $2) exit 1; cur = "" } END { exit cur != "" }' "$base/crit"
+check "最後は離す" unlocked
 
 CASE="持ち主が終わるのを待つ"
 reset
 hold 2
-( sleep 2; rm -rf "$DISPATCH_LOCK" ) & # 持ち主は終わるときにロックを消す
+( sleep 2; rm -f "$DISPATCH_LOCK" ) & # 持ち主は終わるときにロックを消す
 bg="$bg $!"
 DISPATCH_LOCK_WAIT=10 try_lock
 check "待って取れる" got
