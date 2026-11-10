@@ -9,7 +9,8 @@
     ./ghostty.nix
     ./herdr.nix
     ./packages.nix
-    ./worktree-gc.nix
+    # ./worktree-gc.nix は止めている。PR がマージ済みの worktree を、作業が続いているのに消したため
+    # (README「worktree / コンテナの自動掃除」)。削除の条件を直してから戻す。スクリプトとテストは残してある。
     ./pr-dispatch.nix
     ./agent-resume.nix
     ./agent-gc.nix

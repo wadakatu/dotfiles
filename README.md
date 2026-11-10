@@ -17,7 +17,7 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 | Neovim と設定 | Home Manager + `home/config/nvim` |
 | Ghostty と設定 | Homebrew cask + Home Manager |
 | herdr の設定 | `home/config/herdr/config.toml` を Home Manager が out-of-store symlink（本体は Nix 管理外） |
-| worktree / コンテナ掃除 | Home Manager `launchd.agents`（1 時間ごと、`home/scripts/worktree-gc.sh`） |
+| worktree / コンテナ掃除 | **停止中**（下の「worktree / コンテナの自動掃除」）。Home Manager `launchd.agents`（1 時間ごと、`home/scripts/worktree-gc.sh`） |
 | 再起動で止まった Claude の再開、Needs decision で会話が開いていないカードの開き直し（同じセッションには 1 回だけ。人が閉じたタブは開き直さない） | Home Manager `launchd.agents`（ログイン時と 3 分ごと、`home/scripts/agent-resume.sh`）＋ SessionStart hook `agents/claude/hooks/session-marker.sh` |
 | 放置された Claude / Codex のセッションの通知と、確かめたものの停止（Orca の端末に /exit） | Home Manager `launchd.agents`（10 分ごと、`home/scripts/agent-gc.sh`）＋ CLI `~/.local/bin/agent-gc`。設計は `docs/agent-gc-design.md` |
 | Claude Code の auto memory の整理（重複・陳腐化・共有への移動、昇格は 1 件ずつ PR） | Home Manager `launchd.agents`（毎日 04:30、`home/scripts/memory-maintenance.sh`）。設計は `docs/memory-maintenance-design.md` |
@@ -365,6 +365,11 @@ memory-maintenance）も同じ値を見るので、クローン先を変える�
 同じく手動コピー運用。
 
 ## worktree / コンテナの自動掃除
+
+> **いまは止めている。** `home/default.nix` の imports から `./worktree-gc.nix` を外してある。
+> PR がマージ済みの worktree を、作業が続いているのに消したため。削除の条件を直すまで、終わった worktree と
+> compose の環境は手で消す（判定だけを見る `DRY_RUN=1` は今も使える）。戻すときは import を戻して rebuild する。
+> 以下は、動かしているときの説明。
 
 worktree ごとに docker compose の環境を立てるリポでは、worktree を放置するとコンテナと
 bridge network が積み上がり、docker のサブネットプールが枯れる。`home/worktree-gc.nix` が定義する LaunchAgent が毎時 0 分に
