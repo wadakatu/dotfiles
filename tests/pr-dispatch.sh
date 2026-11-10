@@ -1604,6 +1604,37 @@ check "前の作成を失敗として閉じ、新しい T で作って起動す�
 check "閉じるのは前の T の記録" [ "$(awk -F'\t' '$2 == "fail" { print $6 }' "$S/launches.tsv")" = "$T1" ]
 check "新しい T を渡す" q_launched 1 "$T2"
 
+q_setup "キューから外れた issue の、結果の分からない作成も閉じる (枠を占有し続けない)"
+issue 2
+qrow 100 creating - 1 # issue 1 は、ラベルを外したか閉じたので検索に出ない
+queue_config 'max_wip=1\n'
+run
+check "外れた issue の作成を失敗として閉じる" [ "$(awk -F'\t' '$2 == "fail" { print $4 }' "$S/launches.tsv")" = "o/r#1" ]
+check "空いた枠で次の issue を作る" q_created 2
+
+q_setup "キューから外れた issue の作成も、上限の手前では枠を占有する"
+issue 2
+qrow "$(date +%s)" creating - 1
+queue_config 'max_wip=1\n'
+run
+check "作らない" no_create
+
+q_setup "1 回の実行の起動上限は、キューの新しい着手にも効く"
+issue 1
+MAX_LAUNCHES=0 run
+check "作らない" no_create
+check "理由を出す" logged "queue 見送り o/r#1 (今回の起動上限 (0/0))"
+
+q_setup "1 回の実行の起動上限は、作成済みの worktree への起動にも効く"
+issue 1
+qrow "$(date +%s)" creating - 1
+qcreated 1
+MAX_LAUNCHES=0 run
+check "起動しない" no_launch
+check "理由を出す" logged "keep  o/r#1 (今回の起動上限 0 に達した。次回)"
+MAX_LAUNCHES=1 run
+check "上限の内なら起動する" q_launched 1
+
 q_setup "worktree の作成が失敗を返す"
 issue 1
 echo '{"ok":false,"error":{"code":"x"}}' >"$FAKE/create.json"
