@@ -267,7 +267,11 @@ for f in "$RESUME_STATE_DIR/sessions"/*; do
 done
 
 # ---- 起動の記録 ----
-launch_log() { printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "$2" "$3" "$1" >>"$LAUNCHES_FILE"; }
+# launch_log <key> <状態> <operationId|-> [時刻]
+launch_log() { printf '%s\t%s\t%s\t%s\n' "${4:-$(date +%s)}" "$2" "$3" "$1" >>"$LAUNCHES_FILE"; }
+# launch_mark <時刻>: 起動ごとの印。指示の中に入れておき、起動できたかを Orca が返すエージェントの prompt で確かめる。
+# 時刻は、その起動の最初の launching の行のもの (同じ worktree への起動は 1 回の実行に 1 つなので、重ならない)。
+launch_mark() { printf 'pr-dispatch による自動起動 %s。' "$1"; }
 # launch_last <key>: その (PR, 対応, 状態) の最後の行の "<時刻> <状態> <operationId>"。無ければ空。
 launch_last() {
     awk -F'\t' -v k="$1" '$4 FS $5 FS $6 == k { l = $1 FS $2 FS $3 } END { if (l != "") print l }' "$LAUNCHES_FILE"
@@ -290,14 +294,16 @@ launch_close() {
     launch_log "$1" "$2" - || true
     grep -qxF -- "$1" "$STATE_FILE" || printf '%s\n' "$1" >>"$STATE_FILE"
 }
-# launch_agent <key> <worktree> <prompt> <operationId|->: エージェントを起動する。起動できたら 0。
+# launch_agent <key> <worktree> <prompt> <operationId|-> <時刻>: エージェントを起動する。起動できたら 0。
 # 起動の前に launching、結果が分かったら launched / lost / fail を書く。どれも書かれなければ結果不明。
+# 時刻は、新しい起動の launching の行に書く時刻 (prompt の印と同じ値にする)。出し直しの行は今の時刻で書く。
 launch_agent() {
-    local key=$1 wt=$2 prompt=$3 op=$4 out rc=0 newop
+    local key=$1 wt=$2 prompt=$3 op=$4 t=$5 out rc=0 newop
+    [ "$op" = "-" ] || t=""
     local args=(agent launch --agent claude --worktree "path:$wt" --prompt "$prompt" --json)
     # 返事を失った起動は、新しく起動し直さず、同じ依頼を出し直す (orca agent launch --help の --retry-launch)。
     [ "$op" = "-" ] || args+=(--retry-launch "$op")
-    launch_log "$key" launching "$op" || {
+    launch_log "$key" launching "$op" "$t" || {
         log "WARN: 起動の記録を書けない。起動しない"
         return 1
     }
@@ -362,18 +368,19 @@ while IFS=$'\t' read -r slug branch num url head mergeable ci threads merge_stat
     # 結果が分かるまで別の起動はしない (起動できていたら 2 体並ぶ)。
     o_time="" o_op="" o_action="" o_sig=""
     IFS=$'\t' read -r o_time o_op o_action o_sig <<<"$(launch_open "$pr")" || true
-    op=-
+    op=- t0=""
     if [ -n "$o_time" ]; then
         o_key="$pr"$'\t'"$o_action"$'\t'"$o_sig"
-        if jq -e --arg p "$wt" --argjson t "$((o_time * 1000))" \
-            '[.result.worktrees[] | select(.path == $p) | .agents[]? | select((.stateStartedAt // 0) >= $t)] | length > 0' <<<"$ps_json" >/dev/null; then
-            # 起動の後に動き出したエージェントが居る (前から居て終わっているエージェントは数えない)。起動できていた。
+        if jq -e --arg p "$wt" --arg m "$(launch_mark "$o_time")" \
+            '[.result.worktrees[] | select(.path == $p) | .agents[]? | select((.prompt // "") | contains($m))] | length > 0' <<<"$ps_json" >/dev/null; then
+            # この起動の印が入った指示を受け取ったエージェントが居る。起動できていた。
+            # 時刻では確かめない (起動の後に人が始めた別のセッションまで、起動できた証拠に数えてしまう)。
             launch_close "$o_key" launched
-            log "launch $o_action → $pr (返事は読めなかったが、起動後のエージェントを確認)"
+            log "launch $o_action → $pr (返事は読めなかったが、この起動のエージェントを確認)"
             continue
         fi
         if [ "$(($(date +%s) - o_time))" -ge "$LAUNCH_UNKNOWN_AFTER" ]; then
-            # 待っても起動後のエージェントが現れない。これ以上は待たず、出し直しもせず、起動したものとして閉じる
+            # 待っても、この起動のエージェントが現れない。これ以上は待たず、出し直しもせず、起動したものとして閉じる
             # (同じ状態には二度と起動しない)。状態が変わっていなければ PR は直らないまま残るので、人に上げてから閉じる。
             # 状態が変わっていれば、閉じたあと新しい起動として下へ進む。
             if [ "$o_key" = "$key" ]; then
@@ -387,7 +394,7 @@ while IFS=$'\t' read -r slug branch num url head mergeable ci threads merge_stat
             continue
         else
             # 返事を失った起動。今の状態ではなく、失った依頼そのものを同じ operationId で出し直す。
-            action=$o_action sig=$o_sig key=$o_key op=$o_op
+            action=$o_action sig=$o_sig key=$o_key op=$o_op t0=$o_time
         fi
     fi
 
@@ -422,15 +429,17 @@ while IFS=$'\t' read -r slug branch num url head mergeable ci threads merge_stat
         continue
     fi
 
+    # 出し直しは、失った依頼と同じ指示にする (印の時刻も最初のもの)。新しい起動の印は今の時刻。
+    t0=${t0:-$(date +%s)}
     prompt="/$action $url
 
-(pr-dispatch による自動起動。人は見ていない。判断が要るものはグローバル CLAUDE.md の「委任の線引き」どおり Needs decision に上げて止まる)"
+($(launch_mark "$t0")人は見ていない。判断が要るものはグローバル CLAUDE.md の「委任の線引き」どおり Needs decision に上げて止まる)"
     if [ "$DRY_RUN" = "1" ]; then
         log "DRY-RUN: launch $action → $pr ($wt)"
         launched=$((launched + 1))
         continue
     fi
-    if launch_agent "$key" "$wt" "$prompt" "$op"; then
+    if launch_agent "$key" "$wt" "$prompt" "$op" "$t0"; then
         printf '%s\n' "$key" >>"$STATE_FILE"
         orca worktree set --worktree "path:$wt" --comment "auto: $action (#$num)" --json >/dev/null 2>&1 || true
         log "launch $action → $pr"
