@@ -18,7 +18,7 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 | Ghostty と設定 | Homebrew cask + Home Manager |
 | herdr の設定 | `home/config/herdr/config.toml` を Home Manager が out-of-store symlink（本体は Nix 管理外） |
 | worktree / コンテナ掃除 | Home Manager `launchd.agents`（1 時間ごと、`home/scripts/worktree-gc.sh`） |
-| PR の自動対応（conflict / CI 失敗 / 未対応のレビューにエージェントを起動）と、人の判断待ちのボード表示（質問は Needs decision、マージできる PR は In review に未読と「マージ可」） | Home Manager `launchd.agents`（ログイン時と 3 分ごと、`home/scripts/pr-dispatch.sh`）。止めるときは `~/Library/Application Support/pr-dispatch/BRAKE` を置く（再開と起動が止まり、ボードの更新は続く） |
+| PR の自動対応（conflict / CI 失敗 / 未対応のレビューにエージェントを起動）と、人の判断待ちのボード表示（質問は Needs decision、マージできる PR は In review に未読と「マージ可」） | Home Manager `launchd.agents`（ログイン時と 3 分ごと、`home/scripts/pr-dispatch.sh`）。止めるときは `~/Library/Application Support/pr-dispatch/BRAKE` を置く（再開と起動が止まり、ボードの更新は続く）。同じ場所の `config` に `adopt_prs=true` と `max_worktrees=<数>` を書くと、Orca に登録したリポの worktree の無い PR にも、対応が要るときに worktree を作る（1 回に 1 つ。無ければ作らない） |
 | 再起動で止まった Claude の再開、Needs decision で会話が開いていないカードの開き直し（同じセッションには 1 回だけ。人が閉じたタブは開き直さない） | Home Manager `launchd.agents` の pr-dispatch が毎回の最初に呼ぶ（ログイン時と 3 分ごと、`home/scripts/agent-resume.sh`）＋ SessionStart hook `agents/claude/hooks/session-marker.sh`。再開したセッションに指示が入るまで、その worktree への PR の自動対応は待つ |
 | 放置された Claude / Codex のセッションの通知と、確かめたものの停止（Orca の端末に /exit） | Home Manager `launchd.agents`（10 分ごと、`home/scripts/agent-gc.sh`）＋ CLI `~/.local/bin/agent-gc`。設計は `docs/agent-gc-design.md` |
 | Claude Code の auto memory の整理（重複・陳腐化・共有への移動、昇格は 1 件ずつ PR） | Home Manager `launchd.agents`（毎日 04:30、`home/scripts/memory-maintenance.sh`）。設計は `docs/memory-maintenance-design.md` |

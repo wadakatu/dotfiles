@@ -1,6 +1,8 @@
 { config, pkgs, dotfilesDir, ... }: {
   # 自分の OPEN な PR を数分ごとに見て、conflict / CI 失敗 / 未対応のレビューがあれば
   # Orca のタブでエージェントを起動する LaunchAgent。対象は Orca に worktree がある非 draft の PR。
+  # 設定 (~/Library/Application Support/pr-dispatch/config) で adopt_prs=true にすると、Orca に登録したリポの
+  # worktree の無い PR にも、対応が要るときに worktree を作る。
   # あわせて、人の判断待ち (自動対応の上限超え、入力待ちや質問で止まったエージェント) を
   # Orca のボードに出す。マージできる PR のカードは In review に置いて未読と「マージ可」を付け、
   # PR がマージ・クローズされた worktree のカードは、worktree-gc が消すまで Done に置く。
