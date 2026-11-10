@@ -95,6 +95,9 @@ adopt_on=0
 [ "$(cfg adopt_prs false)" = "true" ] && adopt_on=1
 
 flagged=0
+# この回に Needs decision に上げた worktree (改行区切り)。カードの列は回の最初に読んだきりなので、同じ worktree に当たる
+# 別の PR (同じ branch から base の違う PR) が、上げた直後に起動されないよう、この回の残りでも Needs decision として扱う。
+raised=""
 # board <path> <reason> <sig> <status|-> <comment>
 # (path, reason, sig) を初めて見たときだけボードに書く。status が - なら列は動かさず未読とコメントだけ付ける。
 # Done (completed) へ移すときは人の対応が要らないので、未読にしない。
@@ -115,6 +118,7 @@ board() {
         printf '%s\n' "$key" >>"$BOARD_FILE"
         log "board $reason → ${wt#"$ORCA_ROOT"/}: $comment"
         flagged=$((flagged + 1))
+        [ "$status" != "needs-decision" ] || raised="$raised$wt"$'\n'
     else
         log "WARN: ボードに書けない $reason → $wt (次回に再試行)"
     fi
@@ -467,7 +471,7 @@ while IFS=$'\t' read -r slug branch num url head mergeable ci threads merge_stat
     fi
 
     [ "$braked" = 0 ] || continue
-    if [ "$board" = "needs-decision" ]; then
+    if [ "$board" = "needs-decision" ] || printf '%s' "$raised" | grep -qxF -- "$wt"; then
         vlog "keep  $pr ($action 候補だが Needs decision でユーザーの判断待ち)"
         continue
     fi
