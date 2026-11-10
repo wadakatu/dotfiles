@@ -43,17 +43,14 @@ jobs:
       # skill・rule・LaunchAgent のスクリプトが読む場所を作るスクリプトなので、失敗しても前の版が残ることを CI で見張る。
       - name: live-sync script
         run: bash tests/live-sync.sh
-      # 無人で worktree とエージェントを起動するスクリプトなので、勝手に起動しないことと復旧を CI で見張る。
-      - name: issue-autopilot script
-        run: bash tests/issue-autopilot.sh
       # 2 つのスクリプトが同じ worktree にエージェントを同時に起動しないことと、残ったロックで止まり続けないことを CI で見張る。
       - name: dispatch-lock
         run: bash tests/dispatch-lock.sh
       # 再開を依頼したのに記録が無い、を作らないことを CI で見張る (記録は pr-dispatch が起動を待つのに使う)。
       - name: agent-resume script
         run: bash tests/agent-resume.sh
-      # 無人でエージェントを起動するスクリプトなので、起動してはいけないとき (観測が欠けた、人が作業中、
-      # 再開したセッションが始まる前、結果の分からない起動の後) に起動しないことを CI で見張る。
+      # 無人でエージェントと worktree を起動するスクリプトなので、起動してはいけないとき (観測が欠けた、人が作業中、
+      # 再開したセッションが始まる前、結果の分からない起動の後、キューの issue が承認後に書き換わった) に起動しないことを CI で見張る。
       - name: pr-dispatch script
         run: bash tests/pr-dispatch.sh
 
