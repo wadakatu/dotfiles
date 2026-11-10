@@ -893,11 +893,22 @@ open_pr_of() { printf '%s' "$open_prs" | awk -F'\t' -v s="$1" -v b="$2" '$1 == s
 launch_prev() { awk -F'\t' -v k="$1" '$4 FS $5 FS $6 == k { p = c; c = $2 } END { print p }' "$LAUNCHES_FILE"; }
 # queue_fails <key> <creating|launching>: その T で、作成 (creating の直後) か起動 (launching の直後) が fail で終わった回数。
 queue_fails() { awk -F'\t' -v k="$1" -v s="$2" '$4 FS $5 FS $6 == k { if ($2 == "fail" && p == s) c++; p = $2 } END { print c + 0 }' "$LAUNCHES_FILE"; }
-# queue_pending <issue>: その issue の最後の記録が creating (作成の結果が分からない) なら "<時刻> <T>"。
-# T をまたいで見る (ラベルを付け直しても、前の作成の結果が分かるまでは次を作らないため)。
-queue_pending() {
-    awk -F'\t' -v p="$1" '$4 == p { t = $1; st = $2; s = $6 } END { if (st == "creating") print t FS s }' "$LAUNCHES_FILE"
+# issue_wts <repo> <番号>: その issue の worktree の path (linkedIssue・linkedItems の URL・branch の接頭辞のどれか)。古い順。
+# リポは Orca の repoId で見る (worktree の git remote を読めないときも、見えている worktree を見落とさない)。
+issue_wts() {
+    local rid
+    rid=$(printf '%s' "$mains" | awk -F'\t' -v s="$1" '$1 == s { print $3; exit }')
+    [ -n "$rid" ] || return 0
+    jq -r --arg rid "$rid" --arg n "$2" --arg url "https://github.com/$1/issues/$2" '
+        [.result.worktrees[] | select(.repoId == $rid and (.isMainWorktree | not))
+         | select((((.linkedIssue // null) | if type == "object" then .number else . end) | tostring) == $n
+             or any((.linkedItems // [])[]; .url == $url)
+             or ((.branch // "") | sub("^refs/heads/"; "") | startswith("issue-" + $n + "-")))]
+        | sort_by(.createdAt // 0) | .[].path' <<<"$ps_json"
 }
+# queue_pending <issue>: その issue の最後の記録が creating (作成の結果が分からない) なら 1。
+# T をまたいで見る (ラベルを付け直しても、前の作成の結果が分かるまでは次を作らないため)。
+queue_pending() { awk -F'\t' -v p="$1" '$4 == p { st = $2 } END { if (st == "creating") print 1 }' "$LAUNCHES_FILE"; }
 slugify() {
     local s
     s=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | LC_ALL=C sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' | cut -c1-30 | sed 's/-$//')
@@ -1002,11 +1013,21 @@ query($q: String!, $endCursor: String) {
         fi
     done <<<"$qwts"
     # 作成の結果が分からないまま worktree が見えない issue も、枠を占有する (作れていたら、あとから現れる)。
-    while IFS= read -r q_iss; do
+    # 待つ上限を過ぎても現れなければ、作れなかったものとして閉じて枠を空ける (同じ T なら、はっきりした失敗と同じ回数まで
+    # 作り直す)。今ラベルの付いている issue に限らず、記録の全部を見る (ラベルを外した・閉じた issue の記録が枠を占有し続けない)。
+    # ponytail: 時間で見切る。Orca が一覧を返しているのに、これだけ前に頼んだ作成がまだ途中、ということは考えにくい。
+    # 外れると同じ issue の worktree が 2 つになる。Orca の作成に冪等キーが付いたら、それで出し直す形に替える。
+    while IFS=$'\t' read -r q_iss q_time q_sig; do
         [ -n "$q_iss" ] || continue
-        [ -n "$(printf '%s' "$qwts" | awk -F'\t' -v s="${q_iss%#*}" -v n="${q_iss##*#}" '$1 == s && $4 == n { print; exit }')" ] ||
-            wip=$((wip + 1))
-    done < <(awk -F'\t' '$5 == "issue-worker" { st[$4] = $2 } END { for (k in st) if (st[k] == "creating") print k }' "$LAUNCHES_FILE")
+        [ -z "$(issue_wts "${q_iss%#*}" "${q_iss##*#}")" ] || continue
+        if [ "$DRY_RUN" != "1" ] && [ "$((now - q_time))" -ge "$LAUNCH_UNKNOWN_AFTER" ] &&
+            launch_log "$q_iss"$'\t'"issue-worker"$'\t'"$q_sig" fail -; then
+            log "queue: 作成の結果が分からないまま ${LAUNCH_UNKNOWN_AFTER} 秒たち、worktree も現れない。失敗として閉じる → $q_iss"
+            continue
+        fi
+        wip=$((wip + 1))
+    done < <(awk -F'\t' '$5 == "issue-worker" { t[$4] = $1; st[$4] = $2; s[$4] = $6 }
+        END { for (k in st) if (st[k] == "creating") print k FS t[k] FS s[k] }' "$LAUNCHES_FILE")
 
     q_new=0
     while IFS=$'\t' read -r slug n verdict t title base; do
@@ -1019,34 +1040,16 @@ query($q: String!, $endCursor: String) {
         key="$iss"$'\t'"issue-worker"$'\t'"$t"
         t_label=$t
         main=$(printf '%s' "$mains" | awk -F'\t' -v s="$slug" '$1 == s { print $2; exit }')
-        rid=$(printf '%s' "$mains" | awk -F'\t' -v s="$slug" '$1 == s { print $3; exit }')
         if [ -z "$main" ]; then
             vlog "queue 対象外 $iss (主 checkout が Orca に登録されていない)"
             continue
         fi
-        # この issue の worktree (linkedIssue・linkedItems の URL・branch の接頭辞のどれか)。古い順。
-        iwts=$(jq -r --arg rid "$rid" --arg n "$n" --arg url "https://github.com/$slug/issues/$n" '
-            [.result.worktrees[] | select(.repoId == $rid and (.isMainWorktree | not))
-             | select((((.linkedIssue // null) | if type == "object" then .number else . end) | tostring) == $n
-                 or any((.linkedItems // [])[]; .url == $url)
-                 or ((.branch // "") | sub("^refs/heads/"; "") | startswith("issue-" + $n + "-")))]
-            | sort_by(.createdAt // 0) | .[].path' <<<"$ps_json")
+        iwts=$(issue_wts "$slug" "$n")
         wt=$(printf '%s\n' "$iwts" | head -n 1)
         last=$(launch_last "$key" | cut -f2)
         op=- t0=""
-        # 作成の結果が分からないままの記録。起動の結果待ち (launch_open) と同じく、T をまたいで issue ごとに見る。
-        p_time="" p_sig=""
-        IFS=$'\t' read -r p_time p_sig <<<"$(queue_pending "$iss")" || true
-        if [ -n "$p_time" ] && [ -z "$wt" ] && [ "$DRY_RUN" != "1" ] && [ "$(($(date +%s) - p_time))" -ge "$LAUNCH_UNKNOWN_AFTER" ]; then
-            # 待っても worktree が現れない。作れなかったものとして閉じる (同じ T なら、はっきりした失敗と同じ回数まで作り直す)。
-            # ponytail: 時間で見切る。Orca が一覧を返しているのに、これだけ前に頼んだ作成がまだ途中、ということは考えにくい。
-            # 外れると同じ issue の worktree が 2 つになる。Orca の作成に冪等キーが付いたら、それで出し直す形に替える。
-            launch_log "$iss"$'\t'"issue-worker"$'\t'"$p_sig" fail - || continue
-            log "queue: 作成の結果が分からないまま ${LAUNCH_UNKNOWN_AFTER} 秒たち、worktree も現れない。失敗として閉じる → $iss"
-            p_time=""
-            last=$(launch_last "$key" | cut -f2)
-        fi
-        if [ -z "$last" ] && [ -z "$(launch_open "$iss")" ] && [ -z "$p_time" ]; then
+        # 作成の結果待ち (creating のまま) も、起動の結果待ち (launch_open) と同じく、T をまたいで issue ごとに見る。
+        if [ -z "$last" ] && [ -z "$(launch_open "$iss")" ] && [ -z "$(queue_pending "$iss")" ]; then
             # この T にはまだ手を付けておらず、前の T の作成・起動で結果待ちのものも無い。
             if [ -n "$wt" ]; then
                 vlog "queue 対象外 $iss (Orca に worktree がある: ${wt#"$ORCA_ROOT"/})"
@@ -1137,8 +1140,13 @@ query($q: String!, $endCursor: String) {
                     vlog "keep  $iss (再開したセッションに指示が入るのを待っている)"
                     continue
                 fi
+                if [ "$launched" -ge "$MAX_LAUNCHES" ]; then
+                    vlog "keep  $iss (今回の起動上限 $MAX_LAUNCHES に達した。次回)"
+                    continue
+                fi
                 if [ "$DRY_RUN" = "1" ]; then
                     log "DRY-RUN: queue worker を起動 → $iss (${wt#"$ORCA_ROOT"/})"
+                    launched=$((launched + 1))
                     continue
                 fi
                 queue_launch "$key" "$wt" "$n" "$t" "$op" "$t0" "$slug" "$t_label"
@@ -1153,7 +1161,9 @@ query($q: String!, $endCursor: String) {
             continue
         fi
         why=""
-        if [ "$wip" -ge "$max_wip" ]; then
+        if [ "$launched" -ge "$MAX_LAUNCHES" ]; then
+            why="今回の起動上限 ($launched/$MAX_LAUNCHES)"
+        elif [ "$wip" -ge "$max_wip" ]; then
             why="max_wip ($wip/$max_wip)"
         elif [ "$today" -ge "$max_day" ]; then
             why="max_per_day ($today/$max_day)"
@@ -1171,6 +1181,7 @@ query($q: String!, $endCursor: String) {
         q_new=1
         if [ "$DRY_RUN" = "1" ]; then
             log "DRY-RUN: queue worktree を作って worker を起動 → $iss"
+            launched=$((launched + 1))
             continue
         fi
         queue_create "$key" "$slug" "$n" "$t" "$title" "$main" "$base" || true
