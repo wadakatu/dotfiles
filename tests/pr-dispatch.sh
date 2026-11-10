@@ -41,6 +41,26 @@ case "$1 $2" in
     "worktree set") reply set.json ;;
     "terminal list") reply terms.json ;;
     "terminal create") echo '{"ok":true,"result":{"terminal":{"handle":"term_new","paneKey":"tabn:leafn"}}}' ;;
+    "worktree create")
+        # create.json があればそれを返す (失敗や、読めない返事)。無ければ本物の git worktree を作る。
+        [ -e "$FAKE/create.json" ] && reply create.json
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                --repo) main=${2#path:} ;;
+                --name) name=$2 ;;
+                --branch) br=$2 ;;
+                --base-branch) from=$2 ;;
+            esac
+            shift
+        done
+        # 使用済みの名前には数字を足す (本物の Orca と同じ)。
+        git -C "$main" show-ref --verify --quiet "refs/heads/$br" && br="$br-2"
+        d="$ORCA_ROOT/r/$name"
+        git -C "$main" worktree add -q -b "$br" "$d" "$from" 2>/dev/null || exit 1
+        # create-then-block: 作った直後に、PR の branch を別の checkout で使用中にする (切り替えを git が拒否する)。
+        [ -e "$FAKE/create-then-block" ] && git -C "$main" worktree add -q "$FAKE/../other" "${from#origin/}"
+        jq -cn --arg p "$d" --arg b "refs/heads/$br" '{ok: true, result: {warnings: [], worktree: {id: ("r::" + $p), path: $p, branch: $b}}}'
+        ;;
     "agent launch") reply launch.json ;;
     *) echo '{"ok":true}' ;;
 esac
@@ -89,7 +109,7 @@ R="$STATE_ROOT/agent-resume"
 
 setup() { # setup <ケース名>: 状態と偽の入力を作り直す
     CASE=$1
-    rm -rf "$STATE_ROOT" "$FAKE" "$ORCA_ROOT"
+    rm -rf "$STATE_ROOT" "$FAKE" "$ORCA_ROOT" "$base/main" "$base/origin" "$base/other"
     mkdir -p "$S" "$R/sessions" "$FAKE" "$ORCA_ROOT"
     : >"$FAKE/calls"
     : >"$FAKE/wts"
@@ -106,15 +126,18 @@ wt() {
     git -C "$d" remote add origin https://github.com/o/r.git
     git -C "$d" commit -q --allow-empty -m init
     jq -cn --arg p "$d" --arg b "refs/heads/$2" --arg s "$3" --argjson a "${4:-[]}" --arg c "${5:-}" \
-        '{worktreeId: ("r::" + $p), path: $p, branch: $b, workspaceStatus: $s, isMainWorktree: false, agents: $a, comment: $c}' >>"$FAKE/wts"
+        '{worktreeId: ("r::" + $p), path: $p, branch: $b, workspaceStatus: $s, isMainWorktree: false, agents: $a, comment: $c, repoId: "r"}' >>"$FAKE/wts"
 }
 p() { echo "$ORCA_ROOT/r/$1"; }
 # agent <state> [paneKey] [prompt] [stateStartedAt (ミリ秒)]
 agent() { jq -cn --arg s "$1" --arg k "${2:-t0:l0}" --arg q "${3-x}" --argjson at "${4:-1}" '[{state: $s, paneKey: $k, prompt: $q, stateStartedAt: $at, updatedAt: $at}]'; }
 # pr <番号> <branch> <mergeable> <CI> <mergeStateStatus> [未対応のコメント ID] [スレッドが 100 を超えるか] [head の SHA]
+# 環境変数: PR_AUTHOR (既定 me)、PR_CREATED (既定は今日)、PR_CROSS (fork からなら true)
 pr() {
-    jq -cn --argjson n "$1" --arg b "$2" --arg m "$3" --arg ci "$4" --arg ms "$5" --arg c "${6:-}" --argjson more "${7:-false}" --arg sha "${8:-sha$1}" '
+    jq -cn --argjson n "$1" --arg b "$2" --arg m "$3" --arg ci "$4" --arg ms "$5" --arg c "${6:-}" --argjson more "${7:-false}" --arg sha "${8:-sha$1}" \
+        --arg author "${PR_AUTHOR:-me}" --arg created "${PR_CREATED:-$(/bin/date +%Y-%m-%d)}T00:00:00Z" --argjson cross "${PR_CROSS:-false}" '
         {number: $n, url: ("https://github.com/o/r/pull/" + ($n | tostring)), headRefName: $b, headRefOid: $sha,
+         title: ("PR の題名 " + ($n | tostring)), createdAt: $created, isCrossRepository: $cross, author: {login: $author},
          mergeable: $m, mergeStateStatus: $ms, autoMergeRequest: null, repository: {nameWithOwner: "o/r"},
          commits: {nodes: [{commit: {statusCheckRollup: {state: $ci}}}]},
          reviewThreads: {pageInfo: {hasNextPage: $more},
@@ -668,6 +691,272 @@ DRY_RUN=1 bash "$script" >"$base/out" 2>&1
 check "起動しない" no_launch
 check "再開待ちの記録を書き換えない" has "$R/resume-pending.tsv" "term_gone"
 check "起動の記録を書かない" [ ! -s "$S/launches.tsv" ]
+
+# ---- worktree の無い PR に worktree を作る ----
+# mainrepo: Orca に登録したリポの主 checkout を作る。origin は手元の bare リポジトリ
+# (path に github.com/o/r を入れて、スクリプトが origin の URL から o/r を読めるようにする)。
+M="$base/main/r"
+mainrepo() {
+    local o="$base/origin/github.com/o/r.git"
+    git init -q --bare -b trunk "$o"
+    git init -q -b trunk "$M"
+    git -C "$M" remote add origin "$o"
+    git -C "$M" commit -q --allow-empty -m init
+    git -C "$M" push -q origin trunk
+    jq -cn --arg p "$M" '{worktreeId: ("r::" + $p), path: $p, branch: "refs/heads/trunk", workspaceStatus: "", isMainWorktree: true, agents: [], repoId: "r"}' >>"$FAKE/wts"
+}
+# remote_branch <branch>: origin にだけある branch を作り、その head の SHA を出す。
+remote_branch() {
+    git -C "$M" switch -q -c "$1" trunk
+    git -C "$M" commit -q --allow-empty -m "work on $1"
+    git -C "$M" push -q origin "$1"
+    git -C "$M" rev-parse HEAD
+    git -C "$M" switch -q trunk
+    git -C "$M" branch -q -D "$1"
+}
+adopt_config() { printf 'adopt_prs=true\nmax_worktrees=%s\n' "${1:-10}" >"$S/config"; }
+created() { called "worktree create --repo path:$M --name pr-$1 "; }
+not_created() { not_called "worktree create --repo path:$M --name pr-$1 "; }
+no_create() { not_called "worktree create"; }
+
+setup "worktree の無い PR に worktree を作る"
+mainrepo
+sha=$(remote_branch feat-x)
+pr 1 feat-x CONFLICTING SUCCESS DIRTY "" false "$sha"
+adopt_config
+run
+check "exit 0" [ "$rc" = 0 ]
+check "PR の head を base にして作る" called "worktree create --repo path:$M --name pr-1 --branch pr-1 --pr 1 --base-branch origin/feat-x --setup run --no-parent --json"
+check "PR の branch に切り替わっている" [ "$(git -C "$ORCA_ROOT/r/pr-1" branch --show-current)" = feat-x ]
+check "PR の head を指している" [ "$(git -C "$ORCA_ROOT/r/pr-1" rev-parse HEAD)" = "$sha" ]
+check "仮のブランチは消す" [ -z "$(git -C "$M" branch --list pr-1)" ]
+check "PR を結び付け直し、In review に置く" called "worktree set --worktree path:$ORCA_ROOT/r/pr-1 --pr 1 --workspace-status in-review --display-name r: PR の題名 1 --comment auto: PR #1 の対応のために worktree を作成 --json"
+check "記録する" [ "$(cut -f2 "$S/adopts.tsv" | tr '\n' ' ')" = "creating created " ]
+check "同じ回にはエージェントを起動しない" no_launch
+check "検索に、登録したリポを入れる" called "repo:o/r"
+cp "$FAKE/wts" "$FAKE/wts.before"
+jq -cn --arg p "$ORCA_ROOT/r/pr-1" '{worktreeId: ("r::" + $p), path: $p, branch: "refs/heads/feat-x", workspaceStatus: "in-review", isMainWorktree: false, agents: [], repoId: "r", linkedPR: 1}' >>"$FAKE/wts"
+run
+check "次の回から、PR の対応が効く" launched pr-1
+check "もう 1 つは作らない" [ "$(count 'worktree create')" = 1 ]
+# 人がその worktree を消した。
+git -C "$M" worktree remove --force "$ORCA_ROOT/r/pr-1"
+cp "$FAKE/wts.before" "$FAKE/wts"
+run
+check "一度作った PR には、worktree を人が消しても作り直さない" [ "$(count 'worktree create')" = 1 ]
+
+setup "設定が無ければ作らない"
+mainrepo
+sha=$(remote_branch feat-x)
+pr 1 feat-x CONFLICTING SUCCESS DIRTY "" false "$sha"
+run
+check "作らない" no_create
+check "記録も作らない" [ ! -s "$S/adopts.tsv" ]
+printf 'adopt_prs=false\nmax_worktrees=10\n' >"$S/config"
+run
+check "adopt_prs=false でも作らない" no_create
+printf 'adopt_prs=true\n' >"$S/config"
+run
+check "max_worktrees が無ければ作らない" no_create
+
+setup "worktree を作らない PR"
+mainrepo
+s1=$(remote_branch feat-1)
+s2=$(remote_branch feat-2)
+s3=$(remote_branch feat-3)
+s4=$(remote_branch feat-4)
+s5=$(remote_branch feat-5)
+pr 1 feat-1 MERGEABLE SUCCESS CLEAN "" false "$s1"
+PR_CREATED=2020-01-01 pr 2 feat-2 CONFLICTING SUCCESS DIRTY "" false "$s2"
+PR_CROSS=true pr 3 feat-3 CONFLICTING SUCCESS DIRTY "" false "$s3"
+PR_AUTHOR=someone pr 4 feat-4 CONFLICTING SUCCESS DIRTY "" false "$s4"
+pr 5 feat-5 MERGEABLE SUCCESS BLOCKED "" true "$s5"
+adopt_config
+run
+check "対応の要らない PR" not_created 1
+check "作成から 30 日を超えた PR" not_created 2
+check "fork からの PR" not_created 3
+check "他人の PR" not_created 4
+check "レビューを読み切れていない PR" not_created 5
+
+setup "他人の PR には、worktree があってもエージェントを起動しない"
+wt a feat-a in-progress
+PR_AUTHOR=someone pr 1 feat-a CONFLICTING SUCCESS DIRTY
+run
+check "起動しない" no_launch
+
+setup "worktree を作るのは 1 回に 1 つ"
+mainrepo
+s1=$(remote_branch feat-1)
+s2=$(remote_branch feat-2)
+pr 1 feat-1 CONFLICTING SUCCESS DIRTY "" false "$s1"
+pr 2 feat-2 MERGEABLE FAILURE BLOCKED "" false "$s2"
+adopt_config
+run
+check "1 つだけ作る" [ "$(count 'worktree create')" = 1 ]
+run
+check "次の回に、もう 1 つ" [ "$(count 'worktree create')" = 2 ]
+
+setup "worktree が上限に達している"
+mainrepo
+wt a feat-a in-progress
+sha=$(remote_branch feat-x)
+pr 9 feat-x CONFLICTING SUCCESS DIRTY "" false "$sha"
+adopt_config 1
+run
+check "作らない" no_create
+adopt_config 2
+run
+check "上限を上げれば作る" created 9
+
+setup "BRAKE のあいだは worktree を作らない"
+mainrepo
+sha=$(remote_branch feat-x)
+pr 1 feat-x CONFLICTING SUCCESS DIRTY "" false "$sha"
+adopt_config
+: >"$S/BRAKE"
+run
+check "作らない" no_create
+
+setup "DRY_RUN では worktree を作らない"
+mainrepo
+sha=$(remote_branch feat-x)
+pr 1 feat-x CONFLICTING SUCCESS DIRTY "" false "$sha"
+adopt_config
+render
+DRY_RUN=1 bash "$script" >"$base/out" 2>&1
+check "作らない" no_create
+check "作る予定を出す" logged "DRY-RUN: adopt o/r#1"
+check "記録しない" [ ! -s "$S/adopts.tsv" ]
+
+setup "branch が Orca の外の checkout で使用中"
+mainrepo
+s1=$(remote_branch feat-1)
+s2=$(remote_branch feat-2)
+git -C "$M" worktree add -q "$base/other" -b feat-1 origin/feat-1
+pr 1 feat-1 CONFLICTING SUCCESS DIRTY "" false "$s1"
+pr 2 feat-2 CONFLICTING SUCCESS DIRTY "" false "$s2"
+adopt_config
+run
+check "使用中の PR には作らない" not_created 1
+check "同じ回に、次の PR を見る" created 2
+
+setup "ローカルの branch が先行している (未 push のコミットがある)"
+mainrepo
+s1=$(remote_branch feat-1)
+s2=$(remote_branch feat-2)
+git -C "$M" branch -q feat-1 origin/feat-1
+git -C "$M" switch -q feat-1
+git -C "$M" commit -q --allow-empty -m "not pushed yet"
+ahead=$(git -C "$M" rev-parse HEAD)
+git -C "$M" switch -q trunk
+pr 1 feat-1 CONFLICTING SUCCESS DIRTY "" false "$s1"
+pr 2 feat-2 CONFLICTING SUCCESS DIRTY "" false "$s2"
+adopt_config
+run
+check "作らない" not_created 1
+check "ローカルの branch は動かさない" [ "$(git -C "$M" rev-parse feat-1)" = "$ahead" ]
+check "見送ったと記録する" has "$S/adopts.tsv" "	refused	o/r#1	$s1"
+check "同じ回に、次の PR を見る" created 2
+run
+check "head が変わるまで、試し直さない" [ "$(grep -c refused "$S/adopts.tsv")" = 1 ]
+
+setup "ローカルの branch が分岐している"
+mainrepo
+s1=$(remote_branch feat-1)
+git -C "$M" branch -q feat-1 trunk
+git -C "$M" switch -q feat-1
+git -C "$M" commit -q --allow-empty -m "diverged locally"
+local_sha=$(git -C "$M" rev-parse HEAD)
+git -C "$M" switch -q trunk
+pr 1 feat-1 CONFLICTING SUCCESS DIRTY "" false "$s1"
+adopt_config
+run
+check "作らない" no_create
+check "ローカルの branch は動かさない" [ "$(git -C "$M" rev-parse feat-1)" = "$local_sha" ]
+
+setup "ローカルの branch が遅れているだけなら、進めてから作る"
+mainrepo
+s1=$(remote_branch feat-1)
+git -C "$M" branch -q feat-1 trunk
+pr 1 feat-1 CONFLICTING SUCCESS DIRTY "" false "$s1"
+adopt_config
+run
+check "作る" created 1
+check "PR の head を指している" [ "$(git -C "$ORCA_ROOT/r/pr-1" rev-parse HEAD)" = "$s1" ]
+
+setup "pr-<番号> という名前のブランチが既にある"
+mainrepo
+sha=$(remote_branch feat-x)
+git -C "$M" switch -q -c pr-1 trunk
+git -C "$M" commit -q --allow-empty -m "someone's own branch"
+mine=$(git -C "$M" rev-parse HEAD)
+git -C "$M" switch -q trunk
+pr 1 feat-x CONFLICTING SUCCESS DIRTY "" false "$sha"
+adopt_config
+run
+check "作る" created 1
+check "元からあるブランチは消さない" [ "$(git -C "$M" rev-parse pr-1)" = "$mine" ]
+check "Orca が付けた仮のブランチは消す" [ -z "$(git -C "$M" branch --list pr-1-2)" ]
+
+setup "worktree を作ったあと、PR の branch に切り替えられない"
+mainrepo
+sha=$(remote_branch feat-x)
+pr 1 feat-x CONFLICTING SUCCESS DIRTY "" false "$sha"
+adopt_config
+: >"$FAKE/create-then-block"
+run
+check "人に上げる" called "worktree set --worktree path:$ORCA_ROOT/r/pr-1 --comment PR #1 の取り込みが途中で止まった（branch が feat-x になっていない） --json --unread --workspace-status needs-decision"
+check "作れたとは記録しない" [ "$(cut -f2 "$S/adopts.tsv" | tr '\n' ' ')" = "creating " ]
+
+setup "前の回が、worktree を作ってから切り替えるまでの間で止まった"
+mainrepo
+sha=$(remote_branch feat-x)
+pr 1 feat-x CONFLICTING SUCCESS DIRTY "" false "$sha"
+adopt_config
+printf '%s\tcreating\to/r#1\t%s\n' "$(/bin/date +%s)" "$sha" >"$S/adopts.tsv"
+git -C "$M" worktree add -q -b pr-1 "$ORCA_ROOT/r/pr-1" origin/feat-x
+jq -cn --arg p "$ORCA_ROOT/r/pr-1" '{worktreeId: ("r::" + $p), path: $p, branch: "refs/heads/pr-1", workspaceStatus: "in-progress", isMainWorktree: false, agents: [], repoId: "r", linkedPR: null, linkedItems: [{provider: "github", type: "pr", number: 1}]}' >>"$FAKE/wts"
+run
+run
+check "もう 1 つは作らない" no_create
+check "自動では続けず、人に上げる (1 回だけ)" [ "$(count 'PR #1 の取り込みが途中で止まった')" = 1 ]
+check "勝手に branch を切り替えない" [ "$(git -C "$ORCA_ROOT/r/pr-1" branch --show-current)" = pr-1 ]
+
+setup "この PR に結び付いた worktree を、人が別の branch で作っている"
+mainrepo
+sha=$(remote_branch feat-x)
+pr 1 feat-x CONFLICTING SUCCESS DIRTY "" false "$sha"
+adopt_config
+git -C "$M" worktree add -q -b follow-up "$ORCA_ROOT/r/follow-up" trunk
+jq -cn --arg p "$ORCA_ROOT/r/follow-up" '{worktreeId: ("r::" + $p), path: $p, branch: "refs/heads/follow-up", workspaceStatus: "in-progress", isMainWorktree: false, agents: [], repoId: "r", linkedPR: 1}' >>"$FAKE/wts"
+run
+check "作らない" no_create
+check "カードには触らない" not_called "worktree set"
+
+setup "worktree の作成が失敗を返す"
+mainrepo
+sha=$(remote_branch feat-x)
+pr 1 feat-x CONFLICTING SUCCESS DIRTY "" false "$sha"
+adopt_config
+echo '{"ok":false,"error":{"code":"x"}}' >"$FAKE/create.json"
+echo 1 >"$FAKE/create.json.rc"
+run
+run
+run
+run
+check "3 回まで試す" [ "$(count 'worktree create')" = 3 ]
+
+setup "worktree の作成の返事が読めない"
+mainrepo
+sha=$(remote_branch feat-x)
+pr 1 feat-x CONFLICTING SUCCESS DIRTY "" false "$sha"
+adopt_config
+: >"$FAKE/create.json"
+echo 1 >"$FAKE/create.json.rc"
+run
+run
+check "作り直さない (作れていたら 2 つになる)" [ "$(count 'worktree create')" = 1 ]
 
 [ "$fail" = 0 ] && echo "pr-dispatch: all checks passed"
 exit "$fail"

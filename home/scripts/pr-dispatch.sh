@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # 自分の OPEN な PR を見て、対応が要るものに Orca のタブでエージェントを起動する。
-# 対象は Orca に worktree がある非 draft の PR だけ。
+# 対象は Orca に worktree がある非 draft の PR。設定で adopt_prs=true にすると、Orca に登録したリポの
+# worktree の無い PR にも、対応が要るときに worktree を作る (下の「worktree の無い PR」の節)。
 #   conflict → /sync-pr、CI 失敗 → /fix-ci、未対応のレビュー → /review-pr-comments
 # あわせて、人の判断待ちになったものを Orca のボードに出す。
 #   同じ対応を MAX_ATTEMPTS 回起動しても直らない PR → Needs decision
@@ -56,6 +57,15 @@ PENDING_FILE="$RESUME_STATE_DIR/resume-pending.tsv"
 PENDING_NOTICE_AFTER="${PENDING_NOTICE_AFTER:-3600}"
 # 起動の結果が分からないまま、これだけ経ったら人に上げる (秒)。
 LAUNCH_UNKNOWN_AFTER="${LAUNCH_UNKNOWN_AFTER:-1800}"
+# 追跡しない設定 (key=value を 1 行ずつ)。無ければ worktree は作らず、今までどおりの PR 対応だけをする。
+#   adopt_prs=true      worktree の無い PR に worktree を作る
+#   max_worktrees=<数>  Orca の worktree (主 checkout 以外) がこの数に達していたら作らない。無ければ作らない
+CONFIG_FILE="$STATE_ROOT/pr-dispatch/config"
+# worktree を作った記録 (追記のみ)。<時刻> <creating|created|fail|refused> <PR> <head の SHA>
+ADOPTS_FILE="$STATE_ROOT/pr-dispatch/adopts.tsv"
+# これより古い PR には worktree を作らない (日)。放置された PR のために環境を立ち上げない。
+# Dependabot が 30 日動きの無い PR の rebase をやめるのを参考にした、独自の線。
+ADOPT_MAX_AGE_DAYS="${ADOPT_MAX_AGE_DAYS:-30}"
 DRY_RUN="${DRY_RUN:-0}"
 VERBOSE="${VERBOSE:-0}"
 
@@ -70,6 +80,15 @@ orca_set() {
     out=$(orca worktree set "$@" 2>/dev/null) &&
         jq -e '[.. | objects | .warnings? // empty | .[]?] | length == 0' <<<"$out" >/dev/null 2>&1
 }
+
+# cfg <key> <default>: 設定の値。ファイルはシェルとして読まない (書かれた値を実行しない)。
+cfg() {
+    local v
+    v=$(sed -n "s/^$1=//p" "$CONFIG_FILE" 2>/dev/null | tail -n 1)
+    printf '%s' "${v:-$2}"
+}
+adopt_on=0
+[ "$(cfg adopt_prs false)" = "true" ] && adopt_on=1
 
 flagged=0
 # board <path> <reason> <sig> <status|-> <comment>
@@ -141,7 +160,7 @@ me=$(gh api user -q .login 2>/dev/null) || {
     exit 0
 }
 mkdir -p "$(dirname "$STATE_FILE")" "$(dirname "$BOARD_FILE")" "$(dirname "$LAUNCHES_FILE")"
-touch "$STATE_FILE" "$BOARD_FILE" "$LAUNCHES_FILE"
+touch "$STATE_FILE" "$BOARD_FILE" "$LAUNCHES_FILE" "$ADOPTS_FILE"
 
 # ---- Orca の worktree: "<owner/repo>\t<branch>\t<path>\t<board status>" ----
 wt_json=$(orca worktree list --json 2>/dev/null) || {
@@ -172,13 +191,23 @@ done < <(jq -r --arg root "$ORCA_ROOT" '
     | [.path, (.branch | sub("^refs/heads/"; "")), (if (.comment // "") | startswith("マージ判断:") then "1" else "0" end),
        (.workspaceStatus // "")] | @tsv' <<<"$wt_json")
 
-if [ -z "$worktrees" ]; then
+# Orca に登録したリポ: "<owner/repo>\t<主 checkout の path>"。worktree を作るときだけ使う。
+mains=""
+if [ "$adopt_on" = 1 ]; then
+    while IFS= read -r main_path; do
+        slug=$(git -C "$main_path" remote get-url origin 2>/dev/null | sed -E 's#^.*github\.com[:/]##; s#\.git$##') || continue
+        [ -n "$slug" ] || continue
+        mains="$mains$slug"$'\t'"$main_path"$'\n'
+    done < <(jq -r '.result.worktrees[] | select(.isMainWorktree) | .path' <<<"$wt_json")
+fi
+
+if [ -z "$worktrees" ] && [ -z "$mains" ]; then
     log "Orca の worktree が無い。終了"
     exit 0
 fi
 
-# ---- PR の状態を 1 回の問い合わせで取る (検索は worktree のあるリポに絞る) ----
-repos=$(printf '%s' "$worktrees" | cut -f1 | sort -u | sed 's/^/repo:/' | tr '\n' ' ')
+# ---- PR の状態を 1 回の問い合わせで取る (検索は worktree のあるリポと、worktree を作るなら登録したリポに絞る) ----
+repos=$(printf '%s%s' "$worktrees" "$mains" | cut -f1 | sort -u | sed 's/^/repo:/' | tr '\n' ' ')
 search="is:pr is:open draft:false archived:false author:$me $repos"
 # 100 件を超えても全部読む。--paginate は、$endCursor を受け取り pageInfo を返す query を、ページごとに打ち直す
 # (https://cli.github.com/manual/gh_api)。出力はページごとの JSON が並ぶ。
@@ -191,6 +220,10 @@ query($q: String!, $endCursor: String) {
       ... on PullRequest {
         number
         url
+        title
+        createdAt
+        isCrossRepository
+        author { login }
         headRefName
         headRefOid
         mergeable
@@ -212,13 +245,16 @@ query($q: String!, $endCursor: String) {
 # 未対応のレビュー = 未解決のスレッドのうち、最後の発言が自分以外のもの。その発言 ID の並びを状態に使う。
 # 無いときは "-"。空欄にすると read がタブの連続を 1 つに詰め、後ろの列がずれる。
 # スレッドが 100 を超えて全部は読めていないときは "?" (未対応が無いとは言えないので、その PR には何もしない)。
-prs=$(jq -r --arg me "$me" '.data.search.nodes[]
+# 検索は author で絞っているが、返ってきた PR の author も確かめる (他人の PR に worktree を作ったり、エージェントを起動したりしない)。
+prs=$(jq -r --arg me "$me" '.data.search.nodes[] | select(.author.login == $me)
     | [ .repository.nameWithOwner, .headRefName, (.number | tostring), .url, .headRefOid, .mergeable,
         (.commits.nodes[0].commit.statusCheckRollup.state // "NONE"),
         (if .reviewThreads.pageInfo.hasNextPage then "?" else
           ([.reviewThreads.nodes[] | select((.isResolved | not) and (.comments.nodes[0].author.login != $me))
             | .comments.nodes[0].id] | sort | join(",") | if . == "" then "-" else . end) end),
-        .mergeStateStatus, (if .autoMergeRequest then "auto" else "manual" end) ] | @tsv' <<<"$prs_json") || {
+        .mergeStateStatus, (if .autoMergeRequest then "auto" else "manual" end),
+        (.createdAt // "")[0:10], (if .isCrossRepository then "1" else "0" end),
+        ((.title // "-") | gsub("[\t\r\n]"; " ")) ] | @tsv' <<<"$prs_json") || {
     log "WARN: GitHub の返事を読めない。見送り"
     exit 0
 }
@@ -351,7 +387,7 @@ launch_agent() {
 }
 
 launched=0
-while IFS=$'\t' read -r slug branch num url head mergeable ci threads merge_state merge_mode; do
+while IFS=$'\t' read -r slug branch num url head mergeable ci threads merge_state merge_mode _; do
     [ -n "$slug" ] || continue
     line=$(printf '%s' "$worktrees" | awk -F'\t' -v s="$slug" -v b="$branch" '$1 == s && $2 == b { print; exit }')
     [ -n "$line" ] || continue
@@ -475,6 +511,129 @@ while IFS=$'\t' read -r slug branch num url head mergeable ci threads merge_stat
         log "WARN: 起動できなかった $action → $pr ($(launch_last "$key" | cut -f2)。失敗なら次回に試し直し、返事を失ったなら同じ依頼を出し直す。分からなければ起動し直さない)"
     fi
 done <<<"$prs"
+
+# ---- worktree の無い PR に worktree を作る (adopt_prs=true のとき) ----
+# 対応が要る (conflict・CI 失敗・未対応のレビュー) のに worktree が無い PR は、今までは人が手で対応していた。
+# worktree を作っておけば、次の回から上の PR 対応がそのまま効く (起動はこの回にはしない)。1 回に 1 つ。
+adopt_log() { printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "$2" "$1" "$3" >>"$ADOPTS_FILE"; } # adopt_log <PR> <状態> <SHA>
+adopt_last() { awk -F'\t' -v p="$1" '$3 == p { l = $2 FS $4 } END { if (l != "") print l }' "$ADOPTS_FILE"; }
+# adopt_pr <PR> <番号> <branch> <SHA> <主 checkout> <カードの名前>
+# 返り値: 0 = 作った、2 = 手を付けずに見送った (次の候補を見てよい)、1 = 失敗した・途中で止まった。
+adopt_pr() {
+    local pr=$1 num=$2 branch=$3 oid=$4 main=$5 name=$6 out rc=0 wt tmp err fetched
+    # ① ローカルの同名ブランチを PR の head まで進める (無ければ作る)。ローカルが先行・分岐していると git が拒否する。
+    #    拒否されたら何もしない (未 push のコミットを捨てたり、勝手に push したりしない)。
+    if ! err=$(git -C "$main" fetch origin "$branch:$branch" 2>&1); then
+        if printf '%s' "$err" | grep -Eq 'rejected|refusing'; then
+            log "adopt 見送り $pr: ローカルの $branch を PR の head に進められない ($(printf '%s' "$err" | grep -E 'rejected|refusing' | head -n 1 | sed 's/^[[:space:]]*//'))"
+            adopt_log "$pr" refused "$oid" || true # head が変わるまで試し直さない
+        else
+            log "WARN: adopt $pr: fetch に失敗 (次回に再試行)"
+        fi
+        return 2
+    fi
+    fetched=$(git -C "$main" rev-parse --verify --quiet "refs/heads/$branch") || return 2
+    adopt_log "$pr" creating "$oid" || {
+        log "WARN: worktree を作る記録を書けない。作らない"
+        return 1
+    }
+    # ② --pr だけでは PR の head を checkout しない (base から新しいブランチを切る)。head を base にして作り、③で切り替える。
+    #    --no-parent: 実行した場所の Orca の親子関係を引き継がせない。cwd は固定する (pr-dispatch の起動と同じ)。
+    out=$(cd "$HOME" && orca worktree create --repo "path:$main" --name "pr-$num" --branch "pr-$num" --pr "$num" \
+        --base-branch "origin/$branch" --setup run --no-parent --json 2>/dev/null) || rc=$?
+    wt=$(jq -r '.result.worktree.path // empty' <<<"$out" 2>/dev/null || true)
+    if [ "$rc" != 0 ] || [ -z "$wt" ]; then
+        # はっきり失敗と分かるときだけ fail (次の回に試し直す)。返事が読めないときは creating のまま残し、作り直さない。
+        [ "$(jq -r '.ok' <<<"$out" 2>/dev/null || true)" != "false" ] || adopt_log "$pr" fail "$oid" || true
+        log "WARN: adopt $pr: worktree を作れなかった ($(adopt_last "$pr" | cut -f1))"
+        return 1
+    fi
+    tmp=$(jq -r '.result.worktree.branch // empty' <<<"$out" 2>/dev/null | sed 's#^refs/heads/##')
+    # ③ PR の branch に切り替える。①で揃えてあるので同じコミットの間の切り替えで、setup の最中でもファイルは変わらない。
+    if ! git -C "$wt" switch -q "$branch" 2>/dev/null || [ "$(git -C "$wt" rev-parse HEAD 2>/dev/null)" != "$fetched" ]; then
+        log "WARN: adopt $pr: PR の branch に切り替えられない。ここで止める ($wt)"
+        board "$wt" adopt-stuck "$oid" needs-decision "PR #$num の取り込みが途中で止まった（branch が $branch になっていない）"
+        return 1
+    fi
+    # Orca が作った仮のブランチを消す。名前は作成の返事から取る (使用済みの名前には Orca が数字を足すので、
+    # 決め打ちの pr-<番号> を消すと別のブランチを消しうる)。-d はマージされていないブランチを消さない。
+    [ -z "$tmp" ] || [ "$tmp" = "$branch" ] || git -C "$wt" branch -d "$tmp" >/dev/null 2>&1 || true
+    # branch を切り替えると Orca の PR との結び付きが外れるので、付け直す。カードは PR のある作業の列 (In review) に置く。
+    orca_set --worktree "path:$wt" --pr "$num" --workspace-status in-review --display-name "$name" \
+        --comment "auto: PR #$num の対応のために worktree を作成" --json ||
+        log "WARN: adopt $pr: カードを書けない ($wt)"
+    adopt_log "$pr" created "$oid" || true
+    log "adopt $pr → ${wt#"$ORCA_ROOT"/}"
+    return 0
+}
+
+if [ "$adopt_on" = 1 ] && [ "$braked" = 0 ]; then
+    max_wt=$(cfg max_worktrees 0)
+    case "$max_wt" in '' | *[!0-9]*) max_wt=0 ;; esac
+    n_wt=$(jq '[.result.worktrees[] | select(.isMainWorktree | not)] | length' <<<"$wt_json")
+    # macOS の date は -v、テストを回す CI (Linux) の date は -d。
+    cutoff=$(date -v-"${ADOPT_MAX_AGE_DAYS}"d +%Y-%m-%d 2>/dev/null || date -d "$ADOPT_MAX_AGE_DAYS days ago" +%Y-%m-%d)
+    while IFS=$'\t' read -r slug branch num url head mergeable ci threads merge_state merge_mode created cross title; do
+        [ -n "$slug" ] || continue
+        # 対応が要る PR だけ (上の PR 対応と同じ条件)。
+        [ "$mergeable" = "CONFLICTING" ] || [ "$ci" = "FAILURE" ] || [ "$ci" = "ERROR" ] ||
+            { [ "$threads" != "-" ] && [ "$threads" != "?" ]; } || continue
+        [ -z "$(printf '%s' "$worktrees" | awk -F'\t' -v s="$slug" -v b="$branch" '$1 == s && $2 == b { print; exit }')" ] || continue
+        pr="$slug#$num"
+        main=$(printf '%s' "$mains" | awk -F'\t' -v s="$slug" '$1 == s { print $2; exit }')
+        [ -n "$main" ] || continue
+        if [ "$cross" != "0" ]; then
+            vlog "adopt 見送り $pr (fork からの PR)"
+            continue
+        fi
+        if [ "$created" \< "$cutoff" ]; then
+            vlog "adopt 見送り $pr (作成から $ADOPT_MAX_AGE_DAYS 日を超えている)"
+            continue
+        fi
+        last="" last_oid=""
+        IFS=$'\t' read -r last last_oid <<<"$(adopt_last "$pr")" || true
+        # この PR に結び付いた worktree が、別の branch で既にある。
+        linked=$(jq -r --arg m "$main" --argjson n "$num" '
+            ([.result.worktrees[] | select(.isMainWorktree and .path == $m) | .repoId][0]) as $r
+            | [.result.worktrees[] | select((.isMainWorktree | not) and .repoId == $r
+                and (.linkedPR == $n or any(.linkedItems[]?; .type == "pr" and .number == $n))) | .path][0] // empty' <<<"$wt_json")
+        if [ -n "$linked" ]; then
+            if [ "$last" = "creating" ]; then
+                # 前の回が、worktree を作ってから branch を切り替えるまでの間で止まった。自動では続けない。
+                board "$linked" adopt-stuck "$last_oid" needs-decision "PR #$num の取り込みが途中で止まった（branch が $branch になっていない）"
+            else
+                vlog "adopt 見送り $pr (この PR に結び付いた worktree が別の branch で既にある: $linked)"
+            fi
+            continue
+        fi
+        case "$last" in
+        created) continue ;; # 一度作った PR。その worktree を人が消したのなら、作り直さない
+        creating)
+            vlog "adopt 見送り $pr (前の作成の結果が分からない。作り直さない)"
+            continue
+            ;;
+        refused) [ "$last_oid" != "$head" ] || continue ;;
+        esac
+        fails=$(awk -F'\t' -v p="$pr" -v o="$head" '$3 == p && $4 == o && $2 == "fail"' "$ADOPTS_FILE" | wc -l | tr -d ' ')
+        [ "$fails" -lt "$MAX_ATTEMPTS" ] || continue
+        if [ "$n_wt" -ge "$max_wt" ]; then
+            vlog "adopt 見送り $pr (worktree が $n_wt 個で、max_worktrees=$max_wt に達している)"
+            break
+        fi
+        # 別の checkout で使用中の branch は git が fetch を拒否する。ネットワークを使う前に分かるので、先に見る。
+        if git -C "$main" worktree list --porcelain 2>/dev/null | grep -qxF -- "branch refs/heads/$branch"; then
+            vlog "adopt 見送り $pr ($branch は Orca の外の checkout で使用中)"
+            continue
+        fi
+        if [ "$DRY_RUN" = "1" ]; then
+            log "DRY-RUN: adopt $pr (worktree を作る)"
+            break
+        fi
+        rc=0
+        adopt_pr "$pr" "$num" "$branch" "$head" "$main" "$(printf '%s: %s' "${slug#*/}" "$title" | cut -c1-60)" || rc=$?
+        [ "$rc" = 2 ] || break
+    done <<<"$prs"
+fi
 
 # ---- PR がマージ・クローズされた worktree のカードを Done に移す ----
 # worktree を消すのは worktree-gc (1 時間ごと) なので、それまでの間 In progress や In review に残って紛らわしい。
