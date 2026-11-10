@@ -68,13 +68,24 @@ case "$1 $2" in
 esac
 EOF
 # graphql は、開いている PR の問い合わせには prs.json (ページごとの JSON)、クローズ済みには closed.tsv を返す。
+# キューの issue の検索には issues.json、1 件の issue (check) には issue.json、draft を含む自分の open PR には
+# prs.json と drafts.json (draft の PR を足すとき) を返す。
 cat >"$base/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 echo "gh $*" >>"$FAKE/calls"
 [ -e "$FAKE/gh-down" ] && exit 1
 case "$1 $2" in
     "api user") echo me ;;
-    "api graphql") case "$*" in *is:closed*) cat "$FAKE/closed.tsv" ;; *) cat "$FAKE/prs.json" ;; esac ;;
+    "api graphql")
+        case "$*" in
+            *is:closed*) [ -e "$FAKE/closed-down" ] && exit 1; cat "$FAKE/closed.tsv" ;;
+            *is:issue*) [ -e "$FAKE/issues-down" ] && exit 1; cat "$FAKE/issues.json" ;;
+            *"issue(number"*) [ -e "$FAKE/issue-down" ] && exit 1; cat "$FAKE/issue.json" ;;
+            *draft:false*) cat "$FAKE/prs.json" ;;
+            *) [ -e "$FAKE/open-down" ] && exit 1; cat "$FAKE/prs.json"; cat "$FAKE/drafts.json" 2>/dev/null || true ;;
+        esac
+        ;;
+    "issue edit") [ -e "$FAKE/edit-fail" ] && exit 1; true ;;
     "pr list") echo 0 ;;
 esac
 EOF
@@ -117,6 +128,7 @@ setup() { # setup <ケース名>: 状態と偽の入力を作り直す
     : >"$FAKE/wts"
     : >"$FAKE/nodes"
     : >"$FAKE/closed.tsv"
+    : >"$FAKE/issues"
     echo '{"ok":true}' >"$FAKE/launch.json"
     echo '{"ok":true}' >"$FAKE/set.json"
     echo '{"result":{"terminals":[],"truncated":false}}' >"$FAKE/terms.json"
@@ -150,11 +162,14 @@ render() { # wts と nodes から、偽の orca / gh が返す JSON を作る
     jq -cs '{result: {worktrees: ., truncated: false}}' "$FAKE/wts" >"$FAKE/list.json"
     jq -c --argjson t "${PS_TRUNC:-false}" '.result.truncated = $t' "$FAKE/list.json" >"$FAKE/ps.json"
     [ -e "$FAKE/prs.fixed" ] || page <"$FAKE/nodes" >"$FAKE/prs.json"
+    page <"$FAKE/issues" >"$FAKE/issues.json"
 }
 run() {
     render
     bash "$script" >"$base/out" 2>&1
     rc=$?
+    # 途中で落ちた回 (未定義の変数など) も「何も起動しない」に見えるので、どの回も最後まで回ったことを確かめる。
+    [ "$rc" = 0 ] || { echo "FAIL [$CASE] exit $rc: $(tail -n 1 "$base/out")"; fail=1; }
 }
 called() { grep -qF -- "$1" "$FAKE/calls"; }
 not_called() { ! grep -qF -- "$1" "$FAKE/calls"; }
@@ -1184,6 +1199,580 @@ echo 1 >"$FAKE/create.json.rc"
 run
 run
 check "作り直さない (作れていたら 2 つになる)" [ "$(count 'worktree create')" = 1 ]
+
+# ---- キュー: 自分がラベルを付けた自分の issue に worktree を作って worker を起動する ----
+# ラベル名は何でもよい (実際の名前は追跡しない config にだけ書く)。T1 がラベルを付けた時刻。
+LBL=q-label
+T1=2026-01-02T00:00:00Z
+T2=2026-01-03T00:00:00Z
+queue_config() { printf 'queue_repos=o/r\nqueue_label=%s\nmax_worktrees=10\nmax_open_prs=10\nmax_per_day=5\n%b' "$LBL" "${1:-}" >"$S/config"; }
+q_setup() { # q_setup <ケース名>: 主 checkout とキューの設定まで
+    setup "キュー: $1"
+    mainrepo
+    queue_config
+}
+# issue <番号> [上書きする jq の式 ($t = T1、$l = ラベル名)]: キューのラベルを T1 に自分が付けた、自分の open issue
+issue() {
+    jq -cn --argjson n "$1" --arg l "$LBL" --arg t "$T1" '
+        def conn($x): {pageInfo: {hasNextPage: false}, nodes: $x};
+        {number: $n, title: ("Fix thing " + ($n | tostring)), state: "OPEN",
+         createdAt: ("2025-12-01T00:00:" + (if $n < 10 then "0" else "" end) + ($n | tostring) + "Z"),
+         lastEditedAt: null, author: {login: "me"}, editor: null,
+         repository: {nameWithOwner: "o/r", defaultBranchRef: {name: "trunk"}},
+         assignees: conn([]), labels: conn([{name: $l}]),
+         labeled: conn([{createdAt: $t, actor: {login: "me"}, label: {name: $l}}]),
+         comments: conn([]), blockedBy: conn([]), subIssuesSummary: {total: 0},
+         closedByPullRequestsReferences: conn([]), xrefs: conn([])} | '"${2:-.}" >>"$FAKE/issues"
+}
+# qwt <名前> <issue の番号> <列> [エージェントの JSON 配列] [作成時刻] [branch]: キュー由来の worktree を Orca の一覧に出す
+qwt() {
+    wt "$1" "${6:-issue-$2-fix}" "$3" "${4:-[]}"
+    tail -n 1 "$FAKE/wts" | jq -c --argjson n "$2" --argjson c "${5:-1}" '.linkedIssue = $n | .createdAt = $c' >"$FAKE/wts.last"
+    sed '$d' "$FAKE/wts" >"$FAKE/wts.new" && cat "$FAKE/wts.last" >>"$FAKE/wts.new" && mv "$FAKE/wts.new" "$FAKE/wts"
+}
+# qcreated <番号> [列] [エージェントの JSON 配列]: 前の回に偽の Orca が作った worktree を、一覧に出す
+qcreated() {
+    jq -cn --arg p "$ORCA_ROOT/r/issue-$1-fix-thing-$1" --arg b "refs/heads/issue-$1-fix-thing-$1" --argjson n "$1" --arg s "${2:-in-progress}" --argjson a "${3:-[]}" \
+        '{worktreeId: ("r::" + $p), path: $p, branch: $b, workspaceStatus: $s, isMainWorktree: false, agents: $a, repoId: "r", linkedIssue: $n, createdAt: 1}' >>"$FAKE/wts"
+}
+qkey() { printf 'o/r#%s\tissue-worker\t%s' "$1" "${2:-$T1}"; } # qkey <番号> [T]: launches.tsv のキー
+qrow() { printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$(qkey "$4" "${5:-$T1}")" >>"$S/launches.tsv"; } # qrow <時刻> <状態> <op> <番号> [T]
+states() { cut -f2 "$S/launches.tsv" | tr '\n' ' '; }
+q_created() { called "worktree create --repo path:$M --name issue-$1-"; }
+q_launched() { called "--prompt /issue-worker $1 --approved-at ${2:-$T1}"; }
+draft_pr() { # draft_pr <番号> <branch> <CI>: 自分の draft の PR (PR 対応の検索には出ない)
+    jq -cn --argjson n "$1" --arg b "$2" --arg ci "$3" '{number: $n, isDraft: true, headRefName: $b, headRefOid: ("sha" + ($n | tostring)),
+        author: {login: "me"}, repository: {nameWithOwner: "o/r"}, commits: {nodes: [{commit: {statusCheckRollup: {state: $ci}}}]}}' | page >>"$FAKE/drafts.json"
+}
+
+q_setup "ready な issue に worktree を作って worker を起動する"
+issue 1
+run
+check "exit 0" [ "$rc" = 0 ]
+check "検索は、自分の、ラベルの付いた open issue に絞る" called "is:issue is:open author:me label:\"$LBL\" repo:o/r"
+check "worktree を既定ブランチから作る" called "worktree create --repo path:$M --name issue-1-fix-thing-1 --branch issue-1-fix-thing-1 --issue 1 --base-branch origin/trunk --setup run --no-parent --json"
+check "カードに名前を付ける" called "--display-name r: #1 Fix thing 1 --json"
+check "worker に T を渡して起動する" called "agent launch --agent claude --worktree path:$ORCA_ROOT/r/issue-1-fix-thing-1 --prompt /issue-worker 1 --approved-at $T1"
+check "モデルと面を指定する" called "--json --model opus --effort high --surface chat"
+check "指示に起動の印を入れる" grep -qF "pr-dispatch による自動起動 $(awk -F'\t' '$2 == "launching" { print $1 }' "$S/launches.tsv")。" "$FAKE/calls"
+check "副作用の前後を記録する" [ "$(states)" = "creating launching launched " ]
+check "起動できたらラベルを外す" called "gh issue edit 1 -R o/r --remove-label $LBL"
+
+q_setup "ラベルを外す前に落ちた (launched の後)"
+issue 1
+qcreated 1 in-progress "$(agent working t1:l1 "/issue-worker 1")"
+qrow 100 creating - 1
+qrow 101 launching - 1
+qrow 102 launched - 1
+run
+check "起動し直さない" no_launch
+check "作り直さない" no_create
+check "ラベルを外す" called "gh issue edit 1 -R o/r --remove-label $LBL"
+
+setup "キュー: 設定が無ければキューは無効"
+mainrepo
+wt a feat-a in-progress # worktree が無いと、キューの前に終わる回になって確かめられない
+issue 1
+run
+check "issue を探さない" not_called "is:issue"
+check "作らない" no_create
+printf 'queue_label=%s\n' "$LBL" >"$S/config"
+run
+check "対象のリポが無ければ無効" not_called "is:issue"
+printf 'queue_repos=o/r\n' >"$S/config"
+run
+check "ラベルが無ければ無効" not_called "is:issue"
+
+# q_excluded <説明> <jq の式> <ログに出る理由> [config に足す行]
+q_excluded() {
+    q_setup "対象外: $1"
+    [ -z "${4:-}" ] || printf '%s\n' "$4" >>"$S/config"
+    issue 2
+    issue 1 "$2"
+    run
+    check "worktree を作らない" not_created_issue 1
+    check "その issue には起動しない" not_called "/issue-worker 1 "
+    check "理由を出す" logged "queue 対象外 o/r#1 ($3)"
+    check "ほかの ready な issue は作る" q_created 2
+}
+not_created_issue() { not_called "worktree create --repo path:$M --name issue-$1-"; }
+q_excluded "他人がラベルを付けた" '.labeled.nodes[0].actor.login = "someone"' "ラベルを最後に付けたのが自分でない"
+q_excluded "自分が付けたあと、他人が付け直した" '.labeled.nodes += [{createdAt: "2026-01-02T06:00:00Z", actor: {login: "someone"}, label: {name: $l}}]' "ラベルを最後に付けたのが自分でない"
+q_excluded "T より後の本文の編集 (1 秒後)" '.lastEditedAt = "2026-01-02T00:00:01Z" | .editor = {login: "me"}' "ラベルの後に本文が編集された"
+q_excluded "本文を最後に編集したのが他人 (T より前)" '.lastEditedAt = "2026-01-01T00:00:00Z" | .editor = {login: "someone"}' "本文を最後に編集したのが自分でない"
+q_excluded "T より後に、それ以前の自分のコメントが編集された" '.comments.nodes = [{createdAt: "2026-01-01T00:00:00Z", lastEditedAt: "2026-01-02T00:00:01Z", author: {login: "me"}}]' "ラベルの後に、それ以前の自分のコメントが編集された"
+q_excluded "no-agent" '.labels.nodes += [{name: "no-agent"}]' "no-agent"
+q_excluded "ask のラベル" '.labels.nodes += [{name: "area: risky"}]' "ask のラベル" "ask_labels=other,area: risky"
+q_excluded "ask の語" '.title = "本番の設定を直す"' "ask の語"
+q_excluded "ask の語 (大文字小文字を区別しない)" '.title = "Rotate the SECRET"' "ask の語"
+q_excluded "開いた blocker" '.blockedBy.nodes = [{state: "CLOSED"}, {state: "OPEN"}]' "開いている blocker がある"
+q_excluded "子 issue" '.subIssuesSummary.total = 1' "子 issue がある"
+q_excluded "閉じる PR (マージ済み)" '.closedByPullRequestsReferences.nodes = [{state: "CLOSED"}, {state: "MERGED"}]' "閉じる PR がある"
+q_excluded "閉じる PR の参照 (open)" '.xrefs.nodes = [{willCloseTarget: true, source: {__typename: "PullRequest", state: "OPEN"}}]' "閉じる PR がある"
+q_excluded "内側の一覧が欠ける (コメント)" '.comments.pageInfo.hasNextPage = true' "内側の一覧が欠けている"
+q_excluded "内側の一覧が欠ける (blocker)" '.blockedBy.pageInfo.hasNextPage = true' "内側の一覧が欠けている"
+q_excluded "内側の一覧が欠ける (ラベルの履歴)" '.labeled.pageInfo.hasNextPage = true' "内側の一覧が欠けている"
+q_excluded "自分以外が assignee" '.assignees.nodes = [{login: "me"}, {login: "someone"}]' "自分以外が assignee"
+q_excluded "author が他人" '.author.login = "someone"' "author が自分でない"
+q_excluded "閉じている" '.state = "CLOSED"' "閉じている"
+q_excluded "ラベルの履歴が無い (キー欠落)" 'del(.labeled.nodes[0].createdAt)' "ラベルを付けた時刻が分からない"
+
+# q_ready <説明> <jq の式>: 止める理由に見えるが、止めないもの
+q_ready() {
+    q_setup "止めない: $1"
+    issue 1 "$2"
+    run
+    check "worktree を作る" q_created 1
+    check "worker を起動する" q_launched 1
+}
+q_ready "T より後のコメント (自分が書いて編集した) は仕様に入らない" '.comments.nodes = [{createdAt: "2026-01-02T00:00:01Z", lastEditedAt: "2026-01-02T00:00:09Z", author: {login: "me"}}]'
+q_ready "他人のコメントが T より後に編集された" '.comments.nodes = [{createdAt: "2026-01-01T00:00:00Z", lastEditedAt: "2026-01-02T00:00:09Z", author: {login: "someone"}}]'
+q_ready "本文の編集が T と同じ時刻" '.lastEditedAt = $t | .editor = {login: "me"}'
+q_ready "本文の editor が null (T より前の編集)" '.lastEditedAt = "2026-01-01T00:00:00Z"'
+q_ready "blocker が全部閉じている" '.blockedBy.nodes = [{state: "CLOSED"}]'
+q_ready "閉じた PR と、閉じない参照だけ" '.closedByPullRequestsReferences.nodes = [{state: "CLOSED"}] | .xrefs.nodes = [{willCloseTarget: false, source: {__typename: "PullRequest", state: "OPEN"}}, {willCloseTarget: true, source: {__typename: "Issue"}}]'
+q_ready "assignee が自分だけ" '.assignees.nodes = [{login: "me"}]'
+q_ready "自分が付け直した (最後の時刻を T にする)" '.labeled.nodes = [{createdAt: "2025-12-30T00:00:00Z", actor: {login: "someone"}, label: {name: $l}}, {createdAt: $t, actor: {login: "me"}, label: {name: $l}}, {createdAt: "2026-01-02T05:00:00Z", actor: {login: "someone"}, label: {name: "other"}}]'
+
+q_setup "題名が日本語でも、カードの名前を文字の途中で切らない"
+issue 1 '.title = "ログイン画面の文言を直すログイン画面の文言を直すログイン画面の文言を直すログイン画面の文言を直す"'
+run
+check "branch は英数字の部分だけ (無ければ work)" q_created 1
+check "branch の名前" called "--name issue-1-work --branch issue-1-work"
+check "カードの名前は UTF-8 のまま" iconv -f UTF-8 -t UTF-8 "$FAKE/calls"
+
+# Orca に worktree がある issue (linkedIssue・linkedItems の URL・branch の接頭辞) は ready にしない。
+for how in linked url branch; do
+    q_setup "worktree がある ($how)"
+    issue 1
+    case "$how" in
+    linked) qwt other 1 in-progress "[]" 1 follow-up ;;
+    url) wt other follow-up in-progress && jq -c '.linkedItems = [{type: "issue", url: "https://github.com/o/r/issues/1"}]' "$FAKE/wts" | tail -n 1 >"$FAKE/wts.last" &&
+        { sed '$d' "$FAKE/wts"; cat "$FAKE/wts.last"; } >"$FAKE/wts.new" && mv "$FAKE/wts.new" "$FAKE/wts" ;;
+    branch) wt other issue-1-by-hand in-progress ;;
+    esac
+    run
+    check "作らない" no_create
+    check "理由を出す" logged "queue 対象外 o/r#1 (Orca に worktree がある"
+done
+
+q_setup "古い順に、1 回に 1 件"
+issue 2 '.createdAt = "2025-11-01T00:00:00Z"'
+issue 1
+run
+check "古い方 (#2) を作る" q_created 2
+check "1 回に 1 件" [ "$(count 'worktree create')" = 1 ]
+run
+check "次の回に、もう 1 件" q_created 1
+check "合わせて 2 件" [ "$(count 'worktree create')" = 2 ]
+
+q_setup "BRAKE"
+issue 1
+: >"$S/BRAKE"
+run
+check "作らない" no_create
+
+q_setup "DRY_RUN"
+issue 1
+render
+DRY_RUN=1 bash "$script" >"$base/out" 2>&1
+check "作らない" no_create
+check "作る予定を出す" logged "DRY-RUN: queue worktree を作って worker を起動 → o/r#1"
+check "記録しない" [ ! -s "$S/launches.tsv" ]
+check "ラベルを外さない" not_called "issue edit"
+
+# ---- キュー: 新しい着手を止める線 ----
+q_setup "max_wip"
+issue 1
+qwt w5 5 in-progress                                   # PR が無い → 数える
+qwt w6 6 in-review "$(agent done)"                     # PR があり、終わっている → 数えない
+pr 60 issue-6-fix MERGEABLE SUCCESS BLOCKED
+qwt w7 7 needs-decision "$(agent done)"                # PR があっても Needs decision → 数える
+pr 70 issue-7-fix MERGEABLE SUCCESS BLOCKED
+qwt w8 8 completed                                     # Done → 数えない
+wt w9 issue-9-no-link in-progress                      # linkedIssue が無い → キュー由来ではない
+qrow "$(date +%s)" creating - 4                        # 作成の結果待ちで worktree が見えない → 数える
+queue_config 'max_wip=3\n'
+run
+check "3 つ占有で止める" no_create
+check "理由を出す" logged "queue 見送り o/r#1 (max_wip (3/3))"
+queue_config 'max_wip=4\n'
+run
+check "線を上げれば作る" q_created 1
+
+q_setup "max_per_day (今日の JST の creating を数える)"
+issue 1
+now=$(date +%s)
+day0=$((now - (now + 32400) % 86400))
+qrow "$((day0 - 1))" creating - 8
+qrow "$((day0 - 1))" launched - 8
+qrow "$day0" creating - 9
+qrow "$day0" launched - 9
+queue_config 'max_per_day=1\n'
+run
+check "今日 1 件で止める" no_create
+check "理由を出す" logged "max_per_day (1/1)"
+queue_config 'max_per_day=2\n'
+run
+check "昨日の分は数えない" q_created 1
+
+q_setup "max_open_prs (draft と、worktree の無い PR も数える)"
+issue 1
+pr 50 feat-x MERGEABLE SUCCESS BLOCKED
+draft_pr 51 feat-y SUCCESS
+queue_config 'max_open_prs=2\n'
+run
+check "2 本で止める" no_create
+check "理由を出す" logged "max_open_prs (2/2)"
+queue_config 'max_open_prs=3\n'
+run
+check "線を上げれば作る" q_created 1
+
+q_setup "max_worktrees"
+issue 1
+wt a feat-a in-progress
+wt b feat-b in-progress
+queue_config 'max_worktrees=2\n'
+run
+check "2 つで止める" no_create
+queue_config 'max_worktrees=3\n'
+run
+check "線を上げれば作る" q_created 1
+
+q_setup "max_open_prs と max_worktrees を書いていなければ作らない"
+issue 1
+printf 'queue_repos=o/r\nqueue_label=%s\n' "$LBL" >"$S/config"
+run
+check "作らない" no_create
+
+q_setup "自分の open PR (draft を含む) を取れない"
+issue 1
+: >"$FAKE/open-down"
+run
+check "作らない" no_create
+
+q_setup "キューの issue を取れない"
+issue 1
+: >"$FAKE/issues-down"
+run
+check "exit 0" [ "$rc" = 0 ]
+check "作らない" no_create
+
+# ---- キュー: 副作用の途中で落ちた・結果が分からない ----
+q_setup "worktree を作る前に落ちた (creating だけ)"
+issue 1
+issue 2
+qrow "$(date +%s)" creating - 1
+queue_config 'max_wip=1\n'
+run
+check "作り直さない" not_created_issue 1
+check "結果待ちは枠を占有する (ほかの issue も作らない)" no_create
+
+q_setup "worktree を作った後、起動の前に落ちた"
+issue 1
+qrow "$(date +%s)" creating - 1
+qcreated 1
+run
+check "作り直さない" no_create
+check "その worktree に worker を起動する" called "agent launch --agent claude --worktree path:$ORCA_ROOT/r/issue-1-fix-thing-1 --prompt /issue-worker 1 --approved-at $T1"
+check "記録を続ける" [ "$(states)" = "creating launching launched " ]
+check "ラベルを外す" called "gh issue edit 1 -R o/r --remove-label $LBL"
+
+q_setup "worktree の作成の返事が読めない"
+issue 1
+: >"$FAKE/create.json"
+echo 1 >"$FAKE/create.json.rc"
+run
+run
+check "作り直さない (作れていたら 2 つになる)" [ "$(count 'worktree create')" = 1 ]
+check "creating のまま" [ "$(states)" = "creating " ]
+
+q_setup "worktree の作成が失敗を返す"
+issue 1
+echo '{"ok":false,"error":{"code":"x"}}' >"$FAKE/create.json"
+echo 1 >"$FAKE/create.json.rc"
+run
+check "失敗を記録する" [ "$(states)" = "creating fail " ]
+run
+run
+run
+check "同じ T で 3 回まで" [ "$(count 'worktree create')" = 3 ]
+
+q_setup "起動の前後で落ちた (launching の結果なし)"
+issue 1
+t0=$(($(date +%s) - 60))
+qrow "$((t0 - 1))" creating - 1
+qrow "$t0" launching - 1
+qcreated 1
+run
+check "起動し直さない" no_launch
+check "まだ人には上げない" not_called "起動できたか分からない"
+# 同じ issue の指示でも、この起動の印が無いエージェント (人が始めたもの) は、起動できた証拠にしない。
+: >"$FAKE/wts"
+mainrepo_row() { jq -cn --arg p "$M" '{worktreeId: ("r::" + $p), path: $p, branch: "refs/heads/trunk", workspaceStatus: "", isMainWorktree: true, agents: [], repoId: "r"}' >>"$FAKE/wts"; }
+mainrepo_row
+qcreated 1 in-progress "$(agent done t1:l1 "/issue-worker 1 --approved-at $T1 (pr-dispatch による自動起動 $((t0 - 500))。)")"
+run
+check "印の違うエージェントでは閉じない" [ "$(states)" = "creating launching " ]
+check "起動し直さない (エージェントが居る)" no_launch
+: >"$FAKE/wts"
+mainrepo_row
+qcreated 1 in-progress "$(agent working t1:l1 "/issue-worker 1 --approved-at $T1 (pr-dispatch による自動起動 ${t0}。)")"
+run
+check "この起動の印のエージェントが居れば、起動できていた" [ "$(states)" = "creating launching launched " ]
+check "ラベルを外す" called "gh issue edit 1 -R o/r --remove-label $LBL"
+check "起動し直さない" no_launch
+
+q_setup "起動の結果が分からないまま 30 分"
+issue 1
+t0=$(($(date +%s) - 60))
+qrow "$((t0 - 1))" creating - 1
+qrow "$t0" launching - 1
+qcreated 1
+LAUNCH_UNKNOWN_AFTER=0 run
+check "人に上げる" called "--comment worker を起動できたか分からない: #1 --json --unread --workspace-status needs-decision"
+check "閉じる" [ "$(states)" = "creating launching unknown " ]
+check "起動し直さない" no_launch
+LAUNCH_UNKNOWN_AFTER=0 run
+check "その後も起動し直さない" no_launch
+check "ラベルは外さない (起動できたか分からない)" not_called "issue edit"
+
+q_setup "起動の返事を失う"
+issue 1
+echo '{"ok":false,"error":{"code":"reply_lost","data":{"operationId":"op_1"}}}' >"$FAKE/launch.json"
+echo 1 >"$FAKE/launch.json.rc"
+run
+check "operationId を残す" [ "$(states)" = "creating launching lost " ]
+check "ラベルは外さない" not_called "issue edit"
+echo '{"ok":true}' >"$FAKE/launch.json"
+echo 0 >"$FAKE/launch.json.rc"
+qcreated 1
+run
+check "作り直さない" [ "$(count 'worktree create')" = 1 ]
+check "同じ依頼を出し直す" called "--json --model opus --effort high --surface chat --retry-launch op_1"
+check "出し直しの指示も同じ印" [ "$(grep -c "pr-dispatch による自動起動 $(awk -F'\t' '$2 == "launching" { print $1; exit }' "$S/launches.tsv")。" "$FAKE/calls")" = 2 ]
+check "通ったらラベルを外す" called "gh issue edit 1 -R o/r --remove-label $LBL"
+
+q_setup "起動が 3 回失敗する"
+issue 1
+echo '{"ok":false,"error":{"code":"x"}}' >"$FAKE/launch.json"
+echo 1 >"$FAKE/launch.json.rc"
+run
+check "失敗を記録する" [ "$(states)" = "creating launching fail " ]
+qcreated 1
+run
+run
+check "作り直さず、同じ worktree で起動し直す" [ "$(count 'worktree create')" = 1 ]
+check "3 回まで" [ "$(count 'agent launch')" = 3 ]
+run
+check "それ以上は起動しない" [ "$(count 'agent launch')" = 3 ]
+check "人に上げる" called "--comment worker の起動に 3 回失敗: #1 --json --unread --workspace-status needs-decision"
+
+q_setup "ラベルを外し損ねても、同じ T では起動しない"
+issue 1
+: >"$FAKE/edit-fail"
+run
+check "起動する" q_launched 1
+run
+check "同じ T では作り直さない (worktree を人が消していても)" [ "$(count 'worktree create')" = 1 ]
+check "ラベルを外し直す" [ "$(count 'issue edit')" = 2 ]
+
+q_setup "ラベルを付け直すと、新しい T で起動する (worktree が残っている間は起動しない)"
+issue 1
+run
+: >"$FAKE/issues"
+issue 1 '.labeled.nodes += [{createdAt: "2026-01-03T00:00:00Z", actor: {login: "me"}, label: {name: $l}}]'
+qcreated 1 in-review
+run
+check "古い worktree が残っている間は作らない" [ "$(count 'worktree create')" = 1 ]
+check "理由を出す" logged "queue 対象外 o/r#1 (Orca に worktree がある"
+git -C "$M" worktree remove --force "$ORCA_ROOT/r/issue-1-fix-thing-1"
+: >"$FAKE/wts"
+mainrepo_row
+run
+check "消したら、新しい T で作る" [ "$(count 'worktree create')" = 2 ]
+check "新しい T を渡す" q_launched 1 "$T2"
+
+q_setup "同じ issue の worktree が 2 つ"
+issue 1
+qrow "$(date +%s)" creating - 1
+qwt q1 1 in-progress "[]" 1
+qwt q1b 1 in-progress "[]" 2 issue-1-again
+run
+check "古い方に起動する" called "agent launch --agent claude --worktree path:$(p q1) "
+check "新しい方には起動しない" not_launched q1b
+check "新しい方を人に上げる" called "worktree set --worktree path:$(p q1b) --comment 同じ issue の worktree が 2 つある。こちらは自動では使わない: #1 --json --unread --workspace-status needs-decision"
+
+# q_step2 <ケース名>: worktree は作れたが、worker はまだ起動していない (creating の後)
+q_step2() {
+    q_setup "$1"
+    issue 1
+    qrow "$(date +%s)" creating - 1
+}
+q_step2 "worker を起動する前の worktree: BRAKE"
+qcreated 1
+: >"$S/BRAKE"
+run
+check "起動しない" no_launch
+q_step2 "worker を起動する前の worktree: Needs decision"
+qcreated 1 needs-decision
+run
+check "起動しない" no_launch
+q_step2 "worker を起動する前の worktree: 再開したセッションを待っている"
+qcreated 1
+pending term_1 t1:l1 issue-1-fix-thing-1 sid-1
+term term_1 issue-1-fix-thing-1 | terms
+run
+check "起動しない" no_launch
+q_step2 "worker を起動する前の worktree: 起動していないのにエージェントが居る (人が始めた)"
+qcreated 1 in-progress "$(agent done t1:l1 人が打った指示)"
+run
+check "起動しない" no_launch
+check "ラベルも外さない" not_called "issue edit"
+q_step2 "worker を起動する前の worktree: DRY_RUN"
+qcreated 1
+render
+DRY_RUN=1 bash "$script" >"$base/out" 2>&1
+check "起動しない" no_launch
+check "起動の予定を出す" logged "DRY-RUN: queue worker を起動 → o/r#1"
+
+q_setup "起動に失敗したあと、worktree を人が消した"
+issue 1
+qrow 100 creating - 1
+qrow 101 launching - 1
+qrow 102 fail - 1
+run
+check "作り直さない (作成の失敗ではない)" no_create
+check "起動もしない" no_launch
+
+q_setup "作成の失敗と起動の失敗は別に数える"
+issue 1
+qrow 100 creating - 1
+qrow 101 fail - 1
+qrow 102 creating - 1
+qrow 103 launching - 1
+qrow 104 fail - 1
+qrow 105 launching - 1
+qrow 106 fail - 1
+qcreated 1
+run
+check "起動の失敗はまだ 2 回なので、起動する" q_launched 1
+check "人には上げない" not_called "起動に"
+
+q_setup "結果の分からない起動を閉じる前に、ボードに書けない"
+issue 1
+t0=$(($(date +%s) - 60))
+qrow "$((t0 - 1))" creating - 1
+qrow "$t0" launching - 1
+qcreated 1
+echo '{"ok":true,"result":{"warnings":["unknown status"]}}' >"$FAKE/set.json"
+LAUNCH_UNKNOWN_AFTER=0 run
+check "人に知らせられるまで、記録は閉じない" [ "$(states)" = "creating launching " ]
+check "起動し直さない" no_launch
+
+q_setup "DRY_RUN では、外し損ねたラベルも外さない"
+issue 1
+qrow 100 creating - 1
+qrow 101 launching - 1
+qrow 102 launched - 1
+render
+DRY_RUN=1 bash "$script" >"$base/out" 2>&1
+check "外さない" not_called "issue edit"
+check "外す予定を出す" logged "DRY-RUN: queue ラベルを外す → o/r#1"
+
+# ---- キュー由来の worktree のボード ----
+setup "キュー: PR を出さずに終了 (キューを無効にしても、動いている分は知らせる)"
+qwt q1 1 in-progress "$(agent done t1:l1 x 5000)"
+qwt q2 2 in-progress "$(agent done t1:l1 x 5000)"
+pr 20 issue-2-fix MERGEABLE SUCCESS BLOCKED
+qwt q3 3 in-progress "$(agent working t1:l1 x "$(($(date +%s) * 1000))")"
+qwt q4 4 needs-decision "$(agent done t1:l1 x 5000)"
+qwt q5 5 in-progress
+run
+check "Needs decision に上げる" called "worktree set --worktree path:$(p q1) --comment PR を出さずに終了: #1 --json --unread --workspace-status needs-decision"
+check "PR のある worktree は上げない" not_called "PR を出さずに終了: #2"
+check "draft でない PR に「ready 判断」は付けない" not_called "ready 判断: #20"
+check "動いているものは上げない" not_called "PR を出さずに終了: #3"
+check "Needs decision のものは動かさない" not_called "PR を出さずに終了: #4"
+check "エージェントがまだ居ない worktree は上げない" not_called "PR を出さずに終了: #5"
+run
+check "1 回だけ" [ "$(count 'PR を出さずに終了: #1')" = 1 ]
+
+setup "キュー: クローズ済みの PR を読めない回は「PR を出さずに終了」を出さない (マージ済みと見分けられない)"
+qwt q1 1 in-progress "$(agent done t1:l1 x 5000)"
+: >"$FAKE/closed-down"
+run
+check "出さない" not_called "PR を出さずに終了"
+
+setup "キュー: working のまま 2 時間更新が無い"
+qwt q1 1 in-progress "$(agent working t1:l1 x "$((($(date +%s) - 7300) * 1000))")"
+qwt q2 2 in-progress "$(agent working t1:l1 x "$((($(date +%s) - 7000) * 1000))")"
+run
+check "未読と「停止の疑い」(列は動かさない)" called "worktree set --worktree path:$(p q1) --comment 停止の疑い: #1（2 時間更新が無い） --json --unread"
+check "2 時間たっていなければ付けない" not_called "停止の疑い: #2"
+
+setup "キュー: draft の PR が終わって CI が緑 → ready 判断"
+qwt q1 1 in-progress "$(agent done)"
+draft_pr 31 issue-1-fix SUCCESS
+qwt q2 2 in-progress "$(agent done)"
+draft_pr 32 issue-2-fix FAILURE
+qwt q3 3 in-progress "$(agent working t1:l1 x "$(($(date +%s) * 1000))")"
+draft_pr 33 issue-3-fix SUCCESS
+run
+check "未読と「ready 判断」(列は動かさない)" called "worktree set --worktree path:$(p q1) --comment ready 判断: #31 --json --unread"
+check "CI が緑でなければ付けない" not_called "ready 判断: #32"
+check "エージェントが動いていれば付けない" not_called "ready 判断: #33"
+check "draft は自動保守しない" no_launch
+
+# ---- キュー: worker の着手前の再確認 (check) ----
+# check_run <T>: worker の worktree で check を呼ぶ (リポは origin から取る)。
+check_run() {
+    jq -cn --slurpfile i "$FAKE/issues" '{data: {viewer: {login: "me"}, repository: {issue: ($i[0] // null)}}}' >"$FAKE/issue.json"
+    (cd "$(p a)" && bash "$script" check 1 "$1") >"$base/out" 2>&1
+    rc=$?
+}
+setup "check: 自分の起動の記録と worktree があり、ラベルが外れていても通る"
+wt a issue-1-fix in-progress
+printf 'queue_label=%s\n' "$LBL" >"$S/config"
+issue 1 '.labels.nodes = []'
+printf '%s\tlaunched\t-\t%s\n' "$(date +%s)" "$(qkey 1)" >"$S/launches.tsv"
+ls -R "$STATE_ROOT" >"$base/state.before"
+check_run "$T1"
+check "exit 0" [ "$rc" = 0 ]
+check "ok を出す" logged "ok"
+check "1 件の issue を問い合わせる" called "-F n=1 -f owner=o -f name=r"
+ls -R "$STATE_ROOT" >"$base/state.after"
+check "状態を何も書かない (ロックも取らない)" cmp -s "$base/state.before" "$base/state.after"
+check "Orca に触らない" not_called "orca "
+
+setup "check: 止まる・確かめられない"
+wt a issue-1-fix in-progress
+printf 'queue_label=%s\n' "$LBL" >"$S/config"
+issue 1 '.lastEditedAt = "2026-01-02T00:00:01Z"'
+check_run "$T1"
+check "T より後に編集されていれば exit 1" [ "$rc" = 1 ]
+check "理由を出す" logged "ラベルの後に本文が編集された"
+: >"$FAKE/issues"
+issue 1
+check_run "$T2"
+check "その時刻に自分が付けたラベルが無ければ exit 1" [ "$rc" = 1 ]
+: >"$FAKE/issues"
+issue 1 '.labeled.nodes += [{createdAt: "2026-01-03T00:00:00Z", actor: {login: "someone"}, label: {name: $l}}]'
+check_run "$T1"
+check "あとで他人が付け直しても、渡された T の承認で進める" [ "$rc" = 0 ]
+: >"$FAKE/issues"
+check_run "$T1"
+check "issue が無ければ exit 1" [ "$rc" = 1 ]
+issue 1
+: >"$FAKE/issue-down"
+check_run "$T1"
+check "GitHub に届かなければ exit 2" [ "$rc" = 2 ]
+rm "$FAKE/issue-down"
+rm "$S/config"
+check_run "$T1"
+check "設定が無ければ exit 2" [ "$rc" = 2 ]
+(cd "$(p a)" && bash "$script" check 1) >"$base/out" 2>&1
+check "T が無ければ exit 2" [ "$?" = 2 ]
 
 [ "$fail" = 0 ] && echo "pr-dispatch: all checks passed"
 exit "$fail"
