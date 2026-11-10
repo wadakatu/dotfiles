@@ -71,6 +71,7 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 │   │   ├── worktree-gc.sh
 │   │   ├── pr-dispatch.sh
 │   │   ├── agent-resume.sh
+│   │   ├── dispatch-lock.sh  # pr-dispatch と agent-resume が同時に動かないための共有ロック
 │   │   ├── agent-gc.sh
 │   │   └── memory-maintenance.sh  (+ -prompt.md, -schema.json)
 │   └── config/

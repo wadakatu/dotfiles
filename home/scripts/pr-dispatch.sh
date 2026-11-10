@@ -17,7 +17,8 @@
 set -euo pipefail
 
 # launchd の PATH は /usr/sbin:/usr/bin:/sbin:/bin だけで、orca も gh も jq も入らない。
-PATH="/etc/profiles/per-user/${USER}/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+# 後ろに足す (worktree-gc.sh と同じ)。テストが偽の orca / gh を先に効かせられるようにするため。
+PATH="$PATH:/etc/profiles/per-user/${USER}/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 export PATH
 # launchd の環境にはロケールが無く、cut -c がバイト単位で切って日本語のコメントが文字化けする。
 export LC_ALL=en_US.UTF-8
@@ -72,6 +73,14 @@ board() {
 looks_like_question() {
     printf '%s' "$1" | awk 'NF' | tail -n 1 | grep -Eq '[?？][[:space:]）)」』*]*$'
 }
+
+# agent-resume.sh と同時には動かない。DRY_RUN は何も起動しないので、ロックを取らない
+# (手で確かめている間に、本番の回を見送らせない)。
+# shellcheck source=home/scripts/dispatch-lock.sh
+. "$(dirname "${BASH_SOURCE[0]}")/dispatch-lock.sh"
+if [ "$DRY_RUN" != "1" ]; then
+    dispatch_lock || exit 0
+fi
 
 if ! orca status --json 2>/dev/null | jq -e '.result.runtime.reachable == true' >/dev/null 2>&1; then
     log "Orca のランタイムに届かない。見送り (次回に拾う)"
