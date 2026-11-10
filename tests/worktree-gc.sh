@@ -51,6 +51,12 @@ case "$1 $2" in
     "worktree ps")
         [ -f "$FAKE/ps-fail" ] && exit 1
         n=$(($(cat "$FAKE/ps-count" 2>/dev/null || echo 0) + 1)); echo "$n" >"$FAKE/ps-count"
+        # spawn-at-ps2 があれば、2 回目 (削除の直前) に、そこに書かれたパスを cwd にしたプロセスを起こす。
+        if [ "$n" = 2 ] && [ -f "$FAKE/spawn-at-ps2" ]; then
+            (cd "$(cat "$FAKE/spawn-at-ps2")" && exec sleep 60) >/dev/null 2>&1 &
+            echo $! >"$FAKE/spawned.pid"
+            sleep 1
+        fi
         if [ -f "$FAKE/ps.$n.json" ]; then cat "$FAKE/ps.$n.json"; else cat "$FAKE/ps.json"; fi ;;
     "worktree list") cat "$FAKE/list.json" ;;
     "worktree rm")
@@ -139,6 +145,27 @@ setup orca-merged
 orca_wt "$T/orca/wt" feat-o "$AFTER" "$CREATED"
 run_gc
 check "orca rm が呼ばれる" grep -qxF "$T/orca/wt" "$T/rm-calls"
+
+# ---- Orca: エージェントが done でも、cwd がこの中にあるプロセスが居れば残す ----
+# ターンを終えて次の指示を待つセッションは done になる。PR をマージした直後に、その worktree で作業を続けることがある。
+setup orca-live-session
+orca_wt "$T/orca/wt" feat-o "$AFTER" "$CREATED"
+(cd "$T/orca/wt" && exec sleep 60) &
+bg=$!
+sleep 1
+run_gc
+check "orca rm が呼ばれない" test ! -e "$T/rm-calls"
+check "理由がログに出る" logged "cwd がこの中にあるプロセスが居る"
+kill "$bg" 2>/dev/null; wait "$bg" 2>/dev/null; bg=""
+
+# ---- Orca: 判定の後でプロセスが入ってきたら消さない ----
+setup orca-in-use-at-rm
+orca_wt "$T/orca/wt" feat-o "$AFTER" "$CREATED"
+echo "$T/orca/wt" >"$T/spawn-at-ps2"
+run_gc
+check "orca rm が呼ばれない" test ! -e "$T/rm-calls"
+check "理由がログに出る" logged "削除直前に、cwd がこの中にあるプロセスを検出"
+kill "$(cat "$T/spawned.pid" 2>/dev/null)" 2>/dev/null
 
 # ---- Orca: ps が取れなければ、Orca の節ごと見送る ----
 setup orca-ps-fails
