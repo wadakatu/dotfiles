@@ -63,10 +63,22 @@ case "$*" in
     *kern.boottime*) echo '{ sec = 1700000000, usec = 0 } Tue Nov 14 22:13:20 2023' ;;
 esac
 EOF
+# $FAKE/tick があるときだけ、+%s を呼ぶたびに 1 秒進む時計になる。同じ 1 秒の中で終わる実行では、
+# 「別々に取った 2 つの時刻」が同じ値になって、取り違えが見えないため。それ以外は本物の date。
+cat >"$base/bin/date" <<'EOF'
+#!/usr/bin/env bash
+if [ "$*" = "+%s" ] && [ -e "$FAKE/tick" ]; then
+    n=$(($(cat "$FAKE/tick") + 1))
+    echo "$n" >"$FAKE/tick"
+    echo "$n"
+else
+    exec /bin/date "$@"
+fi
+EOF
 chmod +x "$base/bin"/*
 export PATH="$base/bin:$PATH"
 # 本物の orca や gh に届くと、手元のエージェントを起動してしまう。偽物が先に効いていなければ止める。
-for c in orca gh sysctl; do
+for c in orca gh sysctl date; do
     [ "$(command -v "$c")" = "$base/bin/$c" ] || { echo "偽の $c が効いていない。中止"; exit 1; }
 done
 
@@ -142,6 +154,14 @@ check "exit 0" [ "$rc" = 0 ]
 check "/sync-pr を起動する" called "--prompt /sync-pr https://github.com/o/r/pull/1"
 check "起動済みとして覚える" has "$S/dispatched.tsv" "o/r#1	sync-pr	sha1"
 check "起動の前後を記録する" [ "$(cut -f2 "$S/launches.tsv" | tr '\n' ' ')" = "launching launched " ]
+check "指示に、起動ごとの印を入れる" grep -Eq '\(pr-dispatch による自動起動 [0-9]+。' "$FAKE/calls"
+
+setup "指示の印と記録の時刻は、途中で時計が進んでも同じ値"
+wt a feat-a in-progress
+pr 1 feat-a CONFLICTING SUCCESS DIRTY
+/bin/date +%s >"$FAKE/tick"
+run
+check "同じ値" called "(pr-dispatch による自動起動 $(head -1 "$S/launches.tsv" | cut -f1)。"
 check "開いている PR を全ページ読む指定で問い合わせる" called "gh api graphql --paginate -f q=is:pr is:open"
 check "クローズ済みの PR も全ページ読む指定で問い合わせる" called "gh api graphql --paginate -f q=is:pr is:closed"
 run
@@ -314,6 +334,7 @@ check "人に上げる" called "自動の /sync-pr の起動に 3 回失敗: #1"
 setup "起動の返事を失う"
 wt a feat-a in-progress
 pr 1 feat-a CONFLICTING SUCCESS DIRTY
+/bin/date +%s >"$FAKE/tick"
 echo '{"ok":false,"error":{"code":"reply_lost","data":{"operationId":"op_1"}}}' >"$FAKE/launch.json"
 echo 1 >"$FAKE/launch.json.rc"
 run
@@ -322,6 +343,7 @@ echo '{"ok":true}' >"$FAKE/launch.json"
 echo 0 >"$FAKE/launch.json.rc"
 run
 check "次の回は、同じ依頼を出し直す" called "--json --retry-launch op_1"
+check "出し直しの指示は、最初の依頼と同じ (印も同じ)" [ "$(grep -c "pr-dispatch による自動起動 $(head -1 "$S/launches.tsv" | cut -f1)。" "$FAKE/calls")" = 2 ]
 check "通ったら起動済みにする" has "$S/dispatched.tsv" "o/r#1	sync-pr	sha1"
 
 setup "起動の結果が分からない"
@@ -357,6 +379,7 @@ check "起動し直さない" [ "$(count 'agent launch')" = 1 ]
 setup "結果の分からない起動のあとに、PR の状態が変わる"
 wt a feat-a in-progress
 pr 1 feat-a CONFLICTING SUCCESS DIRTY
+/bin/date +%s >"$FAKE/tick"
 : >"$FAKE/launch.json"
 echo 1 >"$FAKE/launch.json.rc"
 run
@@ -370,6 +393,7 @@ LAUNCH_UNKNOWN_AFTER=0 run
 check "待っても現れなければ、新しい状態に起動する" [ "$(count 'agent launch')" = 2 ]
 check "状態が変わっているので、人には上げない" not_called "起動できたか分からない"
 check "前の起動は閉じる" has "$S/launches.tsv" "	unknown	-	o/r#1	sync-pr	sha1"
+check "新しい起動の記録は、前の起動の時刻を引き継がない" [ "$(awk -F'\t' 'NR == 1 { t = $1 } $6 == "sha-new" && $2 == "launching" { print ($1 > t) }' "$S/launches.tsv")" = 1 ]
 check "新しい状態を起動済みにする" has "$S/dispatched.tsv" "o/r#1	sync-pr	sha-new"
 
 setup "Orca が結果不明と答える (operationId なし)"
@@ -441,19 +465,37 @@ check "新しい対応はまだ起動しない" not_called "--prompt /fix-ci"
 check "出し直しは同じ operationId" called "--json --retry-launch op_1"
 check "失った依頼を起動済みにする" has "$S/dispatched.tsv" "o/r#1	sync-pr	sha1"
 
-setup "結果は分からなかったが、起動後に動き出したエージェントが居る"
+setup "結果は分からなかったが、この起動の指示を受け取ったエージェントが居る"
 wt a feat-a in-progress
 pr 1 feat-a CONFLICTING SUCCESS DIRTY
 : >"$FAKE/launch.json"
 echo 1 >"$FAKE/launch.json.rc"
 run
+t0=$(head -1 "$S/launches.tsv" | cut -f1)
 : >"$FAKE/wts"
 rm -rf "$(p a)"
-wt a feat-a in-progress "$(agent done t1:l1 /sync-pr "$(($(date +%s) * 1000 + 5000))")"
+wt a feat-a in-progress "$(agent done t1:l1 "/sync-pr https://github.com/o/r/pull/1 (pr-dispatch による自動起動 ${t0}。人は見ていない。)" 1000)"
 run
 check "起動し直さない" [ "$(count 'agent launch')" = 1 ]
 check "起動できていたものとして覚える" has "$S/dispatched.tsv" "o/r#1	sync-pr	sha1"
 check "記録も閉じる" [ "$(cut -f2 "$S/launches.tsv" | tr '\n' ' ')" = "launching launched " ]
+
+setup "結果の分からない起動のあとに、人が同じ worktree で別のセッションを始めた"
+wt a feat-a in-progress
+pr 1 feat-a CONFLICTING SUCCESS DIRTY
+: >"$FAKE/launch.json"
+echo 1 >"$FAKE/launch.json.rc"
+run
+t0=$(head -1 "$S/launches.tsv" | cut -f1)
+: >"$FAKE/wts"
+rm -rf "$(p a)"
+later=$(($(date +%s) * 1000 + 5000))
+wt a feat-a in-progress "$(jq -cn --argjson at "$later" --arg old "/sync-pr https://github.com/o/r/pull/1 (pr-dispatch による自動起動 $((t0 - 500))。人は見ていない。)" \
+    '[{state: "done", paneKey: "t1:l1", prompt: "別の作業をして", stateStartedAt: $at}, {state: "done", paneKey: "t2:l2", prompt: $old, stateStartedAt: $at}]')"
+run
+check "起動できた証拠にしない (起動の後に動いた別のセッションも、前の起動のエージェントも)" [ "$(cut -f2 "$S/launches.tsv" | tr '\n' ' ')" = "launching " ]
+check "起動済みにしない" lacks "$S/dispatched.tsv" "o/r#1"
+check "起動し直しもしない" [ "$(count 'agent launch')" = 1 ]
 
 # ---- 再開したセッションを待つ ----
 setup "再開のタブに、まだ指示が入っていない"
