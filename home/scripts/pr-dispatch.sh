@@ -68,6 +68,7 @@ LAUNCH_UNKNOWN_AFTER="${LAUNCH_UNKNOWN_AFTER:-1800}"
 #   queue_repos=<owner/repo,...> queue_label=<ラベル>  キューの対象。どちらかが空ならキューは無効
 #   max_wip / max_per_day / max_open_prs  キューの新しい着手を止める線 (下の「キュー」の節)
 #   ask_labels=<ラベル,...> ask_title_words=<語,...>  当たる issue はキューに入っていても起動しない
+#   verify_skill=<skill 名> verify_probe=<コマンド>  無人の実機検証。このスクリプトは読まず、worker が読む (issue-worker の skill)
 CONFIG_FILE="$STATE_ROOT/pr-dispatch/config"
 # worktree を作った記録 (追記のみ)。<時刻> <creating|created|ready|fail|refused> <PR> <head の SHA> [<worktree>]
 # creating は作る前と、worktree が出来た直後 (path 付き) の 2 回書く。created は PR の branch への切り替えまで済んだ、
