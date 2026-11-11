@@ -1981,11 +1981,29 @@ qwt q2 2 in-progress "$(agent done)"
 draft_pr 32 issue-2-fix FAILURE
 qwt q3 3 in-progress "$(agent working t1:l1 x "$(($(date +%s) * 1000))")"
 draft_pr 33 issue-3-fix SUCCESS
+qwt q4 4 needs-decision "$(agent done)"
+draft_pr 34 issue-4-fix SUCCESS
+qwt q5 5 in-progress "$(agent done t1:l1 "")"
+draft_pr 36 issue-5-fix SUCCESS
+pending term_1 t1:l1 q5 sid-1
+term term_1 q5 | terms
 run
 check "未読と「ready 判断」(列は動かさない)" called "worktree set --worktree path:$(p q1) --comment ready 判断: #31 --json --unread"
 check "CI が緑でなければ付けない" not_called "ready 判断: #32"
 check "エージェントが動いていれば付けない" not_called "ready 判断: #33"
+check "Needs decision のカードの理由を上書きしない" not_called "ready 判断: #34"
+check "再開したセッションを待っている worktree には付けない" not_called "ready 判断: #36"
 check "draft は自動保守しない" no_launch
+
+q_setup "この回に Needs decision に上げた worktree には「ready 判断」を付けない"
+issue 1
+qrow "$(date +%s)" creating - 1
+qwt q1 1 in-progress "[]" 1
+qwt q1b 1 in-progress "$(agent done)" 2 issue-1-again
+draft_pr 35 issue-1-again SUCCESS
+run
+check "上げる" called "worktree set --worktree path:$(p q1b) --comment 同じ issue の worktree が 2 つある。こちらは自動では使わない: #1 --json --unread --workspace-status needs-decision"
+check "同じ回に上書きしない" not_called "ready 判断: #35"
 
 # ---- キュー: worker の着手前の再確認 (check) ----
 # check_run <T>: worker の worktree で check を呼ぶ (リポは origin から取る)。

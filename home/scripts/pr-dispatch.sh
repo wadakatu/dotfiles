@@ -1249,7 +1249,8 @@ while IFS=$'\t' read -r slug branch num state; do
 done <<<"$closed_prs"
 
 # ---- キュー由来の worktree のボード ----
-#   draft の PR があり、エージェントが終わり、CI が緑 → 未読と「ready 判断」(draft は自動保守しない。ready にするのは人)
+#   draft の PR があり、エージェントが終わり、CI が緑 → 未読と「ready 判断」(draft は自動保守しない。ready にするのは人。
+#     Needs decision のカードと再開待ちの worktree には書かない。先に書いた理由のコメントを上書きしないため)
 #   PR が無いまま、エージェントが全部終わった → Needs decision「PR を出さずに終了」(利用上限・異常終了を含む)
 #   working のまま QUEUE_STALL_AFTER 更新が無い → 未読と「停止の疑い」
 if [ -n "$qwts" ] && [ "$open_ok" = 1 ]; then
@@ -1261,7 +1262,8 @@ if [ -n "$qwts" ] && [ "$open_ok" = 1 ]; then
         q_pr=$(open_pr_of "$q_slug" "$q_branch")
         if [ -n "$q_pr" ]; then
             IFS=$'\t' read -r _ _ q_num q_draft q_ci q_oid <<<"$q_pr"
-            if [ "$q_draft" = "true" ] && [ "$q_busy" = "-" ] && [ "$q_ci" = "SUCCESS" ]; then
+            if [ "$q_draft" = "true" ] && [ "$q_busy" = "-" ] && [ "$q_ci" = "SUCCESS" ] && [ "$q_status" != "needs-decision" ] &&
+                ! printf '%s' "$raised" | grep -qxF -- "$q_path" && ! printf '%s' "$hold" | grep -qxF -- "$q_path"; then
                 board "$q_path" queue-ready "$q_oid" - "ready 判断: #$q_num"
             fi
         elif [ "$closed_ok" = 1 ] && [ "$q_agents" -gt 0 ] && [ "$q_busy" = "-" ] && [ "$q_status" != "needs-decision" ] &&
