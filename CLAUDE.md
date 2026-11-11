@@ -10,7 +10,7 @@
 ## このプロジェクトの目的
 
 macOS 用 dotfiles を **nix-darwin + home-manager + Nix flakes** に段階的に移行する。
-新しい Mac で `nix run nix-darwin -- switch --flake .#mymac` 一発で同じ環境（CLI ツール、GUI アプリ、シェル設定、macOS システム設定）が再現される状態を目指す。
+新しい Mac で `nix run nix-darwin -- switch --flake .#<設定名>`（`flake.nix` の `darwinConfigurations`。今は `work` と `personal`）一発で同じ環境（CLI ツール、GUI アプリ、シェル設定、macOS システム設定）が再現される状態を目指す。
 
 **移行のモチベーション**
 - バージョンを `flake.lock` で完全固定し、3年後でも同じ環境を立ち上げられること
@@ -22,8 +22,7 @@ macOS 用 dotfiles を **nix-darwin + home-manager + Nix flakes** に段階的�
 ユーザーは Nix 初学者であり、**手を動かして学ぶことが目的の一部**。Claude は以下を守ること：
 
 - **「動くコードを丸投げ」ではなく「なぜそう書くか」を簡潔に説明する**。新しい概念（flake、module、overlay、derivation、`mkIf` など）が初登場するときは1–3行の補足を入れる
-- **大きな変更を一気に投入しない**。Phase 単位（後述）で区切り、各 Phase の終わりに `darwin-rebuild switch` が通ることを確認してから次へ進む
-- **既存ファイルをいきなり消さない**。`init.sh` / `symlink.sh` / `brew.sh` / `Brewfile` は Phase 5 で deprecate するまで残す
+- **大きな変更を一気に投入しない**。小さく区切り、区切りごとに `darwin-rebuild switch` が通ることを確認してから次へ進む
 - **コマンドを実行する前にユーザーに見せる**。`darwin-rebuild switch` のような副作用のあるコマンドは、ユーザーが自分のターミナルで実行できるよう提示する（sudo が要るものは `! <command>` だとパスワードを読めず失敗する）
 - **ユーザーから質問されたら、答える前に該当する公式ドキュメント or ソースを最低1つ提示する**
 - **憶測で実装を進めない**。Nix の API、オプション名、モジュール構成、慣習などで少しでも不確かな点があれば、必ず以下のいずれかを参照してから手を動かす：
@@ -102,13 +101,12 @@ macOS 用 dotfiles を **nix-darwin + home-manager + Nix flakes** に段階的�
 
 - **flakes は必須**。`nix.settings.experimental-features = [ "nix-command" "flakes" ];`
 - **GUI アプリは Homebrew cask のまま**。nix-darwin の `homebrew.casks` 経由で宣言する
-- **iTerm2 プロファイル (`wadakatu.json`)** は引き続き手動 import。Nix での自動インポートは複雑度に見合わないため対象外
 - **シークレット / 個人情報**（メールアドレス、SSH 鍵など）はリポジトリにコミットしない。`.gitconfig` の `user.email` などは `home.file` の代わりに別途管理する設計を検討
 - **言語ランタイム**はPHP / ComposerをHerd、それ以外のグローバルランタイムをmiseで管理する。PythonはCodex・Claudeの汎用処理向けにmiseの`latest`（プレリリースを除く最新安定版）を使い、プロジェクト固有の設定を優先する。特定プロジェクトでは`direnv + nix develop` / `devenv`との共存も可能
 - **Herd 注入の `HERD_PHP_XX_INI_SCAN_DIR`** は `home/zsh.nix` の `initContent` にハードコード。PHP バージョン追加時は Nix ファイルを更新する運用
 - **Nix インストーラ**: [Determinate Nix Installer](https://github.com/DeterminateSystems/nix-installer) を採用。flakes デフォルト有効、クリーンなアンインストール可能
 - **flake input URL**: Determinate 連携ガイドに合わせて flakehub.com URL を採用（SemVer ピン留め対応）
-- **darwinConfiguration の名前**: ホスト名ではなく `mymac` という論理名を使う。新しい Mac でも `.#mymac` で同じ設定を呼べる
+- **darwinConfiguration の名前**: ホスト名ではなく用途の論理名（`work` / `personal`）を使う。同じ用途の新しい Mac でも `.#work` / `.#personal` で同じ設定を呼べる
 - **Determinate モジュール採用**: `determinate.darwinModules.default` + `determinateNix.enable = true` を flake に組み込み、nix-darwin の Nix 管理（`nix.settings.*` 等）は無効化。これらのオプションは書いても無視されるため記述しない
 
 ## ハマりポイントの参考リンク
@@ -127,7 +125,6 @@ macOS 用 dotfiles を **nix-darwin + home-manager + Nix flakes** に段階的�
 
 ## Claude 向けの作業時チェックリスト
 
-- [ ] 編集する前に該当 Phase の Task を `in_progress` に更新
 - [ ] flake.nix を編集したら `nix flake check` の実行をユーザーに提案
-- [ ] nix-darwin 設定を変えたら `darwin-rebuild build --flake .#mymac` で dry-run を先に提案
-- [ ] Phase を完了したら、その Phase で学んだ Nix 概念を一言で要約してから次へ
+- [ ] nix-darwin 設定を変えたら `darwin-rebuild build --flake .#<設定名>` で dry-run を先に提案
+- [ ] 一区切りついたら、そこで使った Nix 概念を一言で要約してから次へ
