@@ -111,7 +111,7 @@ issue / PR 番号・社内ツールの ID・仕事のリポジトリのスクリ
   - 実装レビュー: Codex 組み込みのレビュー（Codex の `/review` と同じ）を使う。
     `codex exec -C <worktree> -s read-only -o <out.md> review --base <base> < /dev/null`。
     `--base` と観点の指定は同時に使えないので、観点は足さない。
-- ユーザーが途中を見たいと言ったら、`orca agent launch --agent claude --model claude-fable-5-1 --prompt "<依頼>" --json` で Orca のタブに出す。
+- ユーザーが途中を見たいと言ったら、`orca agent launch --agent claude --model claude-fable-5-2 --prompt "<依頼>" --json` で Orca のタブに出す。
 
 ## 委任の線引き
 
