@@ -20,6 +20,7 @@ ROOT = os.path.expanduser("~/.claude/projects")
 # USD / MTok: (input, output, 1h cache write, cache read)。5m write は input の 1.25 倍。
 # https://platform.claude.com/docs/en/about-claude/pricing
 PRICE = {
+    "claude-fable-5-2": (8, 40, 16, 0.20),
     "claude-fable-5-1": (10, 50, 20, 0.25),
     "claude-opus-5-5": (4, 20, 8, 0.20),
     "claude-sonnet-5-5": (2, 10, 4, 0.10),
