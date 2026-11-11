@@ -386,7 +386,15 @@ bridge network が積み上がり、docker のサブネットプールが枯れ�
 REPO="$HOME/path/to/repo"          # 掃除する本体の checkout
 BASE=origin/main                   # detached の判定の基準（既定 origin/main）
 PROJECT_PREFIXES="repo-wt- repo-"  # 孤児の compose プロジェクトを落とす名前の接頭辞
+FF_CHECKOUTS="$HOME/src/some-tool" # origin のデフォルトブランチに追従させる checkout（空白区切り）
 ```
+
+`FF_CHECKOUTS` は、checkout のまま使っていて誰も pull しない道具などを毎時 fast-forward する（`REPO` が無くても動く）。
+進めるのは、`.git` がディレクトリ（linked worktree ではない）、merge・rebase などの途中でない、fetch が通る、
+`origin/HEAD` がある、そのブランチに居る、未コミットの変更も untracked も無い、origin に無いローカルコミットが無い、を
+全て満たすときだけ。1 つでも欠ければ何も変えず、理由を `ff-skip` の 1 行で出す。ブランチの切り替え・stash・
+依存の入れ直しはしない（lockfile が変わっても）。進めたことの知らせは `ff` のログ 1 行だけ。環境変数で渡した `FF_CHECKOUTS` と `DRY_RUN` は
+設定ファイルより優先する。
 
 削除は次を **全て** 満たす worktree だけ。1 つでも欠ければ残す。
 

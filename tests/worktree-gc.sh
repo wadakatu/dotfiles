@@ -2,11 +2,13 @@
 # home/scripts/worktree-gc.sh の「消してよいか」の判定を確かめる。CI (.github/workflows/nix.yml) と手元で回す。
 #   bash tests/worktree-gc.sh
 # git と lsof は本物、orca / gh / docker は偽物。作業中の worktree を消さないことを主に見る。
+# shellcheck disable=SC2016  # '...' の中の $x は偽コマンドや eval の変数
 set -u
-# shellcheck disable=SC2016  # '...' の中の $x は偽コマンドの変数
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 script="$root/home/scripts/worktree-gc.sh"
+# 呼び出し元の FF_CHECKOUTS は引き継がない (本物の git を使うので、export されていると一時ディレクトリの外の checkout が進む)。
+unset FF_CHECKOUTS
 base=$(mktemp -d)
 base=$(cd "$base" && pwd -P) # macOS の /var → /private/var。lsof は実パスで返す
 export GIT_CONFIG_GLOBAL="$base/gitconfig" GIT_CONFIG_NOSYSTEM=1 # 手元の hook や署名の設定を巻き込まない
@@ -80,8 +82,8 @@ setup() {
     git -C "$T/repo" remote set-head origin main
     echo '[]' >"$T/prs.json"
 }
-run_gc() {
-    env PATH="$base/bin:$PATH" FAKE="$T" REPO="$T/repo" ORCA_ROOT="$T/orca" WORKTREE_GC_CONFIG=/nonexistent PROJECT_PREFIXES="proj-" \
+run_gc() { # run_gc [NAME=VALUE...]: 足した環境変数は既定を上書きする
+    env PATH="$base/bin:$PATH" FAKE="$T" REPO="$T/repo" ORCA_ROOT="$T/orca" WORKTREE_GC_CONFIG=/nonexistent PROJECT_PREFIXES="proj-" "$@" \
         bash "$script" >"$T/log" 2>&1
     echo "exit=$?" >>"$T/log"
 }
@@ -312,6 +314,114 @@ env PATH="$base/bin:$PATH" FAKE="$T" REPO="$T/repo" ORCA_ROOT="$T/orca" WORKTREE
     bash "$script" >"$T/log" 2>&1
 echo "exit=$?" >>"$T/log"
 check "空の接頭辞なら孤児を落とさない" not_called proj-old
+
+# ---- FF_CHECKOUTS: デフォルトブランチに居て遅れているだけの checkout を fast-forward する ----
+advance() { git -C "$T/repo" commit -q --allow-empty -m up && git -C "$T/repo" push -q origin main; } # origin を 1 コミット進める
+state() { git -C "$1" rev-parse HEAD main --abbrev-ref HEAD; } # HEAD・main・今のブランチ
+at_origin() { [ "$(git -C "$1" rev-parse HEAD)" = "$(git -C "$T/origin.git" rev-parse main)" ]; }
+same() { [ "$(state "$1")" = "$2" ]; }
+# ff_skip <名前> <準備するコマンド> <ログの理由>: clone を準備し、何も変わらず理由が 1 行出ることを見る
+ff_skip() {
+    setup "ff-$1"
+    git clone -q "$T/origin.git" "$T/c" 2>/dev/null
+    eval "$2"
+    s=$(state "$T/c")
+    run_gc FF_CHECKOUTS="$T/c"
+    check "変わらない" same "$T/c" "$s"
+    check "理由がログに出る" logged "ff-skip $T/c ($3"
+}
+
+setup ff-behind
+git clone -q "$T/origin.git" "$T/c" 2>/dev/null
+advance
+run_gc FF_CHECKOUTS="$T/c"
+check "origin に追いつく" at_origin "$T/c"
+check "ログに出る" logged "ff    $T/c "
+
+ff_skip other-branch 'advance; git -C "$T/c" switch -q -c other' "other はデフォルトブランチ main でない"
+ff_skip detached 'advance; git -C "$T/c" switch -q --detach' "detached はデフォルトブランチ"
+ff_skip dirty-tracked 'echo a >"$T/c/t.txt"; git -C "$T/c" add t.txt; git -C "$T/c" commit -q -m t; git -C "$T/c" push -q origin main; git -C "$T/repo" pull -q --ff-only; advance; echo b >"$T/c/t.txt"' "未コミットの変更あり"
+ff_skip untracked 'advance; touch "$T/c/new.txt"' "未コミットの変更あり"
+ff_skip cherry-pick 'advance; git -C "$T/c" rev-parse HEAD >"$T/c/.git/CHERRY_PICK_HEAD"' "git の操作の途中: CHERRY_PICK_HEAD"
+ff_skip ahead 'git -C "$T/c" commit -q --allow-empty -m local' "origin/main に無いローカルコミット"
+ff_skip diverged 'git -C "$T/c" commit -q --allow-empty -m local; advance' "origin/main に無いローカルコミット"
+# git 2.48 以降の fetch は origin/HEAD を作り直すので、古い git と同じく作らない設定にする。
+ff_skip no-origin-head 'advance; git -C "$T/c" config remote.origin.followRemoteHEAD never; git -C "$T/c" remote set-head origin -d' "origin/HEAD が無く"
+ff_skip fetch-fails 'advance; git -C "$T/c" remote set-url origin "$T/nope.git"' "fetch 失敗"
+check "掃除まで走り切る" logged "=== 完了"
+ff_skip linked-worktree 'advance; rm -rf "$T/c"; git -C "$T/repo" worktree add -q -b lw "$T/c" main' ".git がディレクトリでない"
+
+# ---- FF_CHECKOUTS: 1 つ目で見送っても 2 つ目は進める ----
+setup ff-two
+git clone -q "$T/origin.git" "$T/bad" 2>/dev/null
+git -C "$T/bad" remote set-url origin "$T/nope.git"
+git clone -q "$T/origin.git" "$T/c" 2>/dev/null
+advance
+run_gc FF_CHECKOUTS="$T/missing $T/bad $T/c"
+check "2 つ目以降も進む" at_origin "$T/c"
+check "掃除まで走り切る" logged "=== 完了"
+
+# ---- FF_CHECKOUTS: DRY_RUN では進めず、成功のログも出さない ----
+setup ff-dry-run
+git clone -q "$T/origin.git" "$T/c" 2>/dev/null
+advance
+s=$(state "$T/c")
+run_gc FF_CHECKOUTS="$T/c" DRY_RUN=1
+check "変わらない" same "$T/c" "$s"
+check "DRY-RUN がログに出る" logged "DRY-RUN: git -C $T/c merge --ff-only"
+check "成功のログは出ない" test -z "$(grep -F "ff    " "$T/log")"
+
+# ---- FF_CHECKOUTS / DRY_RUN: 環境変数が設定ファイルに勝つ (空文字も含む) ----
+setup ff-env-wins
+git clone -q "$T/origin.git" "$T/a" 2>/dev/null
+git clone -q "$T/origin.git" "$T/c" 2>/dev/null
+advance
+s=$(state "$T/a")
+printf 'FF_CHECKOUTS=%q\n' "$T/a" >"$T/gc.env"
+run_gc WORKTREE_GC_CONFIG="$T/gc.env" FF_CHECKOUTS="$T/c"
+check "環境変数の checkout だけ進む" at_origin "$T/c"
+check "設定ファイルの checkout は触らない" same "$T/a" "$s"
+
+setup ff-env-empty
+git clone -q "$T/origin.git" "$T/c" 2>/dev/null
+advance
+s=$(state "$T/c")
+printf 'FF_CHECKOUTS=%q\n' "$T/c" >"$T/gc.env"
+run_gc WORKTREE_GC_CONFIG="$T/gc.env" FF_CHECKOUTS=
+check "空の環境変数なら何もしない" same "$T/c" "$s"
+check "ログも出ない" test -z "$(grep -E ' (ff-skip|ff    ) ' "$T/log")"
+
+setup ff-env-dry-run
+git clone -q "$T/origin.git" "$T/c" 2>/dev/null
+advance
+s=$(state "$T/c")
+printf 'FF_CHECKOUTS=%q\nDRY_RUN=0\n' "$T/c" >"$T/gc.env"
+run_gc WORKTREE_GC_CONFIG="$T/gc.env" DRY_RUN=1
+check "環境変数の DRY_RUN が勝つ" same "$T/c" "$s"
+
+# ---- FF_CHECKOUTS: REPO が無くても進め、掃除はしない ----
+setup ff-no-repo
+git clone -q "$T/origin.git" "$T/c" 2>/dev/null
+advance
+printf '%s\t%s\n' proj-old "$T/gone" >"$T/docker-ps.tsv"
+run_gc REPO= FF_CHECKOUTS="$T/c"
+check "進む" at_origin "$T/c"
+check "repo が無いと出る" logged "repo が無い: "
+check "docker を触らない" test ! -e "$T/docker-calls"
+
+# ---- FF_CHECKOUTS: 確認と merge の間にブランチが変わったら WARN を出す ----
+# merge の直前に other へ切り替える偽の git を前に差し込む。
+setup ff-switched
+git clone -q "$T/origin.git" "$T/c" 2>/dev/null
+git -C "$T/c" branch other
+advance
+mkdir -p "$T/bin"
+printf '#!/usr/bin/env bash\ncase " $* " in *" merge --ff-only "*) %q -C %q switch -q other ;; esac\nexec %q "$@"\n' \
+    "$(command -v git)" "$T/c" "$(command -v git)" >"$T/bin/git"
+chmod +x "$T/bin/git"
+run_gc FF_CHECKOUTS="$T/c" PATH="$T/bin:$base/bin:$PATH"
+check "WARN が出る" logged "WARN: $T/c のブランチが確認の後で other に変わった"
+check "成功のログは出ない" test -z "$(grep -F "ff    " "$T/log")"
 
 for f in "$base"/*/log; do grep -q '^exit=0$' "$f" || { echo "FAIL [$(basename "$(dirname "$f")")] exit が 0 でない"; fail=1; }; done
 [ "$fail" = 0 ] && echo "ok: worktree-gc"
