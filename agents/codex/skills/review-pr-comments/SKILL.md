@@ -57,7 +57,7 @@ By default, implement every unresolved, non-outdated, unambiguous actionable ite
 Treat invoking this skill as authorization to perform the acknowledgements below after verification and any required push succeeds.
 
 - Accepted feedback: add only a thumbs-up (`THUMBS_UP`) reaction to the actionable review comment. Do not post a text reply.
-- Not accepted feedback: do not add a thumbs-up. Reply in the review thread with a concise, concrete reason, including relevant evidence or tradeoffs.
+- Not accepted feedback: do not add a thumbs-up. Reply in the review thread with a concise, concrete reason, including relevant evidence or tradeoffs. When a human wrote the comment, show the user the reply text first and post it only after they approve (AGENTS.md「委任の線引き」); replies to bot comments can be posted directly.
 - Ambiguous, conflicting, or unsafe feedback: treat it as not accepted for now and reply with the blocker or clarification needed. Do not implement, commit, or claim it is addressed.
 - Informational, resolved, outdated, or duplicate feedback: do not react or reply unless a response is materially useful.
 - Do not resolve review threads or dismiss reviews unless the user explicitly requests it.
@@ -79,7 +79,7 @@ List informational, resolved, outdated, and duplicate comments separately withou
 
 ## GitHub write safety
 
-- Invocation of this skill authorizes focused commits, a normal push to the selected PR head branch, thumbs-up reactions for accepted actionable feedback, and explanatory replies for actionable feedback that is not accepted.
+- Invocation of this skill authorizes focused commits, a normal push to the selected PR head branch, thumbs-up reactions for accepted actionable feedback, and explanatory replies for actionable feedback that is not accepted (for a human reviewer's comment, only after the user approves the reply text).
 - It does not authorize force-pushes, resolving threads, dismissing reviews, submitting reviews, merging, closing the PR, or modifying unrelated GitHub content.
 - Re-fetch thread state immediately before every reaction or reply.
 - Never acknowledge an accepted comment until its change is verified and pushed successfully.
