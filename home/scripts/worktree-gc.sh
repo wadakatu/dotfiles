@@ -2,6 +2,7 @@
 #
 # worktree と、それに紐づく docker compose プロジェクトを掃除する。
 # 対象は $REPO の worktree と、Orca が管理する全リポの worktree ($ORCA_ROOT 配下)。
+# $FF_CHECKOUTS の checkout は、origin のデフォルトブランチへ fast-forward だけで追従させる。
 # launchd から毎時 0 分に実行される。定義は home/worktree-gc.nix。
 #
 # 手で確認するとき:
@@ -15,11 +16,11 @@ set -euo pipefail
 PATH="$PATH:/etc/profiles/per-user/${USER}/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 export PATH
 
-# どのリポを掃除するか (REPO・BASE・PROJECT_PREFIXES) は公開リポに置かず、手元の設定ファイルで渡す。
-# 環境変数で渡した値はそちらが勝つ。REPO が無ければ何もしない。
+# どのリポを掃除するか (REPO・BASE・PROJECT_PREFIXES・FF_CHECKOUTS) は公開リポに置かず、手元の設定ファイルで渡す。
+# 環境変数で渡した値はそちらが勝つ。REPO が無ければ掃除はしない (FF_CHECKOUTS の追従だけ動く)。
 CONFIG="${WORKTREE_GC_CONFIG:-$HOME/.config/worktree-gc.env}"
 # 空文字も「渡した」とみなすので、値ではなく宣言ごと控えて読み込み後に戻す。
-_env="$(declare -p REPO BASE PROJECT_PREFIXES 2>/dev/null || true)"
+_env="$(declare -p REPO BASE PROJECT_PREFIXES FF_CHECKOUTS DRY_RUN 2>/dev/null || true)"
 # shellcheck source=/dev/null
 [ -f "$CONFIG" ] && . "$CONFIG"
 eval "$_env"
@@ -39,6 +40,9 @@ PROJECT_PREFIXES="${PROJECT_PREFIXES-}"
 # build cache はここより古いものだけ捨てる。image は dangling のみ (-a を付けると
 # ベースイメージが毎日消えて build のたびに再 pull になる)。
 BUILDER_CACHE_MAX_AGE="${BUILDER_CACHE_MAX_AGE:-168h}"
+# checkout のまま使う道具など、誰も pull しないリポの絶対パス (空白区切り)。空なら何もしない。
+# ponytail: 空白区切りなので空白を含むパスは扱えない。要るなら設定ファイルで配列にする。
+FF_CHECKOUTS="${FF_CHECKOUTS-}"
 DRY_RUN="${DRY_RUN:-0}"
 
 log() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
@@ -133,6 +137,64 @@ restart_stacks() {
     log "start ${running[*]} — worktree を消せなかったので戻す"
     run docker start "${running[@]}" >/dev/null || log "WARN: start 失敗 ${running[*]}"
 }
+
+# $FF_CHECKOUTS を origin のデフォルトブランチへ fast-forward する。人が使っている途中かもしれないので、
+# ブランチの切り替え・stash・依存の入れ直しはしない。条件に合わなければ何も変えず、理由を 1 行出して次へ。
+ff_checkouts() {
+    local dir f op def cur old new now
+    for dir in $FF_CHECKOUTS; do
+        op="" def="" cur="" old="" new="" now=""
+        if [ ! -d "$dir/.git" ]; then
+            log "ff-skip $dir (.git がディレクトリでない: linked worktree か、存在しない)"
+            continue
+        fi
+        for f in MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD BISECT_LOG rebase-merge rebase-apply sequencer; do
+            if [ -e "$dir/.git/$f" ]; then op=$f; break; fi
+        done
+        if [ -n "$op" ]; then
+            log "ff-skip $dir (git の操作の途中: $op)"
+            continue
+        fi
+        if ! git -C "$dir" fetch --quiet origin 2>/dev/null; then
+            log "ff-skip $dir (fetch 失敗)"
+            continue
+        fi
+        if ! def=$(git -C "$dir" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null); then
+            log "ff-skip $dir (origin/HEAD が無く、追従先が分からない)"
+            continue
+        fi
+        cur=$(git -C "$dir" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+        if [ "$cur" != "${def#origin/}" ]; then
+            log "ff-skip $dir (${cur:-detached} はデフォルトブランチ ${def#origin/} でない)"
+            continue
+        fi
+        if is_dirty "$dir"; then
+            log "ff-skip $dir (未コミットの変更あり、または git status 失敗)"
+            continue
+        fi
+        old=$(git -C "$dir" rev-parse --verify --quiet HEAD 2>/dev/null || true)
+        new=$(git -C "$dir" rev-parse --verify --quiet "$def" 2>/dev/null || true)
+        [ "$old" = "$new" ] && continue
+        if ! git -C "$dir" merge-base --is-ancestor HEAD "$def" 2>/dev/null; then
+            log "ff-skip $dir ($def に無いローカルコミットがある、または分岐している)"
+            continue
+        fi
+        if ! run git -C "$dir" merge --ff-only --quiet "$def"; then
+            log "WARN: ff 失敗 $dir"
+            continue
+        fi
+        [ "$DRY_RUN" = "1" ] && continue
+        # 確認から merge までの間に人がブランチを切り替えたら、切り替え先が進んだかもしれない。
+        now=$(git -C "$dir" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+        if [ "$now" = "$cur" ]; then
+            log "ff    $dir ${old:0:7}..${new:0:7}"
+        else
+            log "WARN: $dir のブランチが確認の後で ${now:-detached} に変わった。${now:-HEAD} が $def に fast-forward されたかもしれない (git -C $dir reflog ${now:-HEAD})"
+        fi
+    done
+    return 0
+}
+ff_checkouts
 
 [ -d "$REPO" ] || { log "repo が無い: $REPO"; exit 0; }
 
