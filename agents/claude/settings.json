@@ -7,7 +7,7 @@
   },
 
   "enabledPlugins": {
-    "frontend-design@claude-plugins-official": false,
+    "frontend-design@claude-plugins-official": true,
     "superpowers@claude-plugins-official": false,
     "chrome-devtools-mcp@claude-plugins-official": true,
     "ponytail@ponytail": true,
@@ -34,6 +34,12 @@
   "effortLevel": "medium",
   "modelSettings": {
     "claude-fable-5-1": {
+      "effortLevel": "high"
+    },
+    "claude-fable-5-2": {
+      "effortLevel": "high"
+    },
+    "claude-opus-5-5": {
       "effortLevel": "high"
     }
   },
