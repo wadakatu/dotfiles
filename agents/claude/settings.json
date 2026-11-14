@@ -41,6 +41,7 @@
   "promptSuggestionEnabled": false,
   "showThinkingSummaries": true,
   "switchModelsOnFlag": false,
+  "language": "japanese",
 
   "tui": "fullscreen",
   "theme": "dark",
