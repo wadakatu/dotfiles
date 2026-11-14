@@ -48,6 +48,30 @@ check 0 "$det" 'git push origin HEAD:refs/heads/feature'
 check 0 "$det" 'git commit -m x'
 check 0 "$main" 'git log --oneline'
 check 0 "$main" "git -C $main status"
+# 先頭の `cd <絶対パス> && …` だけは cd 先で判定する
+check 0 "$main" "cd $feat && git add -A && git commit -m x"
+check 0 "$main" "  cd \"$feat\" && git commit -m x"
+check 0 "$main" "cd $tmp && git -C on-feature commit -m x"
+check 2 "$main" "cd $tmp && git -C on-main commit -m x"
+check 2 "$feat" "cd $main && git commit -m x"
+check 2 "$main" "cd $feat && git push origin HEAD:main"
+# それ以外の形は、これまでどおりセッションの cwd で判定する
+check 2 "$main" "(cd $feat); git commit -m x"
+check 2 "$main" "false && cd $feat; git commit -m x"
+check 2 "$main" "cd $feat | cat; git commit -m x"
+check 2 "$main" "W=$main; (W=$feat); cd \"\$W\"; git commit -m x"
+check 2 "$main" "cd $feat; git commit -m x"
+check 2 "$main" "cd $feat && true || git commit -m x"
+check 2 "$main" "cd $feat && sleep 1 & git commit -m x"
+check 2 "$main" "cd $feat && git switch main && git commit -m x"
+check 2 "$main" "cd $feat && git commit -m x && cd $main && git commit -m y"
+check 2 "$main" "cd $tmp/missing && git commit -m x; git commit -m y"
+# 止めたときは git -C での書き直しを案内する
+msg=$(jq -nc --arg c 'git commit -m x' --arg d "$main" '{tool_input: {command: $c}, cwd: $d}' | sh "$hook" 2>&1 >/dev/null)
+case $msg in
+  *"git -C"*) ;;
+  *) echo "FAIL message lacks git -C: $msg"; fail=1 ;;
+esac
 
 [ "$fail" = 0 ] && echo "branch-guard: all checks passed"
 exit "$fail"
