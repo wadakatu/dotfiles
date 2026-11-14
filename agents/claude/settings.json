@@ -104,7 +104,11 @@
 
       "Bash(gh pr merge *)",
       "Bash(gh workflow run *)",
-      "Bash(gh release *)"
+      "Bash(gh release create *)",
+      "Bash(gh release delete *)",
+      "Bash(gh release delete-asset *)",
+      "Bash(gh release edit *)",
+      "Bash(gh release upload *)"
     ],
 
     "ask": [
