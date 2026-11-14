@@ -73,7 +73,9 @@
     "defaultMode": "auto",
 
     "additionalDirectories": [
-      "~/.claude-shared-memory"
+      "~/.claude-shared-memory",
+      "~/orca/workspaces",
+      "~/www"
     ],
 
     "deny": [
