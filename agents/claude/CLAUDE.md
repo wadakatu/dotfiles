@@ -34,7 +34,7 @@
 ## メモリ
 
 - リポに依存しない学び（ツールの使い方、Orca / worktree / Codex / zsh / gh の挙動、ユーザーの好み）は auto memory でなく共有メモリ `~/.claude-shared-memory/` に書き、`MEMORY.md` に 1 行足す。リポ固有なら auto memory。
-- 索引の 1 行は 120 バイト以内、詳細は本文。ファイル名は変えない（`[[name]]` が切れる）。
+- 索引の 1 行は 120 バイト以内で、本文を開かなくても守れる形（何をする / しないか）に書く。詳細は本文。ファイル名は変えない（`[[name]]` が切れる）。
 - 毎日 04:30 に `home/scripts/memory-maintenance.sh` が重複・陳腐化・置き場所を整理し、昇格を 1 件ずつ PR にする。
 
 @~/.claude-shared-memory/MEMORY.md
