@@ -1,25 +1,26 @@
 #!/usr/bin/python3
-"""~/.claude/projects のセッションログから、直近 N 日の空振り・摩擦を数える。
+"""~/.claude/projects のセッションログから、N 日間の空振り・摩擦を数える。
 
-使い方: python3 agents/claude/friction-report.py [日数=14]
+使い方: python3 agents/claude/friction-report.py [日数=14] [--until YYYY-MM-DD]
         python3 agents/claude/friction-report.py --self-check
 
-設定を変える前後で同じ数字を取り直して比べるための道具。判定は文言の一致に頼るので、
-Claude Code のメッセージが変わると黙って 0 になる。--self-check はその判定だけを確かめる。
+設定を変える前後で同じ数字を取り直して比べるための道具。--until を付けると、その日の 0 時 (JST) までの
+N 日間を数える (既定は今まで)。期間の長さが違う回も比べられるよう、件数にはツール呼び出し 1,000 回あたりを添える。
+判定は文言の一致に頼るので、Claude Code のメッセージが変わると黙って 0 になる。--self-check はその判定だけを確かめる。
 """
 
 from __future__ import annotations
 
+import argparse
 import collections
 import datetime
 import glob
 import json
 import os
 import re
-import sys
 
 ROOT = os.path.expanduser("~/.claude/projects")
-JA = re.compile(r"[぀-ヿ㐀-䶿一-鿿ｦ-ﾟ]")
+JA = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uff66-\uff9f]")  # かな・漢字・半角カナ
 # 人の入力に見えるが、実際はハーネスやコマンドが差し込んだもの
 BOILER = re.compile(r"^(This session is being continued|<bash-|<command-|<local-command|<task-notification|Caveat:"
                     r"|\[Request interrupted|<system-reminder|# auto memory|Generate a short git branch|Reply with"
@@ -31,9 +32,11 @@ BASH_SIGS = [
     ("No such file or directory", re.compile(r"[Nn]o such file or directory")),
 ]
 CTX_BUCKETS = ("<100k", "100-200k", "200-300k", "300-400k", ">=400k")
+JST = datetime.timezone(datetime.timedelta(hours=9))
 
 
-def is_english(text: str) -> bool:
+def no_japanese(text: str) -> bool:
+    # 英語の判定ではない。コードだけの応答も入り、中国語は日本語の側に入る
     return not JA.search(text)
 
 
@@ -71,10 +74,13 @@ def classify_denial(result: str, tool: str, inp: dict) -> tuple[str, str] | None
     return None
 
 
-def in_dir(path: str, d: str) -> bool:
-    # 前方一致だけだと、隣の worktree (<d>-foo/...) まで中と数える
-    d = d.rstrip("/")
-    return bool(d) and (path == d or path.startswith(d + "/"))
+def cwd_side(path: str, cwd: str) -> str:
+    # 文字列の前方一致だと、隣の worktree (<cwd>-foo/...) まで中と数えるので、パスの区切りで比べる
+    if not cwd or not path:
+        return "cwd 不明"
+    cwd = os.path.normpath(cwd)
+    path = os.path.normpath(os.path.join(cwd, path))
+    return "cwd の中" if os.path.commonpath([path, cwd]) == cwd else "cwd の外"
 
 
 def bash_sig(result: str) -> str:
@@ -118,10 +124,10 @@ class Report:
     def __init__(self) -> None:
         self.c = collections.defaultdict(collections.Counter)
         self.sess = collections.defaultdict(collections.Counter)  # (project, session) -> human / en / long / compact
+        self.tool_calls = 0
 
-    def process(self, path: str, key: tuple[str, str], sub: bool, since: float) -> None:
+    def process(self, path: str, key: tuple[str, str], sub: bool, since: float, until: float) -> None:
         c, s = self.c, self.sess[key]
-        s["main"] |= not sub
         pending = {}
         usage = {}  # 同じリクエストが複数行に記録されるので、最後の行の usage を採る
         for line in open(path, encoding="utf-8", errors="replace"):
@@ -142,6 +148,9 @@ class Report:
                 elif e.get("type") == "user" and not sub and is_human(e):
                     s["human"] += 1
                 continue
+            if t >= until:
+                continue
+            s["main"] |= not sub  # 期間内の行があるセッションだけを数える
             if e.get("type") == "system" and e.get("subtype") == "compact_boundary":
                 c["compact"][str((e.get("compactMetadata") or {}).get("trigger"))] += 1
                 s["compact"] += 1
@@ -156,10 +165,11 @@ class Report:
                     if (x.get("type") == "text" and not sub and msg.get("model") != "<synthetic>"
                             and len(x.get("text", "").strip()) >= 80):
                         s["long"] += 1
-                        s["en"] += is_english(x["text"])
+                        s["en"] += no_japanese(x["text"])
                     elif x.get("type") == "tool_use":
                         name, inp = x.get("name"), x.get("input") or {}
                         pending[x.get("id")] = (name, inp)
+                        self.tool_calls += 1
                         if name == "Skill":
                             c["skill"][str(inp.get("skill"))] += 1
                         elif name == "Agent":
@@ -182,7 +192,7 @@ class Report:
                         c["denial"][denial[0]] += 1
                         c["denial:" + denial[0]][denial[1]] += 1
                     elif name in ("Edit", "Write") and "has not been read" in r:
-                        where = "cwd の中" if in_dir(str(inp.get("file_path") or ""), e.get("cwd") or "") else "cwd の外"
+                        where = cwd_side(str(inp.get("file_path") or ""), e.get("cwd") or "")
                         c["not_read"][f"{name} {where} ({'sub' if sub else 'main'})"] += 1
                     elif name == "Bash":
                         c["bash"][bash_sig(r)] += 1
@@ -197,32 +207,45 @@ class Report:
             c["ctx:" + kind][b] += 1
             c["ctx_read:" + kind][b] += cr
 
-    def print(self, days: int) -> None:
+    def print(self, since: float, until: float) -> None:
         c = self.c
-        human = [s for s in self.sess.values() if s["human"]]
-        en, long_ = sum(s["en"] for s in human), sum(s["long"] for s in human)
-        print(f"直近 {days} 日: セッション {sum(s['main'] for s in self.sess.values())} 本 (人が入力したもの {len(human)} 本)")
 
-        print("\n== 英語だけの応答 (人が入力したセッションのメインスレッド、80 字以上の text ブロック)")
+        def n(v: int) -> str:  # 件数と、ツール呼び出し 1,000 回あたり
+            return f"{v:6,} {v * 1000 / (self.tool_calls or 1):6.2f}/1k"
+
+        def total(v: int) -> str:
+            return f"計 {v:,}、{v * 1000 / (self.tool_calls or 1):.2f}/1k"
+
+        human = [s for s in self.sess.values() if s["human"] and s["main"]]
+        en, long_ = sum(s["en"] for s in human), sum(s["long"] for s in human)
+        since_s, until_s = (datetime.datetime.fromtimestamp(x, JST).strftime("%Y-%m-%d %H:%M") for x in (since, until))
+        print(f"期間: {since_s} 〜 {until_s} (JST)")
+        print(f"セッション {sum(s['main'] for s in self.sess.values())} 本 (人が入力したもの {len(human)} 本)、"
+              f"ツール呼び出し {self.tool_calls:,} 回 (/1k の分母)")
+
+        print("\n== 日本語の文字を含まない応答 (80 字以上。人が入力したセッションのメインスレッドの text ブロック)")
         print(f"  {en:,} / {long_:,} ({en / (long_ or 1):.1%})、3 個以上出たセッション {sum(s['en'] >= 3 for s in human)} 本")
 
-        print(f"\n== ツール呼び出しの拒否 (計 {sum(c['denial'].values()):,})")
-        for cause, n in c["denial"].most_common():
-            print(f"  {cause} {n:,}")
-            for k, v in c["denial:" + cause].most_common(10):
-                print(f"    {v:6,} {k}")
+        print(f"\n== ツール呼び出しの拒否 ({total(sum(c['denial'].values()))})")
+        for cause, v in c["denial"].most_common():
+            print(f"  {n(v)} {cause}")
+            for k, w in c["denial:" + cause].most_common(10):
+                print(f"    {n(w)} {k}")
 
-        print(f"\n== Edit / Write の has not been read (計 {sum(c['not_read'].values()):,})")
+        print(f"\n== Edit / Write の has not been read ({total(sum(c['not_read'].values()))})")
         for k, v in c["not_read"].most_common():
-            print(f"  {v:6,} {k}")
+            print(f"  {n(v)} {k}")
 
         failures = {k: v for k, v in c["bash"].items() if k != "exit 1 (出力なし)"}
-        print(f"\n== Bash の失敗 (計 {sum(failures.values()):,}。別枠: exit 1 (出力なし) {c['bash']['exit 1 (出力なし)']:,})")
+        print(f"\n== Bash の失敗 ({total(sum(failures.values()))})")
         for k, v in sorted(failures.items(), key=lambda kv: -kv[1]):
-            print(f"  {v:6,} {k}")
+            print(f"  {n(v)} {k}")
+        print(f"  {n(c['bash']['exit 1 (出力なし)'])} exit 1 (出力なし。失敗に数えない別枠)")
 
-        print(f"\n== compaction (auto {c['compact']['auto']:,} / manual {c['compact']['manual']:,})、"
-              f"5 回以上のセッション {sum(s['compact'] >= 5 for s in self.sess.values())} 本")
+        print("\n== compaction")
+        for k in ("auto", "manual"):
+            print(f"  {n(c['compact'][k])} {k}")
+        print(f"  5 回以上のセッション {sum(s['compact'] >= 5 for s in self.sess.values())} 本")
 
         print("\n== リクエストあたりの文脈 (件数 / cache read トークン)")
         for kind in ("main", "sub"):
@@ -232,15 +255,15 @@ class Report:
 
         for title, k in (("Skill の呼び出し", "skill"), ("Agent の呼び出し (subagent_type × model 指定)", "agent"),
                          ("メモリファイルの Read", "memory_read")):
-            print(f"\n== {title} (計 {sum(c[k].values()):,})")
+            print(f"\n== {title} ({total(sum(c[k].values()))})")
             for name, v in c[k].most_common(15):
-                print(f"  {v:6,} {name}")
+                print(f"  {n(v)} {name}")
 
 
 def self_check() -> None:
-    assert is_english("The tests pass and the PR is ready for review, so I will push the branch now and report.")
-    assert not is_english("テストが通ったので push します。The PR is ready for review and the branch is pushed.")
-    assert not is_english("Fixed the bug in 設定 loading, the rest of this sentence is in English only.")
+    assert no_japanese("The tests pass and the PR is ready for review, so I will push the branch now and report.")
+    assert not no_japanese("テストが通ったので push します。The PR is ready for review and the branch is pushed.")
+    assert not no_japanese("Fixed the bug in 設定 loading, the rest of this sentence is in English only.")
     cases = [
         ("Permission for this action was denied by the Claude Code auto mode classifier. Reason: [Git Destructive]. If",
          "Bash", {}, ("auto mode の分類器", "Git Destructive")),
@@ -266,7 +289,12 @@ def self_check() -> None:
                            {"command": long_cmd}) == ("権限ルール", "Bash rg")
     assert classify_denial("Exit code 1\nfoo", "Bash", {}) is None
     assert classify_denial("Exit code 0\nlog.jsonl: The user doesn't want to proceed / has been denied", "Bash", {}) is None
-    assert in_dir("/w/app/x.php", "/w/app/") and not in_dir("/w/app-2/x.php", "/w/app") and not in_dir("/x", "")
+    assert classify_denial("Exit code 1\nlog.jsonl: PreToolUse:Bash hook error: [~/.claude/hooks/branch-guard.sh]",
+                           "Bash", {}) is None
+    assert cwd_side("/w/app/x.php", "/w/app/") == "cwd の中"
+    assert cwd_side("/w/app-2/x.php", "/w/app") == "cwd の外"
+    assert cwd_side("src/x.php", "/w/app") == "cwd の中" and cwd_side("../app-2/x.php", "/w/app") == "cwd の外"
+    assert cwd_side("/w/app/x.php", "") == "cwd 不明"
     assert bash_sig("Exit code 1") == "exit 1 (出力なし)"
     assert bash_sig("Exit code 1\n(eval):1: no matches found: *.txt") == "no matches found"
     assert bash_sig("Exit code 1\nsome output") == "その他"
@@ -274,10 +302,16 @@ def self_check() -> None:
 
 
 def main() -> None:
-    if sys.argv[1:] == ["--self-check"]:
+    ap = argparse.ArgumentParser(description="セッションログから N 日間の空振り・摩擦を数える")
+    ap.add_argument("days", nargs="?", type=int, default=14)
+    ap.add_argument("--until", type=datetime.date.fromisoformat, help="この日の 0 時 (JST) まで。既定は今")
+    ap.add_argument("--self-check", action="store_true")
+    args = ap.parse_args()
+    if args.self_check:
         return self_check()
-    days = int(sys.argv[1]) if len(sys.argv) > 1 else 14
-    since = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)).timestamp()
+    end = (datetime.datetime.combine(args.until, datetime.time(), JST) if args.until
+           else datetime.datetime.now(JST))
+    since, until = (end - datetime.timedelta(days=args.days)).timestamp(), end.timestamp()
     rep = Report()
     # サブエージェントのログは <project>/<session>/subagents/ の下。親のログが期間外でも、子だけ期間内に書かれることがある
     for path in glob.glob(f"{ROOT}/*/*.jsonl") + glob.glob(f"{ROOT}/*/*/subagents/**/*.jsonl", recursive=True):
@@ -285,8 +319,8 @@ def main() -> None:
             continue
         proj, rest = os.path.relpath(path, ROOT).split("/", 1)
         sub = "/subagents/" in path
-        rep.process(path, (proj, rest.split("/")[0].removesuffix(".jsonl")), sub, since)
-    rep.print(days)
+        rep.process(path, (proj, rest.split("/")[0].removesuffix(".jsonl")), sub, since, until)
+    rep.print(since, until)
 
 
 if __name__ == "__main__":
