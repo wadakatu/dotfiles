@@ -45,6 +45,8 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 │   │   ├── CLAUDE.md     # グローバル指示
 │   │   ├── statusline.py # 2行ステータスライン
 │   │   ├── usage-report.py # 直近 N 日のトークン消費を API 定価換算で集計 (python3 で直接実行)
+│   │   ├── friction-report.py # 直近 N 日の空振り・摩擦 (拒否、英語の応答、Bash の失敗、compaction など) を数える
+│   │   │                   # 設定を変える前後で同じ数字を取り直す用。--self-check で判定の自己チェック
 │   │   ├── agents/       # エージェント定義: orchestrator
 │   │   ├── skills/       # Claude Code だけ: review-pr-comments
 │   │   └── hooks/        # branch-guard.sh question-guard.sh session-marker.sh herdr-agent-state.sh
