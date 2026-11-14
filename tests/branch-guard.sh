@@ -38,6 +38,8 @@ check 0 "$feat" "git -C $feat push origin feature"
 check 0 "$main" "git -c user.name=x -C $feat commit -m x"
 check 0 "$main" "git --no-pager -C $feat commit -m x"
 check 2 "$feat" "git --no-pager -c user.name=x -C $main commit -m x"
+check 2 "$main" 'git -c "user.name=Alice&Bob" commit -m x'
+check 2 "$main" 'git -c "core.commentChar=;" commit -m x'
 # detached HEAD でも、保護ブランチを名指しする push は止める（commit は止めない）
 git -C "$feat" -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m init
 git -C "$feat" worktree add -q --detach "$tmp/detached"
@@ -67,6 +69,7 @@ check 2 "$main" "cd $feat && git commit -m x & git push"
 check 2 "$main" "cd $feat && git -c color.ui=false& git commit -m x"
 check 0 "$main" "cd $feat && git add -A 2>&1 && git commit -m x >/dev/null 2>&1"
 check 2 "$main" "cd $feat && git switch main && git commit -m x"
+check 2 "$main" "cd $feat && git branch -M main && git commit -m x"
 check 2 "$main" "cd $feat && git commit -m x && cd $main && git commit -m y"
 check 2 "$main" "cd $tmp/missing && git commit -m x; git commit -m y"
 # 止めたときは git -C での書き直しを案内する

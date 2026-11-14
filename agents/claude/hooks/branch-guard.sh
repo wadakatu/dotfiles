@@ -31,10 +31,8 @@ fi
 # checked like `git push` / `git commit`.
 # ponytail: values are split on whitespace, so a quoted value with spaces
 # (`git -c "k=a b" commit`) still slips through; parse argv if that shows up.
-# Values stop at shell operators, so `-c k=v&` keeps its `&` for the cd check.
-# shellcheck disable=SC2016 # the backquote is a literal operator here
 norm=$(printf '%s' "$cmd" \
-  | sed -E 's/git([[:space:]]+(-[Cc][[:space:]]+[^[:space:];&|()<>`]+|--[a-z-]+(=[^[:space:];&|()<>`]+)?))+/git/g')
+  | sed -E 's/git([[:space:]]+(-[Cc][[:space:]]+[^[:space:]]+|--[a-z-]+(=[^[:space:]]+)?))+/git/g')
 
 case $norm in
   *"git commit"*|*"git push"*) ;;
@@ -55,9 +53,11 @@ dir=${CLAUDE_PROJECT_DIR:-$PWD}
 # One cd form is followed, because agents write it for sibling repos:
 # `cd /abs/path && ...` at the very start, with nothing before the first
 # commit/push that could run elsewhere (subshell, pipe, `;`, `||`, newline),
-# and nowhere a `&` (it backgrounds the cd), another cd, or checkout/switch.
-# Anything else keeps the cwd, since reading shell loosely would let currently
-# blocked commands through.
+# and nowhere a `&` (it backgrounds the cd), another cd, or a command that
+# moves HEAD (checkout/switch/branch). The "nowhere" part reads the raw
+# command, since $norm swallows option values like `-c k=v&`. Anything else
+# keeps the cwd, since reading shell loosely would let currently blocked
+# commands through.
 # ponytail: a deny list, so env -C, GIT_DIR=... and the like still retarget
 # git unseen; add them here if they show up.
 cd_dir=$(printf '%s\n' "$cmd" | head -n1 \
@@ -74,7 +74,7 @@ case $cd_dir in
 '*) ;;
     *)
       printf '%s' "$pre" | grep -Eq '[;|()`]' \
-        || printf '%s' "$rest" | grep -Eq '(^|[^&>])&([^&>]|$)|(^|[^[:alnum:]_./-])(cd|pushd|popd|switch|checkout)([^[:alnum:]_./-]|$)' \
+        || printf '%s' "${cmd#*&&}" | grep -Eq '(^|[^&>])&([^&>]|$)|(^|[^[:alnum:]_./-])(cd|pushd|popd|switch|checkout|branch)([^[:alnum:]_./-]|$)' \
         || { [ -d "$cd_dir" ] && dir=$cd_dir; }
       ;;
     esac
