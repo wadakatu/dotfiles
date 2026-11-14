@@ -52,9 +52,10 @@ dir=${CLAUDE_PROJECT_DIR:-$PWD}
 
 # One cd form is followed, because agents write it for sibling repos:
 # `cd /abs/path && ...` at the very start, with nothing before the first
-# commit/push that could run elsewhere or move HEAD (subshell, pipe, `;`,
-# `||`, `&`, newline, another cd, checkout/switch). Anything else keeps the
-# cwd, since reading shell loosely would let currently blocked commands through.
+# commit/push that could run elsewhere (subshell, pipe, `;`, `||`, newline),
+# and nowhere a `&` (it backgrounds the cd), another cd, or checkout/switch.
+# Anything else keeps the cwd, since reading shell loosely would let currently
+# blocked commands through.
 # ponytail: a deny list, so env -C, GIT_DIR=... and the like still retarget
 # git unseen; add them here if they show up.
 cd_dir=$(printf '%s\n' "$cmd" | head -n1 \
@@ -70,8 +71,8 @@ case $cd_dir in
     case $pre in *'
 '*) ;;
     *)
-      printf '%s' "$pre" | grep -Eq '[;|()`]|(^|[^&])&([^&]|$)' \
-        || printf '%s' "$rest" | grep -Eq '(^|[^[:alnum:]_./-])(cd|pushd|popd|switch|checkout)([^[:alnum:]_./-]|$)' \
+      printf '%s' "$pre" | grep -Eq '[;|()`]' \
+        || printf '%s' "$rest" | grep -Eq '(^|[^&>])&([^&>]|$)|(^|[^[:alnum:]_./-])(cd|pushd|popd|switch|checkout)([^[:alnum:]_./-]|$)' \
         || { [ -d "$cd_dir" ] && dir=$cd_dir; }
       ;;
     esac
