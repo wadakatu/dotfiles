@@ -31,8 +31,10 @@ fi
 # checked like `git push` / `git commit`.
 # ponytail: values are split on whitespace, so a quoted value with spaces
 # (`git -c "k=a b" commit`) still slips through; parse argv if that shows up.
+# Values stop at shell operators, so `-c k=v&` keeps its `&` for the cd check.
+# shellcheck disable=SC2016 # the backquote is a literal operator here
 norm=$(printf '%s' "$cmd" \
-  | sed -E 's/git([[:space:]]+(-[Cc][[:space:]]+[^[:space:]]+|--[a-z-]+(=[^[:space:]]+)?))+/git/g')
+  | sed -E 's/git([[:space:]]+(-[Cc][[:space:]]+[^[:space:];&|()<>`]+|--[a-z-]+(=[^[:space:];&|()<>`]+)?))+/git/g')
 
 case $norm in
   *"git commit"*|*"git push"*) ;;
