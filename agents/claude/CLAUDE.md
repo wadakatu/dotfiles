@@ -49,6 +49,7 @@
 - 大きいファイルは丸ごと読まず、`rg -n` で場所を絞り Read の `offset` / `limit` で読む。
 - 外部に書き込むスクリプト（issue の一括作成など）は 1 件ごとに結果をファイルへ追記し、止まったら残りだけ流す（再実行は重複する）。**Why:** 一括起票が途中で止まり、手で続きを流した。
 - 現状を聞かれたら作業中の worktree を読まない。`git fetch` し、`git rev-list --left-right --count HEAD...origin/<既定ブランチ>` で遅れを数え、`git show origin/<既定ブランチ>:<path>` で答え、根拠にその SHA を書く。**Why:** 100 コミット以上遅れた worktree を読んで誤答した。
+- 掃除ジョブが止めた・消したものについて聞かれたら（「消してほしくなかった」「何が消えた？」）、`~/.claude/rules/cleanup-complaints.md` を読んでその手順で答える。
 
 ## 開発の流れ
 
