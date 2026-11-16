@@ -30,6 +30,7 @@
 
 - `~/.claude` の設定・hooks・skill・rules・agents は `~/www/personal/dotfiles/agents/`、Codex の設定は `agents/codex/` が正（`~/.codex/config.toml` は直さない）。symlink 先の写しはその場で直せないので dotfiles を直して PR にする。`~/.claude` を直接直したら dotfiles にも反映してコミットする。配置は dotfiles の README。
 - dotfiles は公開リポで仕事と無関係。個人の道具は汎用に書けば置いてよい。仕事のリポ名・社内のパス・issue / PR 番号・社内ツールの ID・仕事のリポのスクリプトの中身は書かない。対象リポは引数で受け、仕事固有の設定は追跡しないローカル設定か仕事のリポへ。書く前に差分を勤務先の名前で `git grep -i` する。**Why:** 仕事の固有名入りの設計をマージし、汎用化し直した。
+- dotfiles は複数の PC で共有している。この Mac のセッション記録から出した利用実績は「この Mac では」と範囲を書き、それだけを理由に dotfiles の共有設定（`enabledPlugins`・`extraKnownMarketplaces`・`agents/skills/` など）を消さない。消す前に他の PC で使っていないか聞く。この Mac だけの状態（plugin のアンインストール、dotfiles 管理外のファイル）は実績で進めてよい。dotfiles で既定が無効の項目も、他の PC がローカル設定で有効にしていることがあるので消す理由にしない。**Why:** この Mac で利用 1 回の skill を未使用と判断して dotfiles から消す PR を準備し、別の PC でたまに使うと止められた。
 
 ## メモリ
 
