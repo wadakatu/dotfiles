@@ -26,7 +26,7 @@
         "additionalProperties": false,
         "required": [
           "source_dir", "source_file", "source_name", "kind", "target_repo", "target_path",
-          "new_content", "title", "body", "commit_message", "after_merge", "confidence", "public_safe"
+          "new_content", "title", "body", "commit_message", "after_merge", "confidence", "public_safe", "enforcement"
         ],
         "properties": {
           "source_dir": { "type": "string" },
@@ -48,7 +48,16 @@
             }
           },
           "confidence": { "enum": ["高", "中", "低"] },
-          "public_safe": { "type": "boolean" }
+          "public_safe": { "type": "boolean" },
+          "enforcement": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["level", "note"],
+            "properties": {
+              "level": { "enum": ["構造", "権限・hook", "テスト・CI", "文章"] },
+              "note": { "type": "string" }
+            }
+          }
         }
       }
     },
