@@ -12,6 +12,7 @@
     ./worktree-gc.nix
     ./pr-dispatch.nix
     ./agent-gc.nix
+    ./container-events.nix
     ./memory-maintenance.nix
     ./agent-skills.nix
   ];

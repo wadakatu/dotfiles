@@ -21,6 +21,7 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 | PR の自動対応（conflict / CI 失敗 / 未対応のレビューにエージェントを起動）と、人の判断待ちのボード表示（質問は Needs decision、マージできる PR は In review に未読と「マージ可」） | Home Manager `launchd.agents`（ログイン時と 3 分ごと、`home/scripts/pr-dispatch.sh`）。止めるときは `~/Library/Application Support/pr-dispatch/BRAKE` を置く（再開と起動が止まり、ボードの更新は続く）。同じ場所の `config` に `adopt_prs=true` と `max_worktrees=<数>` を書くと、Orca に登録したリポの worktree の無い PR にも、対応が要るときに worktree を作る（1 回に 1 つ。無ければ作らない）。同じループが、自分がラベルを付けた自分の issue（キュー）に worktree を作って worker を起動する（下の「PR の自動対応と issue のキュー」） |
 | 再起動で止まった Claude の再開、Needs decision で会話が開いていないカードの開き直し（同じセッションには 1 回だけ。人が閉じたタブは開き直さない） | Home Manager `launchd.agents` の pr-dispatch が毎回の最初に呼ぶ（ログイン時と 3 分ごと、`home/scripts/agent-resume.sh`）＋ SessionStart hook `agents/claude/hooks/session-marker.sh`。再開したセッションに指示が入るまで、その worktree への PR の自動対応は待つ |
 | 放置された Claude / Codex のセッションの通知と、確かめたものの停止（Orca の端末に /exit） | Home Manager `launchd.agents`（10 分ごと、`home/scripts/agent-gc.sh`）＋ CLI `~/.local/bin/agent-gc`。設計は `docs/agent-gc-design.md` |
+| 指定したコンテナの異常終了（die / oom）と、137 で落ちたときの VM のカーネルログの記録 | Home Manager `launchd.agents`（常駐、`home/scripts/container-events.sh`） |
 | Claude Code の auto memory の整理（重複・陳腐化・共有への移動、昇格は 1 件ずつ PR） | Home Manager `launchd.agents`（毎日 04:30、`home/scripts/memory-maintenance.sh`）。設計は `docs/memory-maintenance-design.md` |
 | CLI パッケージ | nixpkgs `home.packages` |
 | GUI アプリ | nix-darwin `homebrew.casks` |
@@ -66,6 +67,7 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 │   ├── worktree-gc.nix
 │   ├── pr-dispatch.nix  # PR の自動対応、issue のキュー、再起動で止まったセッションの再開
 │   ├── agent-gc.nix
+│   ├── container-events.nix
 │   ├── memory-maintenance.nix
 │   ├── run-from-main.nix  # LaunchAgent が origin/main のスクリプトを動かす起動スクリプト
 │   ├── zsh.nix
@@ -75,6 +77,7 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 │   │   ├── agent-resume.sh  # pr-dispatch.sh が毎回の最初に呼ぶ
 │   │   ├── dispatch-lock.sh  # pr-dispatch と agent-resume が同時に動かないための共有ロック
 │   │   ├── agent-gc.sh
+│   │   ├── container-events.sh
 │   │   └── memory-maintenance.sh  (+ -prompt.md, -schema.json)
 │   └── config/
 │       ├── ghostty/config
@@ -505,6 +508,47 @@ tail -50 ~/Library/Logs/agent-gc.log
 
 入力欄に書きかけがあるもの、Orca の端末が分からないものは止めない。止めたセッションは、
 残ったタブに表示される `claude --resume <id>` / `codex resume <id>` で戻れる。
+
+## コンテナの異常終了の記録
+
+Docker はコンテナを起動し直すたびに終了コードと OOMKilled を戻すので、restart policy で戻ったコンテナは後から
+`docker inspect` しても落ちた理由が分からない。VM のカーネルログもメモリ不足 1 回分で上書きされる。
+`home/container-events.nix` の LaunchAgent が `home/scripts/container-events.sh` を常駐させ、`docker events` の
+die / oom を落ちたその場で記録する。
+
+対象のコンテナは公開リポに置かず、手元の `~/.config/container-events.env` に書く（無ければ何も記録しない）:
+
+```bash
+CONTAINERS="name1 name2"   # 対象のコンテナ名（空白区切り、完全一致）
+KERNEL_LOG_IMAGE=alpine:3  # カーネルログを取る使い捨てコンテナのイメージ（既定 alpine:3。ローカルに無ければ取らずに諦める）
+KERNEL_LOG_INTERVAL=60     # 前の採取からこの秒数の内側の 137 では採取を省く（既定 60）
+```
+
+記録は `~/Library/Application Support/container-events/events.tsv` にタブ区切りで 1 行 1 件（時刻 UTC・コンテナ名・イベント・
+終了コード・補足。空の欄は `-`）。イベントは `die`・`oom` と、`die` が 137 のときにその場で `dmesg` から取ったメモリ不足の行
+（`kernel`）、記録していた区間の始まりと終わり（`stream-start`・`stream-end`）。`stream-end` から次の `stream-start` までの
+イベントは取れていない。`stream-end` を挟まずに `stream-start` が続いたら、前の区間は KILL・電源断などで終わりが記録されていない。
+Docker に繋がらない間は記録に書かずに終わり、60 秒おきに起動し直す。対象のコンテナが未設定なら起動し直さない。
+
+人の `down` や Docker の更新も `die` を出すので、メモリ不足の疑いとして数えるのは終了コード 137 だけ:
+
+```bash
+awk -F'\t' '$3 == "die" && $4 == "137" { n++ } END { print n + 0 }' "$HOME/Library/Application Support/container-events/events.tsv"
+```
+
+137 は `docker stop` の待ち切れ（SIGKILL）でも出る。メモリ不足かは直後の `kernel` の行で確かめる。`kernel` の行はその採取で
+新しく見つかったメモリ不足の行だけ（前の採取で記録した行は書かない）なので、行の中のプロセス名・コンテナの ID が落ちたコンテナの
+ものかを見る。前の採取から 60 秒以内の 137 では採取を省き、省いた間の行は次の採取で新しい行として拾う（それまでにバッファから
+流れていれば拾えない）。初回の採取では、バッファに残っている過去のメモリ不足の行がまとめて書かれる。
+
+```bash
+tail -50 ~/Library/Logs/container-events.log
+launchctl kickstart -k gui/$(id -u)/org.nix-community.home.container-events  # 設定やスクリプトの変更を効かせる
+```
+
+常駐するので、設定を書いた・書き換えたときと、スクリプトの変更をマージしたときは `kickstart -k` で起動し直す
+（未設定で終わったジョブは起動し直さず、動いているジョブは次に切れるまで前の版で動く）。
+このジョブを足す変更はマージしてから rebuild する（先に rebuild すると、スクリプトがまだ無く 60 秒おきに失敗がログに積まれる）。
 
 ## auto memory の自動整理
 
