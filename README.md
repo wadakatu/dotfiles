@@ -41,6 +41,7 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 ├── agents/
 │   ├── skills/           # Claude Code と Codex の両方: commit pr next fix-ci sync-pr
 │   │                     # close-issue verify-no-regression defer-to-issue research memory-triage root-cause
+│   │                     # cloud-logging-query-generation
 │   ├── claude/
 │   │   ├── settings.json # 権限・フック・ステータスライン
 │   │   ├── CLAUDE.md     # グローバル指示
@@ -242,6 +243,7 @@ chmod +x ~/.claude/hooks/*.sh
 - Codex が読む個人用スキルの場所は `~/.agents/skills`（[Codex のスキル](https://learn.chatgpt.com/docs/build-skills.md)）。`~/.codex/skills` は使わない。
 - 同じ名前のスキルを Claude Code 用と Codex 用で分けたいときは、`agents/skills/` ではなく `agents/claude/skills/` と `agents/codex/skills/` に置く（例: review-pr-comments）。
 - `SKILL.md` の frontmatter には `name` と `description` を書く（Codex は両方が必須）。
+- `cloud-logging-query-generation` は [google/skills](https://github.com/google/skills) のスキルを手直しした写し（Apache-2.0、元のコミットと変更点は `SKILL.md` の冒頭）。upstream の更新は手で取り込む。
 - `~/.claude/skills` と `~/.agents/skills` はディレクトリごとは管理しない。`~/.claude/skills/synced`（claude.ai から同期したスキル）や Orca が入れる `orca-cli` が同じ場所に置かれるため。
 - 初めて rebuild するとき、リンクを張る場所に実ディレクトリ（以前の手動コピー）が残っていると Home Manager が止まる。先に消しておく。
 - 使わない skill も一覧に載るだけで毎ターン文脈を使う。`/skill-doctor` で一度も使っていないものを見つけ、`settings.json` の `skillOverrides` で外す。claude.ai から同期される skill（`anthropic-skills:*`）は手元で消しても再同期されるので、ここで `user-invocable-only`（Claude の一覧からは消え、`/名前` では使える）にする。プラグインの skill には効かない。
