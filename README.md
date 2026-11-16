@@ -470,6 +470,7 @@ worktree の戻し方は `git worktree add -B <ブランチ> <パス> <SHA>`（d
 戻し方が打てないので書かない。ただし削除が拒否され、動かし直す `docker start` も失敗した回は、止めたままになるので
 `compose-stop`（戻し方は `docker start <ID…>`）を書く。`git worktree remove` が中身を消す途中で失敗して登録だけ外れた回は、
 `worktree-remove-failed`（戻し方は残ったフォルダを退けてからの `git worktree add`）を書く。
+消したものについて聞かれたセッションの手順は `agents/claude/rules/cleanup-complaints.md`。
 
 コンテナ側で落とすのは次の 2 種類だけ（削除を拒否された worktree の環境は壊さない）。
 
