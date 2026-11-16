@@ -38,9 +38,10 @@ case "$1" in
     esac ;;
     start) echo "$*" >>"$FAKE/order"; [ ! -f "$FAKE/start-fail" ] || exit 1 ;;
     compose) echo "$*" >>"$FAKE/docker-calls"; echo "$*" >>"$FAKE/order" ;;
-    # volume ls は docker-volumes (project<空白>volume) から引く。prune は何もしない。
-    # volume-ls-fail があれば ls は失敗する。
-    volume) [ "$2" != ls ] || { [ ! -f "$FAKE/volume-ls-fail" ] || exit 1; p=${5#label=com.docker.compose.project=}; awk -v p="$p" '$1 == p {print $2}' "$FAKE/docker-volumes" 2>/dev/null; } ;;
+    # volume ls は docker-volumes (project<空白>volume) から引く。volume-ls-fail があれば ls は失敗する。
+    # 末尾のディスク回収 (prune) は docker-prune に書く。docker-calls と order に混ぜると、既存の呼び出し順の比較がずれる。
+    volume) if [ "$2" = ls ]; then [ ! -f "$FAKE/volume-ls-fail" ] || exit 1; p=${5#label=com.docker.compose.project=}; awk -v p="$p" '$1 == p {print $2}' "$FAKE/docker-volumes" 2>/dev/null; else echo "$*" >>"$FAKE/docker-prune"; fi ;;
+    image|builder) echo "$*" >>"$FAKE/docker-prune" ;;
     system) [ ! -f "$FAKE/df-fail" ] || exit 1 ;;
 esac
 exit 0
@@ -49,11 +50,14 @@ cat >"$base/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 cat "$FAKE/prs.json"
 EOF
-# worktree ps は呼ばれるたびに ps.<回数>.json を返す (無ければ ps.json)。ps-fail があれば失敗する。
+# worktree ps は呼ばれるたびに ps.<回数>.json を返す (無ければ ps.json、それも無ければ worktree 0 本)。ps-fail があれば失敗する。
+# orca-unreachable があれば、ランタイムに届かないふりをする。
 cat >"$base/bin/orca" <<'EOF'
 #!/usr/bin/env bash
 case "$1 $2" in
-    "status --json") echo '{"result": {"runtime": {"reachable": true}}}' ;;
+    "status --json")
+        if [ -f "$FAKE/orca-unreachable" ]; then r=false; else r=true; fi
+        echo "{\"result\": {\"runtime\": {\"reachable\": $r}}}" ;;
     "worktree ps")
         [ -f "$FAKE/ps-fail" ] && exit 1
         n=$(($(cat "$FAKE/ps-count" 2>/dev/null || echo 0) + 1)); echo "$n" >"$FAKE/ps-count"
@@ -63,7 +67,9 @@ case "$1 $2" in
             echo $! >"$FAKE/spawned.pid"
             sleep 1
         fi
-        if [ -f "$FAKE/ps.$n.json" ]; then cat "$FAKE/ps.$n.json"; else cat "$FAKE/ps.json"; fi ;;
+        if [ -f "$FAKE/ps.$n.json" ]; then cat "$FAKE/ps.$n.json"
+        elif [ -f "$FAKE/ps.json" ]; then cat "$FAKE/ps.json"
+        else echo '{"ok": true, "result": {"truncated": false, "totalCount": 0, "worktrees": []}}'; fi ;;
     "worktree list") cat "$FAKE/list.json" ;;
     "worktree rm")
         wt=${4#path:}; echo "$wt" >>"$FAKE/rm-calls"; echo "rm $wt" >>"$FAKE/order"
@@ -92,6 +98,11 @@ setup() {
     export STATE_ROOT="$T/state" CLAUDE_CONFIG_DIR="$T/claude"
     LEDGER="$T/state/cleanup-ledger/ledger.tsv"
     mkdir -p "$T/orca"
+    # 「触らない」リストが無い回は何も消さないので、既存のケースは空のリスト (守るものが無い) で流す。
+    # run_gc を通らない呼び出しが実機の ~/.config/cleanup-keep を読まないよう、ここで export する。
+    # 変数名を KEEP にしないのは、一時ディレクトリを残すデバッグ用の KEEP=1 (先頭の trap) を上書きしないため。
+    KEEPLIST="$T/keep"; export CLEANUP_KEEP="$KEEPLIST"
+    : >"$KEEPLIST"
     git init -q --bare -b main "$T/origin.git"
     git clone -q "$T/origin.git" "$T/repo" 2>/dev/null
     git -C "$T/repo" commit -q --allow-empty -m init
@@ -712,6 +723,333 @@ check "別名を zsh.nix から取り出せる" test -n "$alias_cmd"
 check "3 行出る" test "$(grep -c . "$T/table")" = 3
 check "どの行も 6 列" test "$(awk '{print NF}' "$T/table" | sort -u)" = 6
 check "古い行の値が出る" grep -q '/w/old  *rule-old  *restore-old' "$T/table"
+
+# ---- 「触らない」リスト: パスの行は、ほかの条件を全部満たす worktree も残す。区切りで比べる ----
+kept() { logged "keep  $1 (「触らない」リスト)"; }
+setup keep-path
+merged_repo_wt "$T/pr-12" feat-a
+merged_repo_wt "$T/pr-123" feat-b
+echo "$T/pr-12" >"$KEEPLIST"
+run_gc
+check "リストの worktree は残る" exists "$T/pr-12"
+check "理由がログに出る" kept "$T/pr-12"
+check "/pr-12 の行は /pr-123 を守らない" gone "$T/pr-123"
+check "戻し方が貼って通る" restores_parse
+
+# ---- 「触らない」リスト: 行と対象を実体パスに揃えて比べる (/tmp/x の行が /private/tmp/x を守る形) ----
+setup keep-symlink
+mkdir -p "$T/real"
+ln -s "$T/real" "$T/link"
+merged_repo_wt "$T/real/wt" feat-a
+echo "$T/link/wt/" >"$KEEPLIST"
+run_gc
+check "symlink 経由の行で実体の worktree が残る" exists "$T/real/wt"
+check "理由がログに出る" kept "$T/real/wt"
+
+# ---- 「触らない」リスト: Orca の worktree も残す ----
+setup keep-orca
+orca_wt "$T/orca/wt" feat-o "$AFTER" "$CREATED"
+echo "$T/orca/wt" >"$KEEPLIST"
+run_gc
+check "orca rm が呼ばれない" test ! -e "$T/rm-calls"
+check "理由がログに出る" kept "$T/orca/wt"
+
+# ---- Orca でピン留めした worktree は、ほかの条件を全部満たしていても残す ----
+setup keep-orca-pinned
+orca_wt "$T/orca/wt" feat-o "$AFTER" "$CREATED"
+jq '.result.worktrees[0].isPinned = true' "$T/ps.json" >"$T/ps.tmp" && mv "$T/ps.tmp" "$T/ps.json"
+run_gc
+check "orca rm が呼ばれない" test ! -e "$T/rm-calls"
+check "理由がログに出る" logged "keep  $T/orca/wt (Orca でピン留め)"
+
+# ---- 判定の後でピン留めされたら消さない ----
+setup keep-orca-pinned-at-rm
+orca_wt "$T/orca/wt" feat-o "$AFTER" "$CREATED"
+jq '.result.worktrees[0].isPinned = true' "$T/ps.json" >"$T/ps.2.json"
+run_gc
+check "orca rm が呼ばれない" test ! -e "$T/rm-calls"
+check "理由がログに出る" logged "keep  $T/orca/wt (削除直前に Orca でピン留め)"
+
+# ---- 「触らない」リスト: 名前の行は compose project を止めない・落とさない。working_dir のパスの行も同じ ----
+setup keep-compose
+merged_repo_wt "$T/repo-wt" feat-a
+printf '%s\t%s\n' kept-stack "$T/repo-wt/docker" proj-old "$T/gone" proj-keep "$T/gone2" proj-dir "$T/gone3/x" >"$T/docker-ps.tsv"
+printf '%s\n' kept-stack proj-keep "$T/gone3" >"$KEEPLIST"
+run_gc
+check "名前の行の project は stop も down もしない" not_called kept-stack
+check "その project を持つ worktree は、止めずに丸ごと残す" exists "$T/repo-wt"
+check "理由がログに出る" logged "keep  $T/repo-wt (compose kept-stack が「触らない」リスト)"
+check "名前の行の孤児は down しない" not_called proj-keep
+check "無いパスの行も文字どおりで比べ、その下の孤児を down しない" not_called proj-dir
+check "リストに無い孤児は今どおり落とす" grep -qxF "compose -p proj-old down --remove-orphans" "$T/docker-calls"
+check "戻し方が貼って通る" restores_parse
+
+# ---- 「触らない」リストが無い回は、何も止めず何も消さず、通知は 1 日 1 回。FF_CHECKOUTS は進める ----
+setup keep-missing
+merged_repo_wt "$T/repo-wt" feat-a
+orca_wt "$T/orca/wt" feat-o "$AFTER" "$CREATED"
+printf '%s\t%s\n' wt-stack "$T/repo-wt/docker" proj-old "$T/gone" >"$T/docker-ps.tsv"
+git clone -q "$T/origin.git" "$T/c" 2>/dev/null
+advance
+rm "$KEEPLIST"
+run_gc FF_CHECKOUTS="$T/c"
+check "worktree は残る" exists "$T/repo-wt"
+check "orca rm が呼ばれない" test ! -e "$T/rm-calls"
+check "compose を触らない" test ! -e "$T/docker-calls"
+check "prune もしない" test ! -e "$T/docker-prune"
+check "FF_CHECKOUTS は進む" at_origin "$T/c"
+check "理由がログに出る" logged "WARN: 「触らない」リスト $T/keep が無いか読めない"
+check "通知が 1 本" notified_once "「触らない」リスト"
+run_gc
+check "同じ日の 2 回目は通知しない" test "$(grep -c . "$T/notify-calls" 2>/dev/null)" = 1
+check "2 回目も消さない" exists "$T/repo-wt"
+
+# ---- 「触らない」リスト: 空行と # の行だけなら守るものが無いのと同じで、今までどおり消す ----
+setup keep-blank
+merged_repo_wt "$T/repo-wt" feat-a
+mkdir -p "$T/infra"
+printf '%s\t%s\n' mysql "$T/infra" >"$T/docker-ps.tsv"
+printf '\n# 何も守らない\n   \n' >"$KEEPLIST"
+run_gc
+check "今までどおり消す" gone "$T/repo-wt"
+check "prune も呼ぶ" test -s "$T/docker-prune"
+check "通知は消した分だけ" notified_once "worktree 1 件"
+check "戻し方が貼って通る" restores_parse
+
+# ---- 「触らない」リスト: 守らない project が先に並んでも、守る project が同じ worktree に居れば 1 つも止めない ----
+setup keep-compose-mixed
+merged_repo_wt "$T/repo-wt" feat-a
+printf '%s\t%s\n' aaa-free "$T/repo-wt/a" zzz-kept "$T/repo-wt/z" >"$T/docker-ps.tsv"
+echo zzz-kept >"$KEEPLIST"
+run_gc
+check "守らない project も止めない" not_called aaa-free
+check "worktree は残る" exists "$T/repo-wt"
+check "読めた行数がログに出る" logged "keep: パス 0 行・名前 1 行"
+
+# ---- compose の project 名に空白があっても、1 つの名前のまま止める ----
+setup keep-compose-space
+merged_repo_wt "$T/repo-wt" feat-a
+printf '%s\t%s\n' "my proj" "$T/repo-wt/docker" >"$T/docker-ps.tsv"
+run_gc
+check "空白を含む名前のまま stop する" grep -qxF "compose -p my proj stop" "$T/docker-calls"
+check "空白で割って stop しない" test -z "$(grep -xF -e "compose -p my stop" -e "compose -p proj stop" "$T/docker-calls")"
+
+# ---- Docker に届かない回は、名前の行が 1 つでもあれば、中に守る project が居るか分からないので worktree を残す ----
+setup keep-docker-down
+merged_repo_wt "$T/repo-wt" feat-a
+echo some-stack >"$KEEPLIST" # docker-ps.tsv が無いので、偽の docker は届かない
+run_gc
+check "worktree は残る" exists "$T/repo-wt"
+check "理由がログに出る" logged "keep  $T/repo-wt (Docker に届かず"
+
+setup keep-docker-down-paths
+merged_repo_wt "$T/repo-wt" feat-a
+echo "$T/elsewhere" >"$KEEPLIST"
+run_gc
+check "名前の行が無ければ今どおり消す" gone "$T/repo-wt"
+
+# ---- 「触らない」リスト: 読めない行が 1 つでもあれば、その回は何も消さず、行番号をログに出して通知する ----
+setup keep-bad-line
+merged_repo_wt "$T/repo-wt" feat-a
+printf '%s\n' "$T/other" "\$HOME/repo-wt" >"$KEEPLIST"
+run_gc
+check "worktree は残る" exists "$T/repo-wt"
+check "行番号がログに出る" logged "2 行目"
+check "通知が出る" notified_once "「触らない」リスト"
+
+# ---- 「触らない」リスト: 大文字小文字を区別しないファイルシステムでは、綴りの違う行でも実在する worktree を守る ----
+setup keep-case
+mkdir -p "$T/CaseProbe"
+if [ -d "$T/caseprobe" ]; then
+    merged_repo_wt "$T/repo-wt" feat-a
+    echo "$T/Repo-WT" >"$KEEPLIST"
+    run_gc
+    check "綴りの違う行でも残る" exists "$T/repo-wt"
+fi
+
+# ---- $REPO の節も Orca のピン留めを見る。Orca に届かない・ps が取れない回は、$REPO の節の削除も見送る ----
+setup keep-repo-pinned
+merged_repo_wt "$T/repo-wt" feat-a
+ps_json "$T/repo-wt" "$CREATED" done | jq '.result.worktrees[0].isPinned = true' >"$T/ps.json"
+run_gc
+check "ピン留めした worktree は残る" exists "$T/repo-wt"
+check "理由がログに出る" logged "keep  $T/repo-wt (Orca でピン留め)"
+
+setup keep-repo-orca-unreachable
+merged_repo_wt "$T/repo-wt" feat-a
+touch "$T/orca-unreachable"
+run_gc
+check "Orca に届かない回は残る" exists "$T/repo-wt"
+check "理由がログに出る" logged "keep  $T/repo-wt (Orca に届かず"
+
+setup keep-repo-ps-fails
+merged_repo_wt "$T/repo-wt" feat-a
+touch "$T/ps-fail"
+run_gc
+check "ps が取れない回は残る" exists "$T/repo-wt"
+
+# orca コマンドが無い環境では、ピン留めは無いものとして今どおり消す。スクリプトは PATH の後ろに /usr/local/bin などを
+# 足すので、そこに本物の orca が在る環境 (手元の macOS) では、本物を呼ばないよう走らせない。
+setup keep-repo-no-orca
+merged_repo_wt "$T/repo-wt" feat-a
+mkdir -p "$T/bin"
+for c in docker gh osascript claude; do ln -s "$base/bin/$c" "$T/bin/$c"; done
+noorca=$(printf '%s' "$PATH" | tr ':' '\n' | while IFS= read -r d; do [ -x "$d/orca" ] || printf '%s:' "$d"; done)
+if ! (PATH="$T/bin:${noorca}/etc/profiles/per-user/${USER:-}/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"; command -v orca >/dev/null 2>&1); then
+    env PATH="$T/bin:${noorca%:}" FAKE="$T" REPO="$T/repo" ORCA_ROOT="$T/orca" WORKTREE_GC_CONFIG=/nonexistent \
+        bash "$script" >"$T/log" 2>&1
+    echo "exit=$?" >>"$T/log"
+    check "orca が無ければ今どおり消す" gone "$T/repo-wt"
+    check "orca が無い枝を通った" logged "orca コマンドが無い"
+else
+    echo "skip [keep-repo-no-orca] 本物の orca が PATH の後ろに在る"
+fi
+
+# ---- 取り残された index.lock: リストに当たる worktree の lock は消さない ----
+# git が動いていると掃除ごと見送るので、pgrep は「git は居ない」と返す偽物にする。
+nogit_pgrep() { mkdir -p "$T/bin"; printf '#!/usr/bin/env bash\nexit 1\n' >"$T/bin/pgrep"; chmod +x "$T/bin/pgrep"; }
+setup keep-lock
+nogit_pgrep
+git_wt "$T/kept-wt" feat-k
+git_wt "$T/other-wt" feat-o # upstream 健在なので残る
+echo "$T/kept-wt" >"$KEEPLIST"
+for w in kept-wt other-wt; do touch "$T/repo/.git/worktrees/$w/index.lock"; touch -t 202601010000 "$T/repo/.git/worktrees/$w/index.lock"; done
+run_gc PATH="$T/bin:$base/bin:$PATH"
+check "リストの worktree の lock は残る" test -e "$T/repo/.git/worktrees/kept-wt/index.lock"
+check "ほかの worktree の lock は消す" test ! -e "$T/repo/.git/worktrees/other-wt/index.lock"
+check "理由がログに出る" logged "keep  index.lock $T/repo/.git/worktrees/kept-wt/index.lock (「触らない」リスト)"
+
+# ---- 取り残された index.lock: gitdir が相対パス (git worktree add --relative-paths) でも、持ち主の worktree を引いて守る ----
+# --relative-paths は git 2.48 から。知らない git では飛ばす (-h はリポジトリの中でないと使い方を出さない)。
+setup keep-lock-relative
+if git -C "$T/repo" worktree add -h 2>&1 | grep -q 'relative-paths'; then
+    nogit_pgrep
+    git -C "$T/repo" worktree add -q --relative-paths -b feat-k "$T/kept-wt" origin/main
+    echo "$T/kept-wt" >"$KEEPLIST"
+    touch "$T/repo/.git/worktrees/kept-wt/index.lock"
+    touch -t 202601010000 "$T/repo/.git/worktrees/kept-wt/index.lock"
+    run_gc PATH="$T/bin:$base/bin:$PATH"
+    check "gitdir は相対パス (前提)" test -z "$(grep '^/' "$T/repo/.git/worktrees/kept-wt/gitdir")"
+    check "リストの worktree の lock は残る" test -e "$T/repo/.git/worktrees/kept-wt/index.lock"
+else
+    echo "skip [keep-lock-relative] git が --relative-paths を知らない"
+fi
+
+# ---- 「無い」と「読めない行が在る」は別々に 1 日 1 回知らせる (無い → 作った → 書き間違い、でも 2 本目が出る) ----
+setup keep-missing-then-bad
+rm "$KEEPLIST"
+run_gc
+check "無い回に 1 本" test "$(grep -c . "$T/notify-calls" 2>/dev/null)" = 1
+printf '%s\n' '$HOME/x' >"$KEEPLIST"
+run_gc
+check "同じ日でも、読めない行の回にもう 1 本" test "$(grep -c . "$T/notify-calls" 2>/dev/null)" = 2
+check "2 本目は読めない行の知らせ" test -n "$(sed -n 2p "$T/notify-calls" | grep -F '読めない行')"
+run_gc
+check "読めない行の 2 回目は出ない" test "$(grep -c . "$T/notify-calls" 2>/dev/null)" = 2
+
+# ---- 「触らない」リストが無い回の DRY_RUN は、通知も印も出さず、lock も消さない ----
+setup keep-missing-dry-run
+nogit_pgrep
+merged_repo_wt "$T/repo-wt" feat-a
+touch "$T/repo/.git/worktrees/repo-wt/index.lock"
+touch -t 202601010000 "$T/repo/.git/worktrees/repo-wt/index.lock"
+rm "$KEEPLIST"
+run_gc DRY_RUN=1 PATH="$T/bin:$base/bin:$PATH"
+check "通知が出ない" test ! -e "$T/notify-calls"
+check "通知済みの印を書かない" test ! -e "$T/state/worktree-gc/keep-missing-warned"
+check "lock を消さない" test -e "$T/repo/.git/worktrees/repo-wt/index.lock"
+check "worktree は残る" exists "$T/repo-wt"
+
+# ---- 「触らない」リストの関数: set -euo pipefail の下で source し、直接呼ぶ ----
+setup keep-match
+lib="$root/home/scripts/cleanup-ledger.sh"
+# keep_load は読めた行数と読めない行をログに出すので、呼び側と同じく log を定義してから source する。
+pre='set -euo pipefail; log() { echo "LOG $*"; }; . "$0"; '
+mkdir -p "$T/home/w" "$T/real/x" "$T/real2/z"
+ln -s "$T/real" "$T/link"
+ln -s "$T/real2" "$T/link2"
+printf '%s\n' '  # comment' '' '   ' \~/w "$T/link/x" "$T/gone/" ' name-a ' "$T/in/wt/data" "$T/real2/z" >"$KEEPLIST"
+printf 'last-name' >>"$KEEPLIST" # 末尾に改行の無い最後の行
+m() { HOME="$T/home" bash -c "$pre"'keep_load >/dev/null; keep_match "$@"' "$lib" "$@"; }
+nm() { ! m "$@"; }
+# agent-gc の形: 行が対象の中を指すとき (祖先の一致) は当てない。
+m0() { HOME="$T/home" bash -c "$pre"'keep_load >/dev/null; keep_ancestors=0; keep_match "$@"' "$lib" "$@"; }
+check "対象が symlink 経由で、行が実体パスでも当たる" m "$T/link2/z"
+check "祖先の一致を切ると、行の上の対象には当たらない" eval '! m0 "$T/in/wt"'
+check "祖先の一致を切っても、行そのものと行の下には当たる" m0 "$T/in/wt/data/x"
+check "読めた行数をログに出す" test "$(HOME="$T/home" bash -c "$pre"'keep_load' "$lib" | grep -c 'LOG keep: パス 5 行・名前 2 行')" = 1
+# APFS など大文字小文字を区別しないファイルシステムでは、綴りの違う行も同じディレクトリを指す。区別するか試して、しないときだけ見る。
+mkdir -p "$T/CaseProbe"
+if [ -d "$T/caseprobe" ]; then
+    check "大文字小文字だけ違う対象にも当たる" m "$T/HOME/W"
+    # symlink を通り、綴りも違う行は、組み込みの pwd -P の形 (symlink は解くが綴りはそのまま) でも持つ。
+    # 持たないと、まだ無い対象 (消えた compose の working_dir など) を守らない。
+    printf '%s\n' "$T/link/X" >"$T/case-keep"
+    check "symlink を通り綴りの違う行が、まだ無い対象も守る" \
+        env CLEANUP_KEEP="$T/case-keep" bash -c "$pre"'keep_load >/dev/null; keep_match "$1"' "$lib" "$T/real/X/gone-zz"
+fi
+# 読み違えると守ったつもりで守らないので、どれか 1 行でもあればリスト全体を読めないにする。
+unreadable() { # unreadable <説明> <リストの中身 (printf の書式)>
+    printf "$2" >"$T/bad-keep"
+    check "$1 の行があれば読めない" env CLEANUP_KEEP="$T/bad-keep" bash -c "$pre"'! keep_load' "$lib"
+}
+unreadable '名前の行に /' 'proj\nw/sub\n'
+unreadable '$ で始まる' '$HOME/w\n'
+unreadable '" で始まる' '"/a/q"\n'
+unreadable "' で始まる" "'/a/q'\n"
+unreadable 'パスの行に空白 + #' '/a/keepme   # 大事\n'
+unreadable '名前の行に空白 + #' 'proj # 大事\n'
+unreadable '行の途中の CR' '/a/one\r/a/two\r'
+# 2 行目以降の BOM は名前の行で見る (パスの行だと / を含む名前の行として別の枝で拾われ、BOM の検査が効いているか分からない)。
+unreadable '2 行目以降の BOM' '/a/first\n\357\273\277proj\n'
+unreadable '名前の行が ~ で始まる' '~user\n'
+unreadable '名前の行に \\' 'C:\\Users\\x\n'
+# 1 行目の BOM はエディタが付けるもので画面に見えないので、落として読み進める。
+bom() { printf "$1" >"$T/bom-keep"; CLEANUP_KEEP="$T/bom-keep" bash -c "$pre"'keep_load >/dev/null && keep_match "$1"' "$lib" "$2"; }
+check "1 行目の BOM を落としてパスの行を読む" bom '\357\273\277/a/bom\n' /a/bom/x
+check "1 行目の BOM を落として名前の行を読む" bom '\357\273\277proj\n/a/x\n' proj
+check "1 行目の BOM の後のコメントを読み飛ばす" bom '\357\273\277# c\n/a/x\n' /a/x
+printf '/a/one\r/a/two\r' >"$T/cr-keep"
+check "WARN が CR だけの改行を理由に挙げる" test "$(CLEANUP_KEEP="$T/cr-keep" bash -c "$pre"'keep_load || :' "$lib" | grep -c 'CR')" = 1
+printf '/a/ok\n$ZZSECRET/x\n/a/ok2\nzzsecret/x\n' >"$T/bad-keep"
+check "読めない行は行番号だけログに出す (中身は出さない)" test "$(CLEANUP_KEEP="$T/bad-keep" bash -c "$pre"'keep_load || :' "$lib" | grep -F '2, 4 行目' | grep -cvi 'zzsecret')" = 1
+check "CRLF の行末は読める" env CLEANUP_KEEP="$T/crlf" bash -c 'printf "/a/x\r\nname\r\n" >"$CLEANUP_KEEP"; '"$pre"'keep_load' "$lib"
+check "~other/x は名前の行で / を含むので読めない" env CLEANUP_KEEP="$T/tilde" bash -c 'printf "~other/x\n" >"$CLEANUP_KEEP"; '"$pre"'! keep_load' "$lib"
+check "~ は HOME に展開する" m "$T/home/w/sub"
+check "実体パスの対象に、symlink を通る行が当たる" m "$T/real/x"
+check "無いパスの行は文字どおりで比べる" m "$T/gone/y"
+check "名前は前後の空白を除いて完全一致" m name-a
+check "名前は接頭辞では当たらない" nm name-ab
+check "末尾に改行の無い最後の行も読む" m last-name
+check "行が対象の中を指せば、対象ごと守る" m "$T/in/wt"
+check "空行・空白だけ・# の行はどれにも当たらない" nm "$T/elsewhere"
+check "名前の行はパスに当たらない" nm "$T/name-a"
+check "複数の対象のどれかが当たれば守る" m nope "$T/real/x/y"
+check "読まずに呼ぶと守る側に倒す" bash -c 'set -euo pipefail; . "$0"; keep_match /anything' "$lib"
+rm "$KEEPLIST"
+check "ファイルが無ければ読めない" bash -c 'set -euo pipefail; . "$0"; ! keep_load' "$lib"
+mkdir "$KEEPLIST"
+check "ディレクトリなら読めない" bash -c 'set -euo pipefail; . "$0"; ! keep_load' "$lib"
+rmdir "$KEEPLIST"
+if [ "$(id -u)" != 0 ]; then # root は読み取り権限を無視する
+    : >"$KEEPLIST"
+    chmod 000 "$KEEPLIST"
+    check "読めなければ読めない" bash -c 'set -euo pipefail; . "$0"; ! keep_load' "$lib"
+    chmod 600 "$KEEPLIST"
+fi
+
+# ---- 規則ごとのスイッチ: off / list / on。未設定と打ち間違いは off ----
+setup rule-mode
+rule() { env "$@" bash -c 'set -euo pipefail; log() { echo "LOG $*"; }; . "$0"; rule_mode x' "$lib" 2>"$T/err"; }
+check "未設定は off" test "$(rule)" = off
+check "on" test "$(rule RULE_x=on)" = on
+check "list" test "$(rule RULE_x=list)" = list
+check "off" test "$(rule RULE_x=off)" = off
+check "空は off" test "$(rule RULE_x=)" = off
+check "打ち間違いは off (標準出力は値だけ)" test "$(rule RULE_x=yes)" = off
+check "打ち間違いは WARN を標準エラーに 1 行" test "$(grep -c 'WARN' "$T/err")" = 1
+check "大文字は打ち間違い" test "$(rule RULE_x=ON)" = off
+check "規則名に使えない文字は off" test "$(env bash -c 'set -euo pipefail; log() { :; }; . "$0"; rule_mode "a-b"' "$lib" 2>/dev/null)" = off
 
 for f in "$base"/*/log; do grep -q '^exit=0$' "$f" || { echo "FAIL [$(basename "$(dirname "$f")")] exit が 0 でない"; fail=1; }; done
 [ "$fail" = 0 ] && echo "ok: worktree-gc"

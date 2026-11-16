@@ -77,7 +77,7 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 │   │   ├── pr-dispatch.sh
 │   │   ├── agent-resume.sh  # pr-dispatch.sh が毎回の最初に呼ぶ
 │   │   ├── dispatch-lock.sh  # pr-dispatch と agent-resume が同時に動かないための共有ロック
-│   │   ├── cleanup-ledger.sh  # 掃除ジョブが止めた・消したものを残す台帳
+│   │   ├── cleanup-ledger.sh  # 掃除ジョブの共有関数（台帳・「触らない」リスト・規則のスイッチ）
 │   │   ├── agent-gc.sh
 │   │   ├── container-events.sh
 │   │   └── memory-maintenance.sh  (+ -prompt.md, -schema.json)
@@ -436,6 +436,24 @@ Orca のボードの Done 列（pr-dispatch がマージ済みのカードを移
 ただし `~/.herdr/worktrees/` 配下は条件を満たしても**自動削除しない**。herdr が自前で
 workspace 状態を持っており `git worktree remove` を直接叩くと食い違うため、候補として
 ログに出すだけに留める（削除は `herdr worktree remove --workspace <ID> --force`）。
+
+止めない・消さないものは、手元の「触らない」リスト `~/.config/cleanup-keep`（追跡しない。場所は `CLEANUP_KEEP` で変えられる）に 1 行 1 つで書く。
+`/` で始まる行と `~`・`~/…` の行はパスの接頭辞（区切りで比べるので `/a/pr-12` は `/a/pr-123` に当たらない。symlink を辿った実体パスでも、
+大文字小文字を区別しないファイルシステムでは実際の綴りでも比べる）、それ以外は compose project の名前の完全一致。
+名前の行が当たるのは compose project の名前だけで、worktree のディレクトリ名やブランチ名には当たらない（worktree を守るならパスで書く）。
+正規表現・glob は使わず、`#` で始まる行と空行は読み飛ばす。コメントは行頭の `#` だけで、行の途中の `#` や `$HOME`・引用符は使えない。
+読めない行（`/`・`\` を含むか `~` で始まる名前の行、`$`・`"`・`'` で始まる行、空白 + `#` を含む行、行の途中の CR、2 行目以降の BOM。1 行目の BOM は落とす）が 1 つでもあると
+リスト全体を読めないとみなし、行番号をログに出す（中身は出さない）。読めた回は「パス N 行・名前 M 行」をログに出す。
+当たる worktree は判定の最初で残し（行がその中を指すときも残す）、当たる compose project は stop / down しない（それを中に持つ worktree も止めずに残す）。
+Docker に届かない回は、名前の行が 1 つでもあれば、守る project が中に居るか分からないので、削除の候補になった worktree を全部残す。
+取り残された index.lock も、当たる worktree のものは消さない（行が本体のリポジトリの中か上を指すと、本体の index.lock も掃除されない）。末尾の `docker image / volume / builder prune` は対象を絞れないので、リストを通らない。
+Orca でピン留めした worktree も、`$REPO` の節と Orca の節の両方で残す（Orca に届かない・`orca worktree ps` が取れない回は、両方の節の削除を見送る。
+`orca` コマンドの無い環境ではピン留めは無いものとして進む）。**ファイルが無い・読めない回は、`FF_CHECKOUTS` の追従のほかは何もせず**
+（削除・compose・prune・index.lock の掃除を全部見送る）、通知を 1 日 1 回出す（「無い」と「読めない行が在る」は別々に数える）。守るものが無ければ空のファイルを置く
+（この仕組みを入れた版をマージする前に `touch ~/.config/cleanup-keep` しておく。無いと毎時の掃除が止まる）。
+
+新しい判定は `~/.config/worktree-gc.env` の `RULE_<規則名>=off|list|on` で有効にする（`home/scripts/cleanup-ledger.sh` の `rule_mode`）。
+未設定と、3 つのどれでもない値は `off`。マージした次の毎時から本番で動くので、マージと有効化をここで分ける。
 
 `git worktree remove` はブランチを消さないので、コミットは常に残る。ただし ignore された
 ファイル（`.env` など）は worktree と一緒に消える。判定には使わず、件数を STALE のログに出す。
