@@ -665,6 +665,11 @@ intake_proposals() { # AI の提案を検証して proposals/<id>.json に置く
             log "提案を捨てる ($name): after_merge が delete: true でも残す内容でもない"
             continue
         fi
+        # 強制の段は schema でも縛るが、schema を通らない出力 (テストの偽の claude など) もここで弾く
+        if ! jq -e '(.enforcement.level | IN("構造", "権限・hook", "テスト・CI", "文章")) and (.enforcement.note | type == "string" and test("\\S"))' <<<"$prop" >/dev/null 2>&1; then
+            log "提案を捨てる ($name): enforcement.level が 4 段のどれでもないか、enforcement.note が空か空白だけ"
+            continue
+        fi
         id=$(printf '%s\t%s\t%s' "$name" "$repo" "$path" | git hash-object --stdin)
         f=$(prop_file "$id")
         if [ -e "$f" ]; then vlog "提案は既にある ($name → $path)"; continue; fi
@@ -697,7 +702,7 @@ intake_proposals() { # AI の提案を検証して proposals/<id>.json に置く
             --arg base "$base" --arg src "$src_blob" --arg slug "$slug" --arg vis "$vis" \
             '$p + {id: $id, status: $status, held_reason: $reason, created_at: $created, base_blob: $base,
                    source_blob: $src, slug: $slug, visibility: $vis}' >"$f.tmp" && mv "$f.tmp" "$f"
-        log "提案 [$status] $name → $(basename "$repo"):$path"
+        log "提案 [$status] $name → $(basename "$repo"):$path $(jq -r '"(強制: \(.enforcement.level) — \(.enforcement.note | gsub("\n"; " ")))"' <<<"$prop")"
         if [ "$status" = held ]; then notify "昇格の提案を保留した ($name): ${reason}。$f を直すか消す"; fi
     done
 }
@@ -752,6 +757,9 @@ pr_from_worktree() { # pr_from_worktree <id>: worktree に内容を書き、検�
     # launchd には ssh-agent が無いことがあるので、gh の認証で https に push する。
     git -C "$wt" -c credential.helper= -c 'credential.helper=!gh auth git-credential' push -q "https://github.com/$slug.git" "HEAD:refs/heads/$branch"
     prop_get "$id" .body >"$body"
+    # 足すのは 4 段の名前だけ。note は公開前検査を通していないので出さない。保留中に手で直された状態ファイルも 4 段の外は出さない。
+    # 欄の無い古い状態ファイルは何も足さない。push の後なので、欄の形が違っても `?` で jq を落とさない
+    prop_get "$id" '.enforcement.level? // empty | select(IN("構造", "権限・hook", "テスト・CI", "文章")) | "\n強制: \(.)"' >>"$body"
     def=$(default_ref "$repo")
     url=$(gh pr create -R "$slug" --head "$branch" --base "${def#origin/}" --title "$(prop_get "$id" .title)" --body-file "$body")
     prop_set "$id" '.status = "open" | .pr_url = $u | .pr_created_at = $t' --arg u "$url" --arg t "$TODAY"

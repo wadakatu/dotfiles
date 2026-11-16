@@ -128,7 +128,8 @@ memory dir とリポの対応: Claude Code は memory dir の `<p>` を git リ�
                  "kind":"global|repo-rules","target_repo":"<abs path>","target_path":"<repo-relative>",
                  "new_content":"<昇格後の target_path の全文>",
                  "title":"","body":"","commit_message":"",
-                 "after_merge":{"delete":true},"confidence":"高|中|低","public_safe":true}],
+                 "after_merge":{"delete":true},"confidence":"高|中|低","public_safe":true,
+                 "enforcement":{"level":"構造|権限・hook|テスト・CI|文章","note":""}}],
   "needs_human": [{"dir":"","file":"","question":""}]
 }
 ```
@@ -171,6 +172,7 @@ PR はスクリプトが決まった手順で作る。エージェントには�
 - `new_content` は 40KB 以下で、現在の内容と違う。
 - `base_blob` = export した commit の `target_path` の blob（無ければ `new`）と、`source_blob` = live の S1 での元ファイルの blob を記録する。
 - 昇格元は、今回の scope にある `MEMORY.md` 以外の topic ファイルであること（マージ後に索引ごと消さないため）。
+- `enforcement.level` が 4 段のどれかで、`enforcement.note` が空白だけでない（schema を通らない出力もここで弾く）。
 - 公開リポ向け（`gh repo view --json visibility` が PUBLIC）なら、`public_safe: true` と公開前検査（後述）を通す。外れたら `held` にして通知する。
 
 起票（1 日 5 件。`pr_created_at` が今日の提案を数える。確信度 高 → 中 → 低、dotfiles → チームのリポの順）:
@@ -179,7 +181,7 @@ PR はスクリプトが決まった手順で作る。エージェントには�
 3. worktree の `target_path` の blob が `base_blob` と違えば、提案を取り下げ（ファイルを消して同じキーを空ける）、worktree を消し、元のメモリを申し送り（`notes/<p>`）に載せて翌日の AI に出し直させる。
 4. `new_content` を書き、`git diff --name-only` が `target_path` だけであることを確かめる。
 5. 公開リポ向けは、実際の diff の追加行・`target_path`・ブランチ名・title・body・commit_message に公開前検査をもう一度かける（受け入れ時の検査にも `target_path` を含める）。
-6. commit → `git push -u origin <branch>` → `gh pr create --title --body-file --base <default>`。状態を `open` にし、`pr_url` と `pr_created_at` を保存する。
+6. commit → `git push -u origin <branch>` → `gh pr create --title --body-file --base <default>`。本文は `body` の後に `強制: <level>` の 1 行だけを足す（`note` は公開前検査を通らないので出さない。欄の無い古い提案は足さない）。状態を `open` にし、`pr_url` と `pr_created_at` を保存する。
 
 `creating` のまま止まっていたら、次の実行で `gh pr list -R <slug> --head <branch> --state all` を見る。PR があれば `open`、どちらも無ければ `pending` に戻す。worktree だけあるものは、1 日の上限の枠の中で、新規の起票より先に手順 3 から再開する。Orca に届かないときは `pending` のまま持ち越す。
 

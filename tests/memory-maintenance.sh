@@ -30,7 +30,10 @@ printf '%s\n' "$*" >>"$FAKE/gh-calls"
 case "$1 $2" in
     "api user") echo me ;;
     "repo view") case "$3" in me/*) echo PUBLIC ;; *) echo PRIVATE ;; esac ;;
-    "pr create") echo "https://github.com/fake/pull/$(grep -c '^pr create' "$FAKE/gh-calls")" ;;
+    "pr create") # 本文のファイルは PR ごとに上書きされるので、呼ばれた時点の中身を pr-body-<n> に写す
+        n=$(grep -c '^pr create' "$FAKE/gh-calls")
+        while [ $# -gt 0 ]; do [ "$1" = --body-file ] && cp "$2" "$FAKE/pr-body-$n"; shift; done
+        echo "https://github.com/fake/pull/$n" ;;
     "pr view") cat "$FAKE/pr-view" ;;
     "pr list") # --state merged は書き方の見本。それ以外は $FAKE/pr-list の "<ブランチ> <URL>" の行
         case " $* " in *" --state merged "*) echo '[{"title": "Fake merged title", "body": null}]'; exit 0 ;; esac
@@ -256,7 +259,8 @@ prop() { # prop <name> <repo> <path> <content> [confidence] [after_merge]
     jq -nc --arg p "$P" --arg n "$1" --arg r "$2" --arg t "$3" --arg c "$4" --arg conf "${5:-高}" --argjson am "$am" \
         '{source_dir: $p, source_file: "alpha.md", source_name: $n, kind: "global", target_repo: $r, target_path: $t,
           new_content: $c, title: "Add a rule", body: "出典: alpha", commit_message: "Add a rule",
-          after_merge: $am, confidence: $conf, public_safe: true}'
+          after_merge: $am, confidence: $conf, public_safe: true,
+          enforcement: {level: "文章", note: "判断が要るので文章 NOTE-MARKER"}}'
 }
 {
     printf '{"changes": [], "needs_human": [], "proposals": ['
@@ -266,6 +270,11 @@ prop() { # prop <name> <repo> <path> <content> [confidence] [after_merge]
     prop delta "$FAKE_DOT" home/zsh.nix 'x'; printf ','
     prop epsilon "$FAKE_DOT" agents/claude/rules/e.md $'- 規則\n' 高 '{}'; printf ','
     prop iota "$FAKE_DOT" agents/claude/rules/i.md $'- 規則\n' | jq -c '.source_file = "MEMORY.md"'; printf ','
+    # 強制の段の欄だけが壊れた提案。ほかは通る形にし、確信度を低にして PR の順番に影響させない
+    prop kappa "$FAKE_DOT" agents/claude/rules/k.md $'- 規則\n' 低 | jq -c 'del(.enforcement)'; printf ','
+    prop lambda "$FAKE_DOT" agents/claude/rules/l.md $'- 規則\n' 低 | jq -c '.enforcement.level = "hook"'; printf ','
+    prop mu "$FAKE_DOT" agents/claude/rules/m.md $'- 規則\n' 低 | jq -c '.enforcement.note = ""'; printf ','
+    prop nu "$FAKE_DOT" agents/claude/rules/n.md $'- 規則\n' 低 | jq -c '.enforcement.note = " \n "'; printf ','
     prop gamma "$FAKE_APP" .claude/rules/app.md $'- app の規則\n' 中
     printf ']}\n'
 } >"$FAKE/result.json"
@@ -280,6 +289,14 @@ check "昇格先のリポの PR とコミットを書き方の見本として渡
 check "見本にコミットの件名が入る" grep -qx -- '- init' "$FAKE/conventions/$P.md"
 check "dotfiles の見本も渡す" test -f "$FAKE/conventions/$(printf '%s' "$FAKE_DOT" | sed 's/[^A-Za-z0-9]/-/g').md"
 check "許可リスト外の target_path・不正な after_merge・topic でない昇格元は捨てる" test "$(ls "$T/state/proposals" | wc -l | tr -d ' ')" = 4
+check "enforcement の無い提案は捨てる" test -z "$(prop_status kappa)"
+check "enforcement.level が 4 段の外の提案は捨てる" test -z "$(prop_status lambda)"
+check "enforcement.note が空の提案は捨てる" test -z "$(prop_status mu)"
+check "PR の本文に強制の段を 1 行足す" grep -qx '強制: 文章' "$FAKE/pr-body-1"
+check "enforcement.note が空白だけの提案は捨てる" test -z "$(prop_status nu)"
+check "PR の本文に enforcement.note を出さない" bash -c "! grep -q NOTE-MARKER '$FAKE/pr-body-1'"
+check "PR のタイトルに enforcement.note を出さない" bash -c "! grep -q NOTE-MARKER '$FAKE/gh-calls'"
+check "コミットメッセージに enforcement.note を出さない" bash -c "! git -C '$T/github.com/me/dotfiles.git' log --all --format=%B | grep -q NOTE-MARKER"
 check "公開前検査に当たれば保留" test "$(prop_status beta)" = held
 check "target_path に社内の語があれば保留" test "$(prop_status zeta)" = held
 check "1 日の上限まで PR にする (dotfiles から)" test "$(prop_status alpha)" = open
@@ -323,12 +340,27 @@ git -C "$FAKE_DOT" worktree add -q -b chore/memory-y "$FAKE/wt/y" origin/main
 jq -n --arg r "$FAKE_DOT" --arg w "$FAKE/wt/y" '{id: "r2", status: "creating", source_name: "y", target_repo: $r, target_path: "agents/claude/rules/y.md",
     slug: "me/dotfiles", branch: "chore/memory-y", worktree: $w, base_blob: "new", new_content: "- y の規則\n", title: "Add y",
     body: "出典: y", commit_message: "Add y", visibility: "PUBLIC", confidence: "高", created_at: "2026-01-01"}' >"$T/state/proposals/r2.json"
+# 保留中に手で直され、段が 4 段の外になった状態ファイル。PR の順番を r2 の後に固定するため created_at を 1 日ずらす
+git -C "$FAKE_DOT" worktree add -q -b chore/memory-z "$FAKE/wt/z" origin/main
+jq -n --arg r "$FAKE_DOT" --arg w "$FAKE/wt/z" '{id: "r3", status: "creating", source_name: "z", target_repo: $r, target_path: "agents/claude/rules/z.md",
+    slug: "me/dotfiles", branch: "chore/memory-z", worktree: $w, base_blob: "new", new_content: "- z の規則\n", title: "Add z",
+    body: "出典: z", commit_message: "Add z", visibility: "PUBLIC", confidence: "高", created_at: "2026-01-02",
+    enforcement: {level: "LEVEL-MARKER", note: "n"}}' >"$T/state/proposals/r3.json"
+# enforcement が object でない状態ファイル。本文を組むのは push の後なので、jq が落ちると PR が作られずに止まる
+git -C "$FAKE_DOT" worktree add -q -b chore/memory-w "$FAKE/wt/w" origin/main
+jq -n --arg r "$FAKE_DOT" --arg w "$FAKE/wt/w" '{id: "r4", status: "creating", source_name: "w", target_repo: $r, target_path: "agents/claude/rules/w.md",
+    slug: "me/dotfiles", branch: "chore/memory-w", worktree: $w, base_blob: "new", new_content: "- w の規則\n", title: "Add w",
+    body: "出典: w", commit_message: "Add w", visibility: "PUBLIC", confidence: "高", created_at: "2026-01-03",
+    enforcement: "ENF-MARKER"}' >"$T/state/proposals/r4.json"
 echo "chore/memory-x https://github.com/fake/pull/99" >"$FAKE/pr-list"
 run_mm MAX_PR_PER_DAY=0
 check "creating で止まった提案を既存の PR から復旧する" test "$(jq -r .pr_url "$T/state/proposals/r1.json")" = "https://github.com/fake/pull/99"
 check "新しい PR を作る再開は 1 日の上限に従う" test "$(jq -r .status "$T/state/proposals/r2.json")" = creating
 run_mm MAX_PR_PER_DAY=5
 check "上限が空けば worktree から再開する" test "$(jq -r .status "$T/state/proposals/r2.json")" = open
+check "enforcement の無い古い状態ファイルは本文をそのまま PR にする" test "$(cat "$FAKE/pr-body-1")" = "出典: y"
+check "段が 4 段の外の状態ファイルは、その語を本文に出さない" test "$(cat "$FAKE/pr-body-2" 2>/dev/null)" = "出典: z"
+check "enforcement が object でない状態ファイルも本文をそのまま PR にする" test "$(cat "$FAKE/pr-body-3" 2>/dev/null)" = "出典: w"
 
 # 9. マージ後の後片付け
 cleanup_case() { # cleanup_case <名前> <PR の状態>
