@@ -460,7 +460,7 @@ Orca でピン留めした worktree も、`$REPO` の節と Orca の節の両方
 
 消した worktree と、止めた・落とした compose プロジェクトは、ログとは別に台帳
 `~/Library/Application Support/cleanup-ledger/ledger.tsv`（タブ区切り・追記のみ）に 1 件 1 行で残す。
-列は時刻・種類（worktree-gc が書くのは `worktree` / `compose-down` / `worktree-remove-failed` / `compose-stop`）・対象・当たった規則・戻し方・戻らないもの。
+列は時刻・種類（worktree-gc が書くのは `worktree` / `compose-down` / `worktree-remove-failed` / `compose-stop`、agent-gc は `session`）・対象・当たった規則・戻し方・戻らないもの。
 worktree の戻し方は `git worktree add -B <ブランチ> <パス> <SHA>`（detached は `--detach`）と、そこに居た
 セッションの `claude --resume <ID>`。戻し方の列は端末にそのまま貼って通るコマンドだけで、注記は先頭の
 `: <注記>; ` に置く（HEAD を取れなかった worktree は `: HEAD を取れなかったので戻し方なし` だけ）。戻らないものは ignore されたファイルの件数とパス（先頭 20 件）と、
@@ -540,8 +540,13 @@ DRY_RUN=1 agent-gc stop --listed  # 送らずに対象だけ出す
 tail -50 ~/Library/Logs/agent-gc.log
 ```
 
-入力欄に書きかけがあるもの、Orca の端末が分からないものは止めない。止めたセッションは、
-残ったタブに表示される `claude --resume <id>` / `codex resume <id>` で戻れる。
+入力欄に書きかけがあるもの、Orca の端末が分からないもの、cwd が分からないもの、cwd が「触らない」リスト（上の `~/.config/cleanup-keep`）か
+`EXCLUDE_RE` に当たるものは止めない。リストは cwd が行そのものか行の下のときだけ当たる（worktree-gc と違い、行が cwd の中を指しても守らない）。
+**リストが無い・読めない回の `stop` は 1 本も止めず**、通知を 1 日 1 回出す。
+止めたセッションは、残ったタブに表示される `claude --resume <id>` / `codex resume <id>` で戻れる。タブを閉じた後は、
+台帳（zsh の別名 `cleanup-ledger`）の戻し方を打つ。起動時の引数のうち `--plugin-dir`・`--model`・`--effort` だけを `--resume` の前に付ける
+（位置引数の指示や `--prefill` は、再開のときに次のターンとして実行されるので付けない）。Codex は ID を残さず `codex resume` の一覧から選ぶ。
+`/exit` を送っても待ち時間のうちに終わらなかったものも、規則に `(/exit 送信済み・終了は未確認)` を付けて台帳に残す。
 
 ## コンテナの異常終了の記録
 
