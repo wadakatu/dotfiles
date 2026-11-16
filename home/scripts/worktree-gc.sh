@@ -47,7 +47,7 @@ DRY_RUN="${DRY_RUN:-0}"
 
 log() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
 
-# 止めた・消したものの台帳。launchd は origin/main の写しを動かすので、隣のこのファイルも同じ版になる。
+# 止めた・消したものの台帳と「触らない」リスト。launchd は origin/main の写しを動かすので、隣のこのファイルも同じ版になる。
 # shellcheck source=home/scripts/cleanup-ledger.sh
 . "$(dirname "${BASH_SOURCE[0]}")/cleanup-ledger.sh"
 
@@ -211,6 +211,17 @@ agents_busy() {
     jq -r --arg p "$1" '[.result.worktrees[]? | select(.path == $p) | .agents[]?.state | select(. != "done")] | join(",")' <<<"$2"
 }
 
+# Orca でピン留めした worktree は「触らない」リストと同じく残す。true 以外 (欠けている・null) はピン留めでない。
+pinned() {
+    jq -e --arg p "$1" 'any(.result.worktrees[]?; .path == $p and .isPinned == true)' >/dev/null 2>&1 <<<"$2"
+}
+
+# 「触らない」リストに当たる compose project なら、理由をログに出して 0 を返す。名前か working_dir のどちらかで当てる。
+kept_stack() {
+    keep_match "$1" "$2" || return 1
+    log "keep  $1 (「触らない」リスト)"
+}
+
 # worktree の中に working_dir を持つ compose プロジェクトを、消す前に止める。
 # bind mount の中に named volume を重ねたマウント先 (storage/ など) は、コンテナが動いている間は
 # Docker Desktop が掴んでいてホストから消せない。そのまま消すと Permission denied で途中で止まり、
@@ -219,22 +230,43 @@ agents_busy() {
 # 末尾の `docker volume prune` に消されない。止める前に動いていたコンテナの ID は running に入れる。
 # この worktree のプロジェクト名は stacks (改行区切り。名前に空白があっても割れない) に、台帳に書く volume の名前は
 # stack_vols に入れる。
+# 「触らない」リストに当たるプロジェクトが中に居れば、1 つも止めずに 1 を返す。呼び側は worktree ごと残す
+# (止めずに消すと上の理由で削除が途中で止まり、止めれば守ったことにならない)。
 stop_stacks() {
     local wt="$1" proj dir id v
     running=() stacks="" stack_vols=""
-    docker info >/dev/null 2>&1 || return 0
+    if ! docker info >/dev/null 2>&1; then
+        # 名前の行は compose project にしか当たらない。Docker に届かないと、守る project が中に居るか分からないので、
+        # 名前の行が 1 つでもあれば worktree を残す (消すと project の working_dir が消える)。
+        case "$keep_entries" in
+            n:* | *$'\n'n:*)
+                log "keep  $wt (Docker に届かず、「触らない」リストの名前の行に当たる compose が中に居るか分からない)"
+                return 1
+                ;;
+        esac
+        return 0
+    fi
     while IFS=$'\t' read -r proj dir; do
         [ -n "$proj" ] && [ -n "$dir" ] || continue
         case "$dir" in "$wt"|"$wt"/*) ;; *) continue ;; esac
+        if keep_match "$proj" "$dir"; then
+            log "keep  $wt (compose $proj が「触らない」リスト)"
+            return 1
+        fi
         case $'\n'"$stacks" in *$'\n'"$proj"$'\n'*) continue ;; esac
         stacks+="$proj"$'\n'
+    done < <(docker ps -a --format '{{.Label "com.docker.compose.project"}}	{{.Label "com.docker.compose.project.working_dir"}}' | sort -u)
+    # 1 行ずつ読む (for で回すと、手で付けた label の空白で名前が割れ、別の名前を止める)。中の docker が
+    # 名前の一覧を標準入力から読み食いしないよう、fd 3 で渡す。
+    while IFS= read -r proj <&3; do
+        [ -n "$proj" ] || continue
         v=$(stack_volumes "$proj")
         if [ -n "$v" ]; then stack_vols="${stack_vols:+$stack_vols / }$proj: $v"; fi
         while read -r id; do [ -n "$id" ] && running+=("$id"); done \
             < <(docker ps -q --filter "label=com.docker.compose.project=$proj")
         log "stop  $proj — $wt を消す前に止める"
         run docker compose -p "$proj" stop || log "WARN: stop 失敗 $proj"
-    done < <(docker ps -a --format '{{.Label "com.docker.compose.project"}}	{{.Label "com.docker.compose.project.working_dir"}}' | sort -u)
+    done 3<<<"$stacks"
     # コンテナが止まってもマウントが外れるまで 1 秒弱かかる (実測)。
     if [ -n "$stacks" ] && [ "$DRY_RUN" != "1" ]; then sleep 3; fi
     return 0
@@ -317,15 +349,56 @@ ff_checkouts
 
 log "=== worktree-gc 開始 (repo=$REPO dry_run=$DRY_RUN) ==="
 
+# 「触らない」リストが無い・読めない回 (解釈できない行がある回を含む) は、何を守るべきか分からないので、ここから先 (index.lock の掃除、
+# worktree の削除、compose の stop / down、prune) を全部見送る。FF_CHECKOUTS の追従は何も消さないので上で済ませている。
+# 毎時のことなので、通知はその日 1 回だけ。手で流す DRY_RUN では出さない (その日の本番の通知を消さないため)。
+# 「無い」と「読めない行が在る」は印を分ける (同じ日に、無い → 作った → 書き間違い、でも 2 本目が出るように)。
+if ! keep_load; then
+    if [ "$keep_error" = bad ]; then
+        log "WARN: 「触らない」リスト $CLEANUP_KEEP に読めない行がある。この回は何も止めず何も消さない"
+        warned="$STATE_ROOT/worktree-gc/keep-unreadable-warned"
+        msg="「触らない」リスト $CLEANUP_KEEP に読めない行があるので掃除を止めています (行番号はログに)"
+    else
+        log "WARN: 「触らない」リスト $CLEANUP_KEEP が無いか読めない。この回は何も止めず何も消さない (守るものが無ければ空のファイルを置く)"
+        warned="$STATE_ROOT/worktree-gc/keep-missing-warned"
+        msg="「触らない」リスト $CLEANUP_KEEP が無いので掃除を止めています。守るものが無ければ空のファイルを置く"
+    fi
+    if [ "$DRY_RUN" != "1" ] && [ "$(cat "$warned" 2>/dev/null)" != "$(date +%F)" ]; then
+        notify "$msg"
+        { mkdir -p "${warned%/*}" && date +%F >"$warned"; } 2>/dev/null || log "WARN: 通知済みの印を書けない $warned"
+    fi
+    exit 0
+fi
+
 # ---- 取り残された index.lock を消す ----
 # git は SIGKILL されると lock を消せない (timeout 付きで git を叩くツールや、落ちたエージェント)。
 # 本体の lock が残ると Orca がローカル dev を fast-forward できず、worktree の lock が残ると
 # その worktree で add/commit できなくなる。1 時間以上前のもので、かつ git が 1 本も
 # 動いていないときだけ stale とみなす (エディタ待ちの commit などは git プロセスが居る)。
+# 「触らない」リストに当たる worktree の lock は消さない (守ると決めたものは、中の git の状態も触らない)。
+# worktree の lock は .git/worktrees/<名前>/ に在り、その worktree のパスは隣の gitdir (<パス>/.git) に書いてある。
+# git worktree add --relative-paths (git 2.48 から) の gitdir は .git/worktrees/<名前>/ からの相対パスなので、
+# 絶対パスに直してから比べる。直せなければ守るものか分からないので 1 を返し、呼び側は lock を残す。
+lock_owner() {
+    local d=${1%/index.lock} g
+    if [ "$d" = "$REPO/.git" ]; then printf '%s' "$REPO"; return 0; fi
+    g=$(cat "$d/gitdir" 2>/dev/null) || return 0
+    g=${g%/.git}
+    case $g in /*) ;; *) g=$(cd "$d/$g" 2>/dev/null && pwd) || return 1 ;; esac
+    printf '%s' "$g"
+}
 if pgrep -x git >/dev/null; then
     log "keep  index.lock の掃除は見送り (git が実行中)"
 else
     while read -r lock; do
+        if ! owner=$(lock_owner "$lock"); then
+            log "keep  index.lock $lock (gitdir の相対パスを解けず、持ち主の worktree が分からない)"
+            continue
+        fi
+        if keep_match "$owner"; then
+            log "keep  index.lock $lock (「触らない」リスト)"
+            continue
+        fi
         log "stale-lock $lock"
         run rm -f "$lock"
     done < <(find "$REPO/.git" -maxdepth 3 -name index.lock -mmin +60 2>/dev/null)
@@ -350,11 +423,41 @@ cwd_snapshot() {
 cwd_snapshot
 in_use() { awk -v p="$1" '$0 == p || index($0, p "/") == 1 { f = 1; exit } END { exit !f }' <<<"$cwds"; }
 
+# Orca でピン留めした worktree は、$REPO の節でも Orca の節でも残す。Orca の一覧は $ORCA_ROOT の外の worktree も
+# 持つので、両方の節の前で 1 回だけ取る。orca コマンドが無い環境では、ピン留めは無いものとして進む。
+# Orca に届かない・ps が取れない回は、ピン留めもエージェントの状態も分からないので、両方の節の削除を見送る
+# (全部ピン留めとみなすのと同じ)。
+ps_json=""
+if ! command -v orca >/dev/null 2>&1; then
+    orca_state=absent
+    log "orca コマンドが無い。Orca の worktree の掃除は飛ばし、ピン留めは無いものとして進む"
+elif ! orca status --json 2>/dev/null | jq -e '.result.runtime.reachable == true' >/dev/null 2>&1; then
+    orca_state=unknown
+    log "WARN: Orca のランタイムに届かない。ピン留めが分からないので、Orca と $REPO の worktree の掃除はスキップ (次回に拾う)"
+elif ! ps_json=$(orca_ps); then
+    orca_state=unknown
+    log "WARN: orca worktree ps が取れない、または打ち切られた。エージェントの状態とピン留めが分からないので、Orca と $REPO の worktree の掃除はスキップ"
+else
+    orca_state=ok
+fi
+
 while read -r wt; do
     [ "$wt" = "$REPO" ] && continue
     # Orca の worktree は下の Orca の節で判定する。ここで `git worktree remove` すると Orca の状態とずれる。
     case "$wt" in "$ORCA_ROOT"/*) continue ;; esac
 
+    if keep_match "$wt"; then
+        log "keep  $wt (「触らない」リスト)"
+        continue
+    fi
+    if [ "$orca_state" = unknown ]; then
+        log "keep  $wt (Orca に届かず、ピン留めが分からない)"
+        continue
+    fi
+    if [ "$orca_state" = ok ] && pinned "$wt" "$ps_json"; then
+        log "keep  $wt (Orca でピン留め)"
+        continue
+    fi
     if is_dirty "$wt"; then
         log "keep  $wt (未コミットの変更あり、または git status 失敗)"
         continue
@@ -422,14 +525,19 @@ has_commits_outside_pr() {
     return 1
 }
 
-if ! orca status --json 2>/dev/null | jq -e '.result.runtime.reachable == true' >/dev/null 2>&1; then
-    log "WARN: Orca のランタイムに届かない。Orca の worktree の掃除はスキップ (次回に拾う)"
-elif ! ps_json=$(orca_ps); then
-    log "WARN: orca worktree ps が取れない、または打ち切られた。エージェントの状態が分からないので Orca の worktree の掃除はスキップ"
-else
+# Orca の状態は $REPO の節の前で取った (ps_json)。取れなかった回はこの節ごと見送る。
+if [ "$orca_state" = ok ]; then
     fetched=""
     while IFS=$'\t' read -r wt branch; do
         [ -d "$wt" ] || continue
+        if keep_match "$wt"; then
+            log "keep  $wt (「触らない」リスト)"
+            continue
+        fi
+        if pinned "$wt" "$ps_json"; then
+            log "keep  $wt (Orca でピン留め)"
+            continue
+        fi
         if is_dirty "$wt"; then
             log "keep  $wt (未コミットの変更あり、または git status 失敗)"
             continue
@@ -529,7 +637,7 @@ for wt in ${removable[@]+"${removable[@]}"}; do
     why=${removable_why[$i]}
     i=$((i + 1))
     wt_snapshot "$wt"
-    stop_stacks "$wt"
+    stop_stacks "$wt" || continue
     if run git -C "$REPO" worktree remove "$wt" 2>/dev/null; then
         log "removed $wt"
         removed+=("$wt")
@@ -564,6 +672,10 @@ for wt in ${orca_removable[@]+"${orca_removable[@]}"}; do
         log "keep  $wt (削除直前にエージェントが $busy)"
         continue
     fi
+    if pinned "$wt" "$ps_now"; then
+        log "keep  $wt (削除直前に Orca でピン留め)"
+        continue
+    fi
     # 1 つ消すのに 1 分かかることがあるので、worktree ごとに取り直す。
     cwd_snapshot
     if [ "$cwds_ok" = "0" ] || in_use "$wt"; then
@@ -571,7 +683,7 @@ for wt in ${orca_removable[@]+"${orca_removable[@]}"}; do
         continue
     fi
     wt_snapshot "$wt"
-    stop_stacks "$wt"
+    stop_stacks "$wt" || continue
     if [ "$DRY_RUN" = "1" ]; then
         log "DRY-RUN: orca worktree rm --worktree path:$wt"
         removed+=("$wt")
@@ -605,6 +717,10 @@ if docker info >/dev/null 2>&1; then
             case "$dir" in "$wt"|"$wt"/*) reason="削除した worktree $wt に属する" ;; esac
         done
         if [ -n "$reason" ]; then
+            # 当たるものを中に持つ worktree は stop_stacks が残す (docker に届かない回も、名前の行があれば残す)。
+            # ここで当たるのは、stop の時点で docker に届かず名前の行も無かった (パスの行が working_dir に当たる) か、
+            # その後に現れたプロジェクトだけ。
+            if kept_stack "$proj" "$dir"; then continue; fi
             log "down  $proj — $reason (ボリュームも削除)"
             vols=$(stack_volumes "$proj")
             if run docker compose -p "$proj" down --remove-orphans --volumes; then
@@ -625,6 +741,7 @@ if docker info >/dev/null 2>&1; then
         # Orca の worktree の compose 名は app-<worktree 名>-<hash> で接頭辞に当たらないので、working_dir で拾う。
         case "$dir" in "$ORCA_ROOT"/*) matched=1 ;; esac
         [ "$matched" = "1" ] || continue
+        if kept_stack "$proj" "$dir"; then continue; fi
 
         log "down  $proj — working_dir が既に無い (孤児)"
         if run docker compose -p "$proj" down --remove-orphans; then
