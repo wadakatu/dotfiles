@@ -161,7 +161,12 @@ DRY_RUN=1 agent-gc stop …  判定し直して、止める対象を表示する
 
 ## 5. 止め方（stop の 1 件ごと）
 
-1. 材料を取り直して judge に通す。候補でなければ `skip <pid>: <理由>` とする。`--listed` のときは、鍵が listed.tsv と違えば `skip <pid>: changed since list` とする。
+その前に 1 回だけ（#157）：
+
+- 共有ファイル `home/scripts/cleanup-ledger.sh` を、スクリプトの実体の隣から読む。`~/.local/bin/agent-gc` は nix の store を挟んだ symlink の連なりなので、`readlink` を 1 段ずつ辿って実体を求める。読めなければ 1 本も止めない（scan と list は今どおり）。
+- 「触らない」リスト（`keep_load`）を読む。無い・読めない回（解釈できない行がある回を含む）は 1 本も `/exit` を送らず、ログに理由を書き、通知をその日 1 回だけ出す（印は「無い」が `keep-missing-warned`、「読めない行が在る」が `keep-unreadable-warned` で、同じ日に両方出せる。worktree-gc のものとは別。`DRY_RUN=1` では通知も印も出さない）。
+
+1. 材料を取り直して judge に通す。候補でなければ `skip <pid>: <理由>` とする。`--listed` のときは、鍵が listed.tsv と違えば `skip <pid>: changed since list` とする。cwd が空か絶対パスでなければ（記録に `cwd` が無い、Codex の `lsof` が失敗した）、リストに当たるか判定できないので `skip <pid>: cwd が分からない` とする。cwd が「触らない」リストの行そのものか行の下なら（`keep_match`。行が cwd の中を指す祖先の一致は使わない。セッションを止めても中身は消えないため）skip する。`EXCLUDE_RE` は judge の表の 10 に残し、どちらかに当たれば止めない。
 2. `ORCA_TERMINAL_HANDLE` が `orca terminal list` にあり、その `agentIdentity` がこのエージェント（claude / codex）であることを確かめる。そうでなければ skip する。
 3. `orca terminal read --screen` の末尾から、入力欄が空であることを確かめる。書きかけの文字があるところに `/exit` を送ると、それが続けて送信されてしまうため。
    - `--screen` を付けないと、描画された画面ではなく出力の履歴が返る。そうすると、後から差分で描かれた書きかけを見落とす。応答の `source` が `screen` でなければ、止めない。
@@ -172,10 +177,16 @@ DRY_RUN=1 agent-gc stop …  判定し直して、止める対象を表示する
      - 書きかけの文字と placeholder は文字だけでは見分けられないので、この文言のときだけを空とみなす。
    - 当たらなければ `skip <pid>: input not empty`。
 4. `DRY_RUN=1` なら、ここで `would stop` を出して次へ進む。
-5. `orca terminal send --terminal <handle> --text /exit --enter` を送る。
-6. 最大 20 秒、プロセスが消えるのを待つ。開始時刻が変わった場合も、消えたとみなす。
-   - 消えたら：`stopped` をログに書く。
-   - 消えなければ：`failed: still running` をログに書くだけで、KILL はしない。終了の確認画面などで止まっている可能性がある。ユーザーが端末を見て判断する。
+5. 戻し方を組む。セッション ID（`sessions/<pid>.json` の `sessionId`）も起動時の引数も終了で消えるので、送る前に控える。
+   - Claude：`cd <cwd> && claude <引数> --resume <ID>`。引数は、起動時の引数のうち `--plugin-dir`・`--model`・`--effort`（`--flag 値` と `--flag=値` の両方。値が空か `-` で始まるものは除く）だけを `printf %q` で付ける。位置引数の指示（`/some-command <URL>`）や `--prefill` は、再開のときに次のターンとして実行されるので付けない。
+     - 引数を `--resume` の前に置くのは、この戻し方で再開したセッションを次に止めたとき、`--resume` の ID を位置引数と取り違えて引数を落とさないため。走査は `--resume`・`-r` とその値（`-` で始まらないトークン）を読み飛ばす。
+     - `ps` は argv の境界を残さないので、`--plugin-dir` の値は続くトークンを足して実在するディレクトリになる最長のものにする（`~/Library/Application Support/...` のように空白を含む）。走査は位置引数の始まりで止める。
+   - Codex：`cd <cwd> && codex resume`（一覧から選ぶ）。ID は rollout の 1 行目（`session_meta`）から引けそうだが、`codex resume <ID>` で再開まで通るかを確かめていないので残さない。
+   - ID が無ければ、先頭に `: 一覧から選ぶ;` を付ける。`#` のコメントにしないのは、対話の zsh が既定で `interactive_comments` を無効にしていて、貼ると注記が引数として渡るため。
+6. `orca terminal send --terminal <handle> --text /exit --enter` を送る。
+7. 最大 20 秒、プロセスが消えるのを待つ。開始時刻が変わった場合も、消えたとみなす。
+   - 消えたら：`stopped` をログに書き、共有の台帳（`ledger_add`）に 1 行足す。種類 `session`、対象 `<agent> <cwd>`、規則 `idle <n>h >= <閾値>h`（pressure が WARN 以上なら ` (memory pressure WARN)`）、戻し方、戻らないもの（空）。
+   - 消えなければ：`failed: still running` をログに書き、KILL はしない。終了の確認画面などで止まっている可能性がある。ユーザーが端末を見て判断する。`/exit` は届いていて待ち時間の後で終わることもあるので、台帳にも規則に ` (/exit 送信済み・終了は未確認)` を付けて 1 行足す。
 
 ログの例：
 
@@ -202,7 +213,7 @@ Orca のタブは閉じない。シェルが残るので、表示された `clau
 - 材料が欠けたら、keep に倒す。
 - KILL しない。`/exit` で終わらなければ、失敗としてログに残すだけにする。
 - 形式の変化を検知する：claude のプロセスがあるのに、読めた記録が 0 本なら、`WARN` をログに書き、その日 1 回だけ通知する。
-- 除外：`EXCLUDE_RE`（パスの正規表現）。既定は空。
+- 除外：「触らない」リスト（`~/.config/cleanup-keep`、worktree-gc と共有）と `EXCLUDE_RE`（パスの正規表現。既定は空）。どちらかに当たれば止めない。リストが無い回の stop は 1 本も止めない。
 - 多重実行のロックは置かない。
   - scan は launchd が重ねて起動しない。
   - list と stop は人が打つ。
@@ -217,6 +228,10 @@ Orca のタブは閉じない。シェルが残るので、表示された `clau
 | `notified.tsv` | 知らせた鍵 |
 | `listed.tsv` | 最後に list で見せた候補（pid と鍵） |
 | `format-warned` | 形式の警告を出した日付 |
+| `keep-missing-warned` | 「触らない」リストが無い（読めない）と知らせた日付 |
+| `keep-unreadable-warned` | 「触らない」リストに読めない行があると知らせた日付 |
+
+置き場所の根は `STATE_ROOT`（cleanup-ledger.sh と同じ）。止めたものの台帳は共有の `cleanup-ledger/ledger.tsv` に書く。
 
 ログは `~/Library/Logs/agent-gc.log`。scan は毎回 1 行書く。stop は 1 件ごとに 1 行書き、端末にも出す。
 
@@ -226,7 +241,7 @@ Orca のタブは閉じない。シェルが残るので、表示された `clau
 
 ## 9. テスト
 
-`tests/agent-gc.sh` に置く。偽のコマンドは使わず、純粋な部分だけを試す。CI（`nix.yml` の check ジョブ）で回す。
+`tests/agent-gc.sh` に置く。CI（`nix.yml` の check ジョブ）で回す。judge と prompt-empty は偽のコマンドを使わずに試す。stop（#157 の台帳と「触らない」リスト）は `ps`・`lsof`・`sysctl`・`orca`・`osascript`・`sleep` を偽物にして試す。偽の `ps` は本物と同じく引数を空白で繋いだ 1 行で返す。
 
 - `agent-gc.sh judge` に JSON の行を流し、表の 1〜10 の各理由と候補を照合する。
   - pressure による閾値の切り替え。

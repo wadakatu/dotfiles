@@ -12,9 +12,31 @@ export LC_ALL=C
 
 IDLE_H=${IDLE_H:-24}           # この時間 idle なら候補
 IDLE_WARN_H=${IDLE_WARN_H:-6}  # memory pressure が WARN 以上のときの閾値
-EXCLUDE_RE=${EXCLUDE_RE:-}     # 候補にしないパスの正規表現
-STATE_DIR=${STATE_DIR:-"$HOME/Library/Application Support/agent-gc"}
+EXCLUDE_RE=${EXCLUDE_RE:-}     # 候補にしないパスの正規表現 (「触らない」リストとどちらかに当たれば候補にしない)
+# 状態の根は cleanup-ledger.sh と同じ STATE_ROOT。テストはこの 1 つを一時ディレクトリに向ける。
+STATE_DIR=${STATE_DIR:-"${STATE_ROOT:-$HOME/Library/Application Support}/agent-gc"}
 LOG=${LOG:-"$HOME/Library/Logs/agent-gc.log"}
+CLAUDE_SESSIONS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/sessions"
+
+# 止めたものの台帳と「触らない」リストは、掃除ジョブの共有ファイル cleanup-ledger.sh から読む。
+# ~/.local/bin/agent-gc は nix の store を挟んだ symlink の連なりでこのファイルを指すので、BASH_SOURCE の
+# dirname では home/scripts に届かない。readlink -f は古い macOS に無いので 1 段ずつ辿る (相対のリンクは
+# リンクの在る場所から)。回数の上限は、輪になったリンクで回り続けないため。
+self=${BASH_SOURCE[0]}
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ -L "$self" ] || break
+    link=$(readlink "$self")
+    case $link in
+        /*) self=$link ;;
+        *) self=$(dirname "$self")/$link ;;
+    esac
+done
+# 読めなくても scan と list は今どおり動かす (止めないので要らない)。stop は入口で 1 本も止めずに終わる。
+# 「触らない」リストの行が cwd の中を指すとき (祖先の一致) は守らない。worktree-gc は対象を消すと中身も消えるので
+# 守るが、セッションを止めても中身は消えない。当てると ~/www の下に 1 行あるだけで ~ や ~/www のセッションが止まらなくなる。
+ledger_ok=0
+# shellcheck source=home/scripts/cleanup-ledger.sh
+if [ -r "$(dirname "$self")/cleanup-ledger.sh" ] && . "$(dirname "$self")/cleanup-ledger.sh"; then ledger_ok=1 keep_ancestors=0; fi
 
 # ログに書き、端末から打ったときは画面にも出す。
 log() {
@@ -34,6 +56,7 @@ judge() {
     jq -c --argjson idle_h "$IDLE_H" --argjson warn_h "$IDLE_WARN_H" --arg exclude "$EXCLUDE_RE" '
         (if (.pressure // 0) >= 2 then $warn_h else $idle_h end) as $th
         | [.orca.sub_states[]? | select(. != "done" and . != "idle")] as $sub
+        | .threshold_h = $th
         | .reason = (
             if .readable != true then "unreadable"
             elif .status != "idle" then "status=\(.status)"
@@ -85,7 +108,7 @@ codex_state() {
 # 1 セッション 1 行の JSON を出す。pid を渡せばその 1 本だけ。macOS 専用。
 collect() {
     local only=${1:-}
-    local now pressure orca_json orca_ok pid comm envs lstart pane term wt f readable status ts path key st
+    local now pressure orca_json orca_ok pid comm envs lstart pane term wt f readable status ts path key st sid
     now=$(date +%s)
     pressure=$(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null || echo 0)
     orca_ok=false
@@ -102,9 +125,9 @@ collect() {
         pane=$(env_of "$envs" ORCA_PANE_KEY)
         term=$(env_of "$envs" ORCA_TERMINAL_HANDLE)
         wt=$(env_of "$envs" ORCA_WORKTREE_ID)
-        readable=false status="" ts="" path=""
+        readable=false status="" ts="" path="" sid=""
         if [ "$comm" = claude ]; then
-            f="$HOME/.claude/sessions/$pid.json"
+            f="$CLAUDE_SESSIONS/$pid.json"
             if [ -f "$f" ]; then
                 # claude -p などは対象外
                 # 読めて非対話と分かったものだけ外す。読めないものは unreadable として残し、形式の警告に数える。
@@ -116,6 +139,8 @@ collect() {
                     status=$(jq -r .status "$f")
                     ts=$(jq -r '(.statusUpdatedAt // .updatedAt) / 1000 | floor' "$f")
                     path=$(jq -r '.cwd // ""' "$f")
+                    # 再開の ID。この記録は終了で消えるので、/exit を送る前のここで控える (stop は判定し直すたびにここを通る)。
+                    sid=$(jq -r '.sessionId // "" | strings' "$f")
                 fi
             fi
         else
@@ -130,10 +155,10 @@ collect() {
         jq -cn --argjson pid "$pid" --arg agent "$comm" --arg lstart "$lstart" --arg key "$key" \
             --argjson readable "$readable" --arg status "$status" --arg ts "$ts" --argjson now "$now" \
             --argjson pressure "$pressure" --arg path "$path" --arg term "$term" --arg wt "$wt" \
-            --arg pane "$pane" --argjson orca_ok "$orca_ok" --argjson o "$orca_json" '
+            --arg pane "$pane" --argjson orca_ok "$orca_ok" --argjson o "$orca_json" --arg sid "$sid" '
             ([$o.result.worktrees[]? as $w | $w.agents[]? | select($pane != "" and .paneKey == $pane)
               | {state, workspace_status: $w.workspaceStatus}] | first) as $a
-            | {pid: $pid, agent: $agent, lstart: $lstart, key: $key, readable: $readable,
+            | {pid: $pid, agent: $agent, lstart: $lstart, key: $key, readable: $readable, sid: $sid,
                status: $status, idle_sec: (if $ts == "" then null else $now - ($ts | tonumber) end),
                pressure: $pressure, path: $path, term: $term, worktree: $wt,
                orca: {ok: $orca_ok, found: ($a != null), state: $a.state, workspace_status: $a.workspace_status,
@@ -182,14 +207,104 @@ list() {
     ' <<<"$rows"
 }
 
+# 起動時のコマンドライン (ps の 1 行) から、再開に付けてよい引数 (--plugin-dir・--model・--effort) だけを
+# printf %q で引用して出す。位置引数の指示 (/some-command <URL>) や --prefill を付けると、再開したときに
+# 次のターンとして実行されるので、起動時の引数をそのまま付けない。
+# ps は argv の境界を残さない (空白で繋いだ 1 行) ので、空白で割ってから値を組み直す。
+#   --plugin-dir: 値に空白が入りうる (~/Library/Application Support/...)。続くトークンを足していき、
+#                 実在するディレクトリになる最長のものを値にする。どれも当たらなければ付けない。
+#   --model・--effort: 値は 1 トークン。--flag=値 の形も読む。
+#   --model・--effort の値が空か - で始まるときは、値が欠けているので flag ごと付けない。
+#   --resume・-r: 値 (ID) ごと読み飛ばす。台帳の戻し方で再開したセッションを次に止めるとき、ID を位置引数と
+#                 みなして止まると、許可した引数が落ちる。次のトークンが - で始まるときは値とみなさない。
+# 走査は、許可した flag の値でも - で始まるのでもない最初のトークン (位置引数の始まり) で止める。指示の本文に
+# --model などが書かれていても拾わないため。
+# ponytail: 位置引数や、値を取るほかの flag (--agent <名前> など) より後ろの許可 flag は取りこぼす
+# (取りこぼしても再開時の設定が既定に戻るだけ)。正確にするなら sysctl KERN_PROCARGS2 で argv の境界を取る。
+resume_args() {
+    local w out="" i=1 n f k acc best bestk
+    # 本文の * や ? をカレントのファイル名に展開しないよう、割る間だけ glob を止める。
+    set -f
+    read -ra w <<<"$1"
+    set +f
+    n=${#w[@]}
+    while [ "$i" -lt "$n" ]; do # w[0] はプログラム名
+        f=${w[$i]}
+        case $f in
+            --plugin-dir | --plugin-dir=*)
+                best="" bestk=$i acc=""
+                [ "$f" = --plugin-dir ] || { acc=${f#--plugin-dir=}; [ -d "$acc" ] && best=$acc; }
+                k=$((i + 1))
+                while [ "$k" -lt "$n" ]; do
+                    case ${w[$k]} in --*) break ;; esac
+                    acc=${acc:+$acc }${w[$k]}
+                    if [ -d "$acc" ]; then best=$acc bestk=$k; fi
+                    k=$((k + 1))
+                done
+                [ -z "$best" ] || out="$out --plugin-dir $(printf %q "$best")"
+                i=$((bestk + 1))
+                ;;
+            --model | --effort)
+                i=$((i + 1))
+                if [ "$i" -lt "$n" ]; then
+                    case ${w[$i]} in
+                        -*) ;;
+                        *) out="$out $f $(printf %q "${w[$i]}")"; i=$((i + 1)) ;;
+                    esac
+                fi
+                ;;
+            --model=* | --effort=*)
+                case ${f#*=} in
+                    '' | -*) ;;
+                    *) out="$out ${f%%=*} $(printf %q "${f#*=}")" ;;
+                esac
+                i=$((i + 1))
+                ;;
+            --resume | -r)
+                i=$((i + 1))
+                if [ "$i" -lt "$n" ]; then case ${w[$i]} in -*) ;; *) i=$((i + 1)) ;; esac; fi
+                ;;
+            -*) i=$((i + 1)) ;;
+            *) break ;;
+        esac
+    done
+    printf '%s' "$out"
+}
+
 stop() {
-    local targets rows row pid want reason term agent terms
+    local targets rows row pid want reason term agent terms path sid restore rule warned msg
     if [ "${1:-}" = --listed ]; then
         targets=$(cat "$STATE_DIR/listed.tsv" 2>/dev/null)
         [ -n "$targets" ] || { echo "listed.tsv が空です。先に agent-gc list を打ってください" >&2; return 1; }
     else
         [ $# -gt 0 ] || { echo "usage: agent-gc stop <pid>... | --listed" >&2; return 1; }
         targets=$(printf '%s\t\n' "$@")
+    fi
+    # 共有ファイルが無ければ、何を守るかも、止めたものをどこに残すかも分からないので 1 本も止めない。
+    if [ "$ledger_ok" != 1 ]; then
+        log "WARN: $(dirname "$self")/cleanup-ledger.sh を読めない。1 本も止めない"
+        return 1
+    fi
+    # 「触らない」リストは 1 回だけ読む (途中でファイルが変わっても、この回の判定は変えない)。無い・読めない回は、
+    # 何を守るべきか分からないので 1 本も /exit を送らない (worktree-gc と同じ。守るものが無いことは空のファイルで表す)。
+    # 通知はその日 1 回だけ。印は worktree-gc のものと分ける (片方の通知で、もう片方の知らせを消さないため)。
+    # 手で流す DRY_RUN では通知も印も出さない (worktree-gc と同じ。その日の本番の通知を消さないため)。
+    # 「無い」と「読めない行が在る」は印を分ける (同じ日に、無い → 作った → 書き間違い、でも 2 本目が出るように)。
+    if ! keep_load; then
+        if [ "$keep_error" = bad ]; then
+            log "WARN: 「触らない」リスト $CLEANUP_KEEP に読めない行がある。1 本も止めない"
+            warned="$STATE_DIR/keep-unreadable-warned"
+            msg="「触らない」リスト $CLEANUP_KEEP に読めない行があるので stop を止めています (行番号はログに)"
+        else
+            log "WARN: 「触らない」リスト $CLEANUP_KEEP が無いか読めない。1 本も止めない (守るものが無ければ空のファイルを置く)"
+            warned="$STATE_DIR/keep-missing-warned"
+            msg="「触らない」リスト $CLEANUP_KEEP が無いので stop を止めています。守るものが無ければ空のファイルを置く"
+        fi
+        if [ "${DRY_RUN:-0}" != 1 ] && [ "$(cat "$warned" 2>/dev/null)" != "$(date +%F)" ]; then
+            notify "$msg"
+            { mkdir -p "$STATE_DIR" && date +%F >"$warned"; } 2>/dev/null || log "WARN: 通知済みの印を書けない $warned"
+        fi
+        return 1
     fi
     while IFS=$'\t' read -r pid want; do
         [ -n "$pid" ] || continue
@@ -202,6 +317,11 @@ stop() {
         reason=$(jq -r '.reason // empty' <<<"$row")
         if [ -n "$reason" ]; then log "skip $agent pid=$pid: $reason"; continue; fi
         if [ -n "$want" ] && [ "$want" != "$(jq -r .key <<<"$row")" ]; then log "skip $agent pid=$pid: changed since list"; continue; fi
+        path=$(jq -r .path <<<"$row")
+        # cwd が取れない (記録に cwd が無い、Codex の lsof が失敗した) と、リストに当たるか判定できない。
+        # 材料が欠けたら止めない側に倒す (空の cwd は keep_match のどの行にも当たらず、そのまま止まってしまう)。
+        case $path in /*) ;; *) log "skip $agent pid=$pid: cwd が分からない"; continue ;; esac
+        if keep_match "$path"; then log "skip $agent pid=$pid: 「触らない」リストに当たる $path"; continue; fi
         term=$(jq -r .term <<<"$row")
         # agentIdentity は時々 null で返る (実測)。別のエージェントと出たときだけ止めない。入力欄は画面で確かめる。
         if [ -z "$term" ] || ! jq -e --arg h "$term" --arg a "$agent" \
@@ -215,7 +335,23 @@ stop() {
             prompt_empty "$agent"; then
             log "skip $agent pid=$pid: input not empty"; continue
         fi
-        if [ "${DRY_RUN:-0}" = 1 ]; then echo "would stop $agent pid=$pid $(jq -r .path <<<"$row")"; continue; fi
+        if [ "${DRY_RUN:-0}" = 1 ]; then echo "would stop $agent pid=$pid $path"; continue; fi
+        # 台帳に残す戻し方。起動時の引数はプロセスと一緒に消えるので、/exit を送る前に組む。
+        # 許可した引数は --resume の前に置く (再開したセッションを次に止めたとき、resume_args が --resume の値を
+        # 位置引数と取り違えずに済む。Orca 自身の再開も --resume を最後に置く)。
+        # Codex の ID は rollout の 1 行目から引けそうだが、codex resume <ID> で再開まで通るかを確かめていないので
+        # 残さず、一覧から選ばせる。
+        sid=$(jq -r '.sid // ""' <<<"$row")
+        if [ "$agent" = claude ]; then
+            restore="cd $(printf %q "$path") && claude$(resume_args "$(ps -ww -o args= -p "$pid" 2>/dev/null)") --resume${sid:+ $(printf %q "$sid")}"
+        else
+            restore="cd $(printf %q "$path") && codex resume" sid=""
+        fi
+        # 注記は # のコメントにしない。対話の zsh は既定で interactive_comments が無効なので、貼ると # 以降が
+        # 引数として渡り、再開のときに次のターンとして実行される。: は引数を読み捨てるだけなので bash でも zsh でも無害。
+        [ -n "$sid" ] || restore=": 一覧から選ぶ; $restore"
+        rule="idle $(jq -r '.idle_sec / 3600 | floor' <<<"$row")h >= $(jq -r '.threshold_h' <<<"$row")h"
+        [ "$(jq -r '.pressure // 0' <<<"$row")" -ge 2 ] && rule="$rule (memory pressure WARN)"
         orca terminal send --terminal "$term" --text /exit --enter --json >/dev/null 2>&1 || { log "failed $agent pid=$pid: send"; continue; }
         local lstart i
         lstart=$(jq -r .lstart <<<"$row")
@@ -225,9 +361,13 @@ stop() {
         done
         if [ "$(lstart_of "$pid")" = "$lstart" ]; then
             log "failed $agent pid=$pid: still running after /exit"
+            # /exit は届いていて、待ち時間の後で終わることがある。そのとき台帳に無いと戻し方が残らないので、印を付けて書く。
+            rule="$rule (/exit 送信済み・終了は未確認)"
         else
-            log "stopped $agent pid=$pid idle=$(jq -r '.idle_sec / 3600 | floor' <<<"$row")h path=$(jq -r .path <<<"$row")"
+            log "stopped $agent pid=$pid idle=$(jq -r '.idle_sec / 3600 | floor' <<<"$row")h path=$path"
         fi
+        # 書けなくても次の 1 本は続ける。
+        ledger_add session "$agent $path" "$rule" "$restore" "" || log "WARN: 台帳に書けない $CLEANUP_LEDGER"
     done <<<"$targets"
 }
 
