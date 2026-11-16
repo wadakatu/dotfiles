@@ -12,6 +12,10 @@
       sail = "./vendor/bin/sail";
       # どのディレクトリからでも同じ flake を反映する。両方とも flake.nix の mkDarwin が渡す。
       rebuild = "sudo darwin-rebuild switch --flake ${dotfilesDir}#${darwinConfigName}";
+      # 掃除ジョブが止めた・消したものの台帳 (home/scripts/cleanup-ledger.sh) の直近 20 行を表で出す。
+      # 空の列と、古い版が書いた列の少ない行は - で埋める (column は空の列を詰めて、後ろの列がずれる)。
+      # '' の文字列にするのは、\t をそのまま渡すため ("" だと Nix がタブ文字に変える)。tests/worktree-gc.sh がこの行を取り出して流す。
+      cleanup-ledger = ''tail -n 20 "$HOME/Library/Application Support/cleanup-ledger/ledger.tsv" | awk -F'\t' -v OFS='\t' '{ for (i = 1; i <= 6; i++) if ($i == "") $i = "-"; print }' | column -t -s "$(printf '\t')"'';
     };
 
     # 旧 .zshrc の Herd 注入分。手動メンテナンス方針 (CLAUDE.md 参照)。

@@ -47,6 +47,111 @@ DRY_RUN="${DRY_RUN:-0}"
 
 log() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
 
+# 止めた・消したものの台帳。launchd は origin/main の写しを動かすので、隣のこのファイルも同じ版になる。
+# shellcheck source=home/scripts/cleanup-ledger.sh
+. "$(dirname "${BASH_SOURCE[0]}")/cleanup-ledger.sh"
+
+notify() {
+    osascript -e 'on run argv' -e 'display notification (item 1 of argv) with title "worktree-gc"' -e 'end run' "$*" >/dev/null 2>&1 || true
+}
+
+# 台帳に 1 行足し、最後の通知に出す種類を控える。DRY_RUN では何も消えていないので書かない (ここ 1 か所で弾く)。
+# 台帳に書けなくても掃除は続ける。削除と down の間で止まると、volume だけが残る。
+recorded=()
+record() {
+    [ "$DRY_RUN" = "1" ] && return 0
+    ledger_add "$@" || log "WARN: 台帳に書けない $CLEANUP_LEDGER"
+    recorded+=("$1")
+}
+
+# そこに居た Claude Code のセッションのうち、最後に書かれたものの ID と、セッションの数を 1 行で出す。会話記録は
+# ~/.claude/projects/<パスの英数字以外を - にした名前>/<ID>.jsonl で、変換した名前が 200 字を超えると 200 字に
+# 切り詰めて hash が付く (https://code.claude.com/docs/en/sessions.md の "Where transcripts are stored")。
+# hash の作りは公開されていないので、先頭 200 字で始まるディレクトリが 1 つだけのときに使う (2 つ以上なら取り違えうるので空)。
+# ponytail: 英数字以外を 1 バイトずつ置き換えるので、日本語などを含むパスは Claude Code の名前と合わず空になる。
+sessions_of() {
+    local root="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects" name d f new="" n=0
+    name=$(printf '%s' "$1" | LC_ALL=C sed 's/[^A-Za-z0-9]/-/g')
+    if [ ${#name} -le 200 ]; then
+        d="$root/$name"
+    else
+        d=$(find "$root" -mindepth 1 -maxdepth 1 -type d -name "${name:0:200}*" 2>/dev/null || true)
+        [ "$(grep -c . <<<"$d")" = 1 ] || return 0
+    fi
+    [ -d "$d" ] || return 0
+    for f in "$d"/*.jsonl; do
+        [ -f "$f" ] || continue
+        n=$((n + 1))
+        if [ -z "$new" ] || [ "$f" -nt "$new" ]; then new=$f; fi
+    done
+    if [ -n "$new" ]; then new=${new##*/}; printf '%s %s\n' "${new%.jsonl}" "$n"; fi
+    return 0
+}
+
+# 消す前に、戻すのに要るもの (本体・ブランチ・HEAD・そこに居たセッション) と、戻らないもの (無視されるファイル) を
+# wt_restore と wt_lost に控える。消した後では引けない。stop_stacks の前に呼ぶ (ここで落ちて、止めたコンテナが戻らないのを避ける)。
+wt_snapshot() {
+    local wt="$1" main branch sha id ig n
+    wt_restore="" wt_lost=""
+    main=$(git -C "$wt" worktree list --porcelain 2>/dev/null | sed -n '1s/^worktree //p' || true)
+    sha=$(git -C "$wt" rev-parse --verify --quiet HEAD 2>/dev/null || true)
+    # 戻し方の列は、そのまま端末に貼って通るコマンドだけにする。注記は先頭の `: <注記>; ` に置く
+    # (: は引数を読み捨てるだけ。# は対話の zsh では既定でコメントにならない)。注記にはシェルの特殊文字を入れない。
+    # SHA が空のまま git worktree add を書くと、貼ったときに本体の HEAD から黙って作るので、戻し方を書かない。
+    if [ -z "$sha" ]; then
+        wt_restore=": HEAD を取れなかったので戻し方なし"
+    else
+        # git -C ではなく cd にするのは、台帳の戻し方を `git worktree add` の形のまま grep で引けるようにするため。
+        if branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null); then
+            wt_restore="cd $(printf %q "$main") && git worktree add -B $(printf %q "$branch") $(printf %q "$wt") $sha"
+        else
+            wt_restore="cd $(printf %q "$main") && git worktree add --detach $(printf %q "$wt") $sha"
+        fi
+        read -r id n <<<"$(sessions_of "$wt" || true)" || true
+        if [ -n "$id" ]; then
+            wt_restore="$wt_restore && cd $(printf %q "$wt") && claude --resume $(printf %q "$id")"
+            if [ "$n" -gt 1 ]; then wt_restore=": ほか $((n - 1)) 件は claude --resume の一覧から; $wt_restore"; fi
+        fi
+    fi
+    # ディレクトリは 1 件に数える (ignored_note と同じ)。
+    ig=$(git -C "$wt" status --porcelain --ignored 2>/dev/null | sed -n 's/^!! //p' || true)
+    n=$(grep -c . <<<"$ig" || true)
+    if [ "$n" -gt 0 ]; then
+        wt_lost="無視されるファイル $n 件: $(awk 'NR <= 20 { printf "%s%s", (NR > 1 ? ", " : ""), $0 }' <<<"$ig")"
+        if [ "$n" -gt 20 ]; then wt_lost="$wt_lost ほか $((n - 20)) 件"; fi
+    fi
+    return 0
+}
+
+# 消せた worktree を台帳に書く。消す前の compose の stop は書かない: 直後の down --volumes でコンテナごと消えるので、
+# 戻し方 (docker start) が打てない。<戻らないもの> は節ごとの追記 (Orca のカードなど)。
+record_removed() { # record_removed <worktree> <当たった規則> [<戻らないもの>]
+    local lost="$wt_lost"
+    if [ -n "${3:-}" ]; then lost="${lost:+$lost / }$3"; fi
+    if [ -n "$stack_vols" ]; then lost="${lost:+$lost / }compose の volume ($stack_vols) は down --volumes で消える"; fi
+    record worktree "$1" "$2" "$wt_restore" "$lost"
+}
+
+# git worktree remove が失敗しても、中身を消す途中で失敗した回は登録だけ外れ、.git の残ったフォルダになる
+# (実測: ignore された書けないディレクトリがあると Permission denied で止まり、登録は外れる)。そうなると残った
+# フォルダからはブランチも SHA も引けないので 0 を返す。登録が残っていれば (lock など) 何も変わっていない。
+wt_broken() {
+    local list
+    [ -e "$1/.git" ] || return 0
+    # 一覧を取れない回は登録が外れたか分からないので、壊れていないとみなす (分からないことを台帳に書かない)。
+    # パイプの grep -q は git を SIGPIPE で落とし、pipefail で「登録が無い」に化けうるので、出力を受けてから探す。
+    list=$(git -C "$REPO" worktree list --porcelain 2>/dev/null) || return 1
+    ! grep -qxF -- "worktree $1" <<<"$list"
+}
+
+# down --volumes で消える volume の名前を ", " 区切りで出す。down の後では引けないので、その前に呼ぶ。
+# 引けなかった回は、volume が無い回 (空) と区別できるよう「名前を引けなかった」と出す (注記ごと落とさない)。
+stack_volumes() {
+    local out
+    out=$(docker volume ls -q --filter "label=com.docker.compose.project=$1" 2>/dev/null) || { printf '名前を引けなかった'; return 0; }
+    awk 'NF { printf "%s%s", (n++ ? ", " : ""), $0 }' <<<"$out"
+}
+
 # 消してよいと判定された worktree を登録する。
 # ただし ~/.herdr/worktrees/ 配下は herdr が自前で workspace 状態を持っており、
 # `git worktree remove` を直接叩くとその状態と食い違う。herdr は Nix 管理外で
@@ -61,7 +166,9 @@ mark_stale() {
             ;;
     esac
     log "STALE $wt ($why$(ignored_note "$wt"))"
+    # 規則は台帳に書くので、同じ添字で並べて持つ (bash 3.2 には連想配列が無い)。
     removable+=("$wt")
+    removable_why+=("$why")
 }
 
 # .env などの ignore されたファイルは「未コミット変更なし」扱いで worktree ごと消える。
@@ -110,32 +217,42 @@ agents_busy() {
 # git の登録だけ外れたフォルダが残って Orca の削除も止まる。
 # down ではなく stop にする: 削除が拒否されたとき、コンテナが残っていれば匿名ボリュームの参照も残り、
 # 末尾の `docker volume prune` に消されない。止める前に動いていたコンテナの ID は running に入れる。
+# この worktree のプロジェクト名は stacks (改行区切り。名前に空白があっても割れない) に、台帳に書く volume の名前は
+# stack_vols に入れる。
 stop_stacks() {
-    local wt="$1" proj dir id
-    local seen=" "
-    running=()
+    local wt="$1" proj dir id v
+    running=() stacks="" stack_vols=""
     docker info >/dev/null 2>&1 || return 0
     while IFS=$'\t' read -r proj dir; do
         [ -n "$proj" ] && [ -n "$dir" ] || continue
         case "$dir" in "$wt"|"$wt"/*) ;; *) continue ;; esac
-        [[ "$seen" == *" $proj "* ]] && continue
-        seen+="$proj "
+        case $'\n'"$stacks" in *$'\n'"$proj"$'\n'*) continue ;; esac
+        stacks+="$proj"$'\n'
+        v=$(stack_volumes "$proj")
+        if [ -n "$v" ]; then stack_vols="${stack_vols:+$stack_vols / }$proj: $v"; fi
         while read -r id; do [ -n "$id" ] && running+=("$id"); done \
             < <(docker ps -q --filter "label=com.docker.compose.project=$proj")
         log "stop  $proj — $wt を消す前に止める"
         run docker compose -p "$proj" stop || log "WARN: stop 失敗 $proj"
     done < <(docker ps -a --format '{{.Label "com.docker.compose.project"}}	{{.Label "com.docker.compose.project.working_dir"}}' | sort -u)
     # コンテナが止まってもマウントが外れるまで 1 秒弱かかる (実測)。
-    if [ "$seen" != " " ] && [ "$DRY_RUN" != "1" ]; then sleep 3; fi
+    if [ -n "$stacks" ] && [ "$DRY_RUN" != "1" ]; then sleep 3; fi
     return 0
 }
 
 # 削除が拒否された worktree の環境は、止める前に動いていたコンテナだけ動かし直す
 # (`compose start` はプロジェクト内で元から止まっていたサービスまで起こす)。
-restart_stacks() {
+# start も失敗すると止めたままになり、ほかに知らせる所が無いので、その回だけ台帳に compose-stop を書く。
+# 削除は拒否されたのでコンテナは残っており、docker start で戻せる。
+restart_stacks() { # restart_stacks <worktree>
+    local id cmd="docker start" names
     [ ${#running[@]} -gt 0 ] || return 0
     log "start ${running[*]} — worktree を消せなかったので戻す"
-    run docker start "${running[@]}" >/dev/null || log "WARN: start 失敗 ${running[*]}"
+    run docker start "${running[@]}" && return 0
+    log "WARN: start 失敗 ${running[*]}"
+    for id in "${running[@]}"; do cmd="$cmd $(printf %q "$id")"; done
+    names=${stacks%$'\n'}
+    record compose-stop "${names//$'\n'/ }" "$1 を消す前に止めたが、削除が拒否され、docker start も失敗" "$cmd" ""
 }
 
 # $FF_CHECKOUTS を origin のデフォルトブランチへ fast-forward する。人が使っている途中かもしれないので、
@@ -221,7 +338,7 @@ fetch_ok=1
 git -C "$REPO" fetch --prune --all --quiet 2>/dev/null || { fetch_ok=0; log "WARN: fetch 失敗。upstream-gone 判定はスキップする"; }
 
 # ---- 削除してよい worktree を選ぶ ----
-removable=()
+removable=() removable_why=()
 # cwd が worktree の中にあるプロセス (シェル、エージェント、テスト) が居れば使用中とみなす。
 # ルートの mtime はサブディレクトリの編集では変わらないので、それだけでは見逃す。
 # lsof が使えないときは誰が使っているか分からないので、削除を全部見送る。
@@ -283,7 +400,7 @@ done < <(git -C "$REPO" worktree list --porcelain | awk '/^worktree /{print $2}'
 # PR に入っていないコミットなし、中のエージェントが作業中でない。PR の有無で判定し、
 # PR が worktree の作成より前に閉じていれば同名ブランチの別作業とみなす (MIN_AGE_HOURS は使わない)。
 # 削除は orca worktree rm に任せる。マージ済みと証明できないブランチは Orca が残す。
-orca_removable=()
+orca_removable=() orca_why=()
 
 # PR に入っていないローカルコミットがあれば 0 を返す。squash merge で ancestry が切れるので、
 # デフォルトブランチにも PR の head にも無いコミットを、patch-id で PR のコミットと照合する
@@ -357,6 +474,7 @@ else
             elif [ -n "$def" ] && git -C "$wt" merge-base --is-ancestor HEAD "$def" 2>/dev/null; then
                 log "STALE $wt (detached: $def に含まれる$(ignored_note "$wt"))"
                 orca_removable+=("$wt")
+                orca_why+=("detached: $def に含まれる")
             else
                 log "keep  $wt (detached: デフォルトブランチに無いコミットを持つ、または判定不能)"
             fi
@@ -392,8 +510,10 @@ else
             log "keep  $wt ($branch: PR #$num に無いコミットあり)"
             continue
         fi
-        log "STALE $wt ($branch: PR #$num が $(jq -r 'max_by(.number) | .state' <<<"$prs")$(ignored_note "$wt"))"
+        why="$branch: PR #$num が $(jq -r 'max_by(.number) | .state' <<<"$prs")"
+        log "STALE $wt ($why$(ignored_note "$wt"))"
         orca_removable+=("$wt")
+        orca_why+=("$why")
     done < <(orca worktree list --json 2>/dev/null | jq -r --arg root "$ORCA_ROOT" '
         .result.worktrees[]?
         | select((.isMainWorktree | not) and (.path | startswith($root + "/")))
@@ -404,14 +524,23 @@ fi
 # 消せたものだけを removed に入れ、compose を落とす対象はここから決める。
 # 候補の段階で落とすと、削除が拒否された worktree の環境だけが毎時壊れる。
 removed=()
+i=0
 for wt in ${removable[@]+"${removable[@]}"}; do
+    why=${removable_why[$i]}
+    i=$((i + 1))
+    wt_snapshot "$wt"
     stop_stacks "$wt"
     if run git -C "$REPO" worktree remove "$wt" 2>/dev/null; then
         log "removed $wt"
         removed+=("$wt")
+        record_removed "$wt" "$why"
     else
         log "WARN: remove 失敗 $wt"
-        restart_stacks
+        # 登録が外れて残ったフォルダがあると git worktree add は already exists で通らないので、先に退けてもらう。
+        if wt_broken "$wt"; then
+            record worktree-remove-failed "$wt" "$why (削除が途中で失敗し、登録だけ外れた)" ": 残ったフォルダを退けてから; $wt_restore" "$wt_lost"
+        fi
+        restart_stacks "$wt"
     fi
 done
 run git -C "$REPO" worktree prune
@@ -422,7 +551,10 @@ if [ ${#orca_removable[@]} -gt 0 ] && ! ps_now=$(orca_ps); then
     log "WARN: 削除直前の orca worktree ps が取れない。Orca の worktree の削除は見送る (次回に拾う)"
     orca_removable=()
 fi
+i=0
 for wt in ${orca_removable[@]+"${orca_removable[@]}"}; do
+    why=${orca_why[$i]}
+    i=$((i + 1))
     if is_dirty "$wt"; then
         log "keep  $wt (削除直前に未コミットの変更を検出)"
         continue
@@ -438,6 +570,7 @@ for wt in ${orca_removable[@]+"${orca_removable[@]}"}; do
         log "keep  $wt (削除直前に、cwd がこの中にあるプロセスを検出、または lsof で取れない)"
         continue
     fi
+    wt_snapshot "$wt"
     stop_stacks "$wt"
     if [ "$DRY_RUN" = "1" ]; then
         log "DRY-RUN: orca worktree rm --worktree path:$wt"
@@ -446,6 +579,7 @@ for wt in ${orca_removable[@]+"${orca_removable[@]}"}; do
     fi
     if orca worktree rm --worktree "path:$wt" --json 2>/dev/null | jq -e '.ok == true' >/dev/null; then
         removed+=("$wt")
+        record_removed "$wt" "$why" "Orca のカード (git worktree add で戻しても Orca の一覧には戻らない)"
         # 削除はバックグラウンドで続くことがある。1 分待っても残るフォルダはログに出す。
         for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
             [ -d "$wt" ] || break
@@ -454,14 +588,14 @@ for wt in ${orca_removable[@]+"${orca_removable[@]}"}; do
         if [ -d "$wt" ]; then log "WARN: orca rm 後もフォルダが残っている $wt"; else log "removed $wt"; fi
     else
         log "WARN: orca rm 失敗 $wt"
-        restart_stacks
+        restart_stacks "$wt"
     fi
 done
 
 # ---- 消した worktree と孤児の compose プロジェクトを落とす ----
+# パイプの while はサブシェルで回り、台帳の件数 (recorded) が通知まで届かないので、プロセス置換で読む。
 if docker info >/dev/null 2>&1; then
-    docker ps -a --format '{{.Label "com.docker.compose.project"}}	{{.Label "com.docker.compose.project.working_dir"}}' \
-        | sort -u | while IFS=$'\t' read -r proj dir; do
+    while IFS=$'\t' read -r proj dir; do
         [ -n "$proj" ] && [ -n "$dir" ] || continue
 
         # 消した worktree のプロジェクトは名前を問わず、名前付きボリュームごと落とす
@@ -472,7 +606,12 @@ if docker info >/dev/null 2>&1; then
         done
         if [ -n "$reason" ]; then
             log "down  $proj — $reason (ボリュームも削除)"
-            run docker compose -p "$proj" down --remove-orphans --volumes || log "WARN: down 失敗 $proj"
+            vols=$(stack_volumes "$proj")
+            if run docker compose -p "$proj" down --remove-orphans --volumes; then
+                record compose-down "$proj" "$reason" ": worktree を戻してから; cd $(printf %q "$dir") && docker compose -p $(printf %q "$proj") up -d" "${vols:+volume: $vols (down --volumes で消える)}"
+            else
+                log "WARN: down 失敗 $proj"
+            fi
             continue
         fi
 
@@ -488,10 +627,22 @@ if docker info >/dev/null 2>&1; then
         [ "$matched" = "1" ] || continue
 
         log "down  $proj — working_dir が既に無い (孤児)"
-        run docker compose -p "$proj" down --remove-orphans || log "WARN: down 失敗 $proj"
-    done
+        if run docker compose -p "$proj" down --remove-orphans; then
+            # working_dir が無いので戻し方は書けない。名前付き volume は残すが、コンテナは down で、匿名 volume は
+            # 下の docker volume prune で消える。
+            record compose-down "$proj" "working_dir $dir が既に無い (孤児)" "" "コンテナと匿名 volume (直後の docker volume prune で消える)"
+        else
+            log "WARN: down 失敗 $proj"
+        fi
+    done < <(docker ps -a --format '{{.Label "com.docker.compose.project"}}	{{.Label "com.docker.compose.project.working_dir"}}' | sort -u)
 else
     log "WARN: docker が動いていない。コンテナの掃除はスキップ (次回、孤児として拾う)"
+fi
+
+# 何か止めたか消した回だけ、種類ごとの件数を 1 本で知らせる。中身は台帳 (zsh の別名 cleanup-ledger) で見る。
+# 台帳に書く処理はここまでで終わるので、後ろのディスク回収より先に出す (回収の途中で落ちても、知らせは届く)。
+if [ ${#recorded[@]} -gt 0 ]; then
+    notify "$(printf '%s\n' "${recorded[@]}" | sort | uniq -c | awk '{ printf "%s%s %s 件", (NR > 1 ? "、" : ""), $2, $1 }')"
 fi
 
 # ---- ディスク回収 ----
@@ -500,7 +651,8 @@ if docker info >/dev/null 2>&1; then
     run docker volume prune -f || true
     run docker builder prune -f --filter "until=$BUILDER_CACHE_MAX_AGE" || true
     [ "$DRY_RUN" = "1" ] || log "prune 済み: dangling image / volume, build cache ($BUILDER_CACHE_MAX_AGE 超)"
-    docker system df | sed 's/^/  /'
+    # 使用量はログの参考に出すだけ。取れなくても掃除は終わっているので、ここで落とさない。
+    docker system df | sed 's/^/  /' || log "WARN: docker system df が失敗"
 fi
 
 log "=== 完了 (削除した worktree: ${#removed[@]}) ==="

@@ -77,6 +77,7 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 │   │   ├── pr-dispatch.sh
 │   │   ├── agent-resume.sh  # pr-dispatch.sh が毎回の最初に呼ぶ
 │   │   ├── dispatch-lock.sh  # pr-dispatch と agent-resume が同時に動かないための共有ロック
+│   │   ├── cleanup-ledger.sh  # 掃除ジョブが止めた・消したものを残す台帳
 │   │   ├── agent-gc.sh
 │   │   ├── container-events.sh
 │   │   └── memory-maintenance.sh  (+ -prompt.md, -schema.json)
@@ -438,6 +439,19 @@ workspace 状態を持っており `git worktree remove` を直接叩くと食�
 
 `git worktree remove` はブランチを消さないので、コミットは常に残る。ただし ignore された
 ファイル（`.env` など）は worktree と一緒に消える。判定には使わず、件数を STALE のログに出す。
+
+消した worktree と、止めた・落とした compose プロジェクトは、ログとは別に台帳
+`~/Library/Application Support/cleanup-ledger/ledger.tsv`（タブ区切り・追記のみ）に 1 件 1 行で残す。
+列は時刻・種類（worktree-gc が書くのは `worktree` / `compose-down` / `worktree-remove-failed` / `compose-stop`）・対象・当たった規則・戻し方・戻らないもの。
+worktree の戻し方は `git worktree add -B <ブランチ> <パス> <SHA>`（detached は `--detach`）と、そこに居た
+セッションの `claude --resume <ID>`。戻し方の列は端末にそのまま貼って通るコマンドだけで、注記は先頭の
+`: <注記>; ` に置く（HEAD を取れなかった worktree は `: HEAD を取れなかったので戻し方なし` だけ）。戻らないものは ignore されたファイルの件数とパス（先頭 20 件）と、
+`down --volumes` で消える volume の名前（名前付き volume の無い project には付けず、引けなかった回は「名前を引けなかった」と書く）、Orca の worktree なら Orca のカード、
+孤児の down ならコンテナと匿名 volume。何か止めたか消した回だけ、種類ごとの件数を通知 1 本で知らせる（`DRY_RUN=1` では書かない）。
+直近は zsh の別名 `cleanup-ledger` で表にして見る。消す前の compose の stop は、直後の down でコンテナごと消えて
+戻し方が打てないので書かない。ただし削除が拒否され、動かし直す `docker start` も失敗した回は、止めたままになるので
+`compose-stop`（戻し方は `docker start <ID…>`）を書く。`git worktree remove` が中身を消す途中で失敗して登録だけ外れた回は、
+`worktree-remove-failed`（戻し方は残ったフォルダを退けてからの `git worktree add`）を書く。
 
 コンテナ側で落とすのは次の 2 種類だけ（削除を拒否された worktree の環境は壊さない）。
 
