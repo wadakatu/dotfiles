@@ -125,7 +125,7 @@ collect() {
 
     # プロセスの一覧は 1 回だけ取り、セッションごとに子孫を辿る。子孫にシェルが居れば、ターンを終えた後も
     # 裏のコマンドが走っている (止めると resume で戻らない)。コマンド名は空白を含みうるので 3 列目から行末まで取り、
-    # 先頭の - (ログインシェル) とディレクトリを落として比べる。タブのシェルは祖先なので数えない。
+    # 先頭の - (ログインシェル) とディレクトリを落として比べる (zsh・bash・sh・fish・dash・ksh)。タブのシェルは祖先なので数えない。
     # ponytail: MCP のサーバをシェルのスクリプトで包んで起動している環境では、全部のセッションが bg-shell で残る
     # (agent-gc list の「残すもの」に出る)。そうなったら、除く名前を設定で渡す。
     ps -axo pid=,ppid=,comm= | awk -v only="$only" '
@@ -134,7 +134,7 @@ collect() {
             comm = substr($0, RLENGTH + 1)
             n++; P[n] = f[1]; C[n] = comm; kids[f[2]] = kids[f[2]] " " f[1]
             name = comm; sub(/^-/, "", name); sub(/.*\//, "", name)
-            if (name == "zsh" || name == "bash" || name == "sh" || name == "fish") shell[f[1]] = 1
+            if (name == "zsh" || name == "bash" || name == "sh" || name == "fish" || name == "dash" || name == "ksh") shell[f[1]] = 1
         }
         END {
             for (i = 1; i <= n; i++) {
@@ -210,10 +210,13 @@ collect() {
 sched() {
     local row sid f got ok err
     while IFS= read -r row; do
-        if ! jq -e '.agent == "claude" and .reason == null' <<<"$row" >/dev/null 2>&1; then
-            printf '%s\n' "$row"
-            continue
-        fi
+        # 「確かめなくてよい」と「jq が動かなかった」を分けるため、終了コードでなく出力の文字で見る。
+        # sched-unknown を付ける jq も失敗したら行が消える (候補にならない。stop では not running で送らない)。
+        case $(jq -r 'if .agent == "claude" and .reason == null then "check" else "pass" end' <<<"$row" 2>/dev/null) in
+            pass) printf '%s\n' "$row"; continue ;;
+            check) ;;
+            *) jq -c '.reason = "sched-unknown"' <<<"$row"; continue ;;
+        esac
         sid=$(jq -r '.sid // ""' <<<"$row")
         got="" ok=0 err=0
         # ID は glob に入れるので、ID の形でないもの (空も) は引かない。
@@ -224,7 +227,8 @@ sched() {
                 for f in "$CLAUDE_PROJECTS"/*/"$sid".*; do
                     [ -f "$f" ] || continue
                     # "<0 予約なし / 1 読めない行 / 2 予約あり> <grep の終了コード> <jq の終了コード>"。grep は 1 が当たらない、2 が読めない。
-                    got=$(grep -h -F -e CronCreate -e ScheduleWakeup -- "$f" 2>/dev/null |
+                    # -a: NUL を含む会話記録でも行を出す (GNU grep は行の代わりに binary file matches を出す)。
+                    got=$(grep -a -h -F -e CronCreate -e ScheduleWakeup -- "$f" 2>/dev/null |
                         jq -njR 'reduce (inputs | try (fromjson
                                 | if any(.. | objects; .type == "tool_use" and (.name == "CronCreate" or .name == "ScheduleWakeup"))
                                   then 2 else 0 end) catch 1) as $s (0; if $s > . then $s else . end)' 2>/dev/null
