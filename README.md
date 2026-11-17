@@ -415,10 +415,13 @@ FF_CHECKOUTS="$HOME/src/some-tool" # origin のデフォルトブランチに追
 | upstream が remote から消えている（= PR が merge / close 済み）<br>または detached かつ `$BASE`（既定 `origin/main`）から辿れる | 固有のコミットを持たないものだけ消す |
 
 削除の後、`$REPO` で `git worktree prune` を流し、フォルダの無い登録を外す。prune は登録をその worktree の HEAD と reflog ごと消し、
-リポ単位でしか流せないので、その前に `git worktree list --porcelain` の `prunable` の登録を見る。`detached` で、HEAD の SHA が
-どのブランチ・リモート追跡ブランチ・タグからも辿れない（`git for-each-ref --contains`。失敗も辿れないとみなす）ものが 1 つでも在れば、
-そのリポは prune せず、`keep  <本体> (prune 見送り: <パス> の detached HEAD <SHA> がどの ref にも無い)` をログに出し、通知を 1 日 1 回出す
-（`DRY_RUN=1` では出さない）。人が決めるまで見送り続けるので、残すなら `git branch <名前> <SHA>`、要らなければ手で `git worktree prune` する。
+リポ単位でしか流せないので、その前に `LC_ALL=C git worktree prune --dry-run -v` の `Removing worktrees/<名前>: …` の登録を見る
+（`git worktree list --porcelain` の `prunable` は、`gitdir` が無い・空の登録と、同じパスの重複を出さない）。
+git が解決する `worktrees/<名前>/HEAD` がブランチでなく（detached）、その SHA がどのブランチ・リモート追跡ブランチ・タグからも辿れない（`git for-each-ref --contains`。
+失敗も辿れないとみなす）ものが 1 つでも在れば、そのリポは prune せず、`keep  <本体> (prune 見送り: <パス> の detached HEAD <SHA> がどの ref にも無い)`
+（`gitdir` が読めなければ `<パス>` は `worktrees/<名前>`）をログに出し、通知を 1 日 1 回出す（`DRY_RUN=1` では出さない）。
+一覧・dry-run が失敗した回と、読めない行や HEAD が在った回も見送る。人が決めるまで見送り続けるので、残すなら `git branch <名前> <SHA>`、
+要らなければ手で `git worktree prune` する。
 
 Orca の worktree（`~/orca/workspaces/` 配下、全リポジトリ）は上の表とは別に判定し、
 `orca worktree rm` で消す。こちらも次を **全て** 満たすものだけ。
