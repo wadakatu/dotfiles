@@ -55,6 +55,13 @@ notify() {
     osascript -e 'on run argv' -e 'display notification (item 1 of argv) with title "worktree-gc"' -e 'end run' "$*" >/dev/null 2>&1 || true
 }
 
+# 毎時のことなので、同じ知らせはその日 1 回だけ出す。手で流す DRY_RUN では出さない (その日の本番の通知を消さないため)。
+notify_daily() { # notify_daily <通知済みの印のファイル> <文言>
+    [ "$DRY_RUN" != "1" ] && [ "$(cat "$1" 2>/dev/null)" != "$(date +%F)" ] || return 0
+    notify "$2"
+    { mkdir -p "${1%/*}" && date +%F >"$1"; } 2>/dev/null || log "WARN: 通知済みの印を書けない $1"
+}
+
 # 台帳に 1 行足し、最後の通知に出す種類を控える。DRY_RUN では何も消えていないので書かない (ここ 1 か所で弾く)。
 # 台帳に書けなくても掃除は続ける。削除と down の間で止まると、volume だけが残る。
 recorded=()
@@ -351,8 +358,7 @@ log "=== worktree-gc 開始 (repo=$REPO dry_run=$DRY_RUN) ==="
 
 # 「触らない」リストが無い・読めない回 (解釈できない行がある回を含む) は、何を守るべきか分からないので、ここから先 (index.lock の掃除、
 # worktree の削除、compose の stop / down、prune) を全部見送る。FF_CHECKOUTS の追従は何も消さないので上で済ませている。
-# 毎時のことなので、通知はその日 1 回だけ。手で流す DRY_RUN では出さない (その日の本番の通知を消さないため)。
-# 「無い」と「読めない行が在る」は印を分ける (同じ日に、無い → 作った → 書き間違い、でも 2 本目が出るように)。
+# 通知はその日 1 回だけ (notify_daily)。「無い」と「読めない行が在る」は印を分ける (同じ日に、無い → 作った → 書き間違い、でも 2 本目が出るように)。
 if ! keep_load; then
     if [ "$keep_error" = bad ]; then
         log "WARN: 「触らない」リスト $CLEANUP_KEEP に読めない行がある。この回は何も止めず何も消さない"
@@ -363,10 +369,7 @@ if ! keep_load; then
         warned="$STATE_ROOT/worktree-gc/keep-missing-warned"
         msg="「触らない」リスト $CLEANUP_KEEP が無いので掃除を止めています。守るものが無ければ空のファイルを置く"
     fi
-    if [ "$DRY_RUN" != "1" ] && [ "$(cat "$warned" 2>/dev/null)" != "$(date +%F)" ]; then
-        notify "$msg"
-        { mkdir -p "${warned%/*}" && date +%F >"$warned"; } 2>/dev/null || log "WARN: 通知済みの印を書けない $warned"
-    fi
+    notify_daily "$warned" "$msg"
     exit 0
 fi
 
@@ -509,11 +512,14 @@ orca_removable=() orca_why=()
 # デフォルトブランチにも PR の head にも無いコミットを、patch-id で PR のコミットと照合する
 # (push 前に rebase した旧版は差分が同じなので一致する。件名だと amend 後の未 push 版や
 # "fix tests" のような汎用件名を取り違える)。判定できないときは「ある」に倒す。
+# PR の head は FETCH_HEAD でなく、その worktree だけの ref (refs/worktree/ の下は worktree ごとで共有されない) に取る。
+# 本体やほかの worktree の ref を増やさず、worktree を消せば一緒に消える。fetch が失敗した回は、前の回の ref を読まない。
+# 行き先のある refspec は、PR の head を指す tag を共有の refs/tags に連れてくるので、--no-tags で止める (実測)。
 has_commits_outside_pr() {
     local wt="$1" num="$2" base head mb ids c id
     base=$(git -C "$wt" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null) || return 0
-    git -C "$wt" fetch --quiet origin "pull/$num/head" 2>/dev/null || return 0
-    head=$(git -C "$wt" rev-parse --verify --quiet FETCH_HEAD) || return 0
+    git -C "$wt" fetch --quiet --no-write-fetch-head --no-tags origin "+pull/$num/head:refs/worktree/gc/pr-head" 2>/dev/null || return 0
+    head=$(git -C "$wt" rev-parse --verify --quiet refs/worktree/gc/pr-head) || return 0
     mb=$(git -C "$wt" merge-base "$head" "$base" 2>/dev/null) || return 0
     ids=$(git -C "$wt" log -p --no-merges "$mb..$head" | git -C "$wt" patch-id --stable | cut -d' ' -f1) || return 0
     while read -r c; do
@@ -523,6 +529,41 @@ has_commits_outside_pr() {
         [ -n "$id" ] && grep -qxF -- "$id" <<<"$ids" || return 0
     done < <(git -C "$wt" rev-list --no-merges HEAD --not "$base" "$head")
     return 1
+}
+
+# ブランチの PR で、その worktree を消してよいかを決める。消してよければ 0 を返し、理由を pr_why に、PR が閉じた時刻 (ms) を
+# pr_closed に置く。残すときは理由を keep の行に出して 1 を返す。
+# 呼び側の if や || の中では set -e が効かないので、取れなかった値は全部「残す」に落とす (空の slug で gh を呼ばない)。
+pr_stale() { # pr_stale <worktree> <ブランチ> <worktree の作成時刻 (ms)>
+    local wt="$1" branch="$2" created="$3" slug prs num closed
+    pr_why="" pr_closed=""
+    slug=$(git -C "$wt" remote get-url origin 2>/dev/null | sed -E 's#^.*github\.com[:/]##; s#\.git$##') || slug=""
+    if [ -z "$slug" ] || ! prs=$(gh pr list -R "$slug" --head "$branch" --state all --json number,state,closedAt 2>/dev/null); then
+        log "keep  $wt ($branch: gh で PR を引けない)"
+        return 1
+    fi
+    if [ "$(jq 'length' <<<"$prs")" = "0" ]; then
+        log "keep  $wt ($branch: PR 無し)"
+        return 1
+    fi
+    if jq -e 'any(.[]; .state == "OPEN")' <<<"$prs" >/dev/null; then
+        log "keep  $wt ($branch: PR 進行中)"
+        return 1
+    fi
+    num=$(jq -r 'max_by(.number) | .number' <<<"$prs") || num=""
+    # 閉じた PR と同名のブランチで作り直した worktree (決まった名前のブランチ、`--pr` で切り直したもの) は、
+    # 作業前だと clean・固有コミット無しで旧 PR の判定を通ってしまう。作成より後に閉じた PR だけを根拠にする。
+    closed=$(jq -r 'max_by(.number) | .closedAt // empty | fromdateiso8601 * 1000 | floor' <<<"$prs") || closed=""
+    if [ -z "$created" ] || [ -z "$closed" ] || [ "$closed" -lt "$created" ]; then
+        log "keep  $wt ($branch: PR #$num が worktree の作成より前に閉じている、または日時が取れない)"
+        return 1
+    fi
+    if has_commits_outside_pr "$wt" "$num"; then
+        log "keep  $wt ($branch: PR #$num に無いコミットあり)"
+        return 1
+    fi
+    pr_why="$branch: PR #$num が $(jq -r 'max_by(.number) | .state' <<<"$prs")" || { pr_why=""; return 1; }
+    pr_closed=$closed
 }
 
 # Orca の状態は $REPO の節の前で取った (ps_json)。取れなかった回はこの節ごと見送る。
@@ -558,12 +599,13 @@ if [ "$orca_state" = ok ]; then
             continue
         fi
 
-        # PR の head とデフォルトブランチを比べるので、リポごとに 1 回 fetch する。
+        # PR の head とデフォルトブランチを比べるので、リポごとに 1 回 fetch する。FETCH_HEAD は worktree ごとに在り、
+        # そこで作業する人のものなので書かない。
         common=$(git -C "$wt" rev-parse --git-common-dir 2>/dev/null) || continue
         case "$fetched" in
             *"|$common|"*) ;;
             *)
-                git -C "$wt" fetch --quiet --prune --all 2>/dev/null || log "WARN: fetch 失敗 $common"
+                git -C "$wt" fetch --quiet --no-write-fetch-head --prune --all 2>/dev/null || log "WARN: fetch 失敗 $common"
                 # clone 以外で作ったリポには origin/HEAD が無く、デフォルトブランチとの比較が全部「判定不能」になる。
                 git -C "$wt" symbolic-ref --quiet refs/remotes/origin/HEAD >/dev/null 2>&1 \
                     || git -C "$wt" remote set-head origin --auto >/dev/null 2>&1 \
@@ -593,35 +635,10 @@ if [ "$orca_state" = ok ]; then
             continue
         fi
 
-        slug=$(git -C "$wt" remote get-url origin 2>/dev/null | sed -E 's#^.*github\.com[:/]##; s#\.git$##')
-        if ! prs=$(gh pr list -R "$slug" --head "$branch" --state all --json number,state,closedAt 2>/dev/null); then
-            log "keep  $wt ($branch: gh で PR を引けない)"
-            continue
-        fi
-        if [ "$(jq 'length' <<<"$prs")" = "0" ]; then
-            log "keep  $wt ($branch: PR 無し)"
-            continue
-        fi
-        if jq -e 'any(.[]; .state == "OPEN")' <<<"$prs" >/dev/null; then
-            log "keep  $wt ($branch: PR 進行中)"
-            continue
-        fi
-        num=$(jq -r 'max_by(.number) | .number' <<<"$prs")
-        # 閉じた PR と同名のブランチで作り直した worktree (決まった名前のブランチ、`--pr` で切り直したもの) は、
-        # 作業前だと clean・固有コミット無しで旧 PR の判定を通ってしまう。作成より後に閉じた PR だけを根拠にする。
-        closed=$(jq -r 'max_by(.number) | .closedAt // empty | fromdateiso8601 * 1000 | floor' <<<"$prs")
-        if [ -z "$created" ] || [ -z "$closed" ] || [ "$closed" -lt "$created" ]; then
-            log "keep  $wt ($branch: PR #$num が worktree の作成より前に閉じている、または日時が取れない)"
-            continue
-        fi
-        if has_commits_outside_pr "$wt" "$num"; then
-            log "keep  $wt ($branch: PR #$num に無いコミットあり)"
-            continue
-        fi
-        why="$branch: PR #$num が $(jq -r 'max_by(.number) | .state' <<<"$prs")"
-        log "STALE $wt ($why$(ignored_note "$wt"))"
+        pr_stale "$wt" "$branch" "$created" || continue
+        log "STALE $wt ($pr_why$(ignored_note "$wt"))"
         orca_removable+=("$wt")
-        orca_why+=("$why")
+        orca_why+=("$pr_why")
     done < <(orca worktree list --json 2>/dev/null | jq -r --arg root "$ORCA_ROOT" '
         .result.worktrees[]?
         | select((.isMainWorktree | not) and (.path | startswith($root + "/")))
@@ -636,6 +653,16 @@ i=0
 for wt in ${removable[@]+"${removable[@]}"}; do
     why=${removable_why[$i]}
     i=$((i + 1))
+    # 判定から削除までに Orca の節 (fetch と gh) で数分空くので、Orca の節と同じく compose を止める前に取り直す。
+    if is_dirty "$wt"; then
+        log "keep  $wt (削除直前に未コミットの変更を検出)"
+        continue
+    fi
+    cwd_snapshot
+    if [ "$cwds_ok" = "0" ] || in_use "$wt"; then
+        log "keep  $wt (削除直前に、cwd がこの中にあるプロセスを検出、または lsof で取れない)"
+        continue
+    fi
     wt_snapshot "$wt"
     stop_stacks "$wt" || continue
     if run git -C "$REPO" worktree remove "$wt" 2>/dev/null; then
@@ -651,7 +678,40 @@ for wt in ${removable[@]+"${removable[@]}"}; do
         restart_stacks "$wt"
     fi
 done
-run git -C "$REPO" worktree prune
+
+# git worktree prune は、フォルダの無い登録を、その worktree の HEAD と reflog ごと外す。登録を選べない (リポ単位)。
+# detached の HEAD がどのブランチ・リモート追跡ブランチ・タグからも辿れない登録が 1 つでも在れば、そのコミットへの
+# 最後の参照を消しうるので、リポごと見送って 1 を返す (残すなら git branch <名前> <SHA>、要らなければ手で prune)。
+# 人が決めるまで毎時見送り続けるので、黙って止まらないよう 1 日 1 回知らせる。一覧を取れない回も見送る。
+prune_safe() { # prune_safe <本体>
+    local main="$1" list sha wt out hit=0
+    # パイプで awk に流すと、git の失敗を見落とす。
+    if ! list=$(git -C "$main" worktree list --porcelain 2>/dev/null); then
+        log "keep  $main (prune 見送り: git worktree list が失敗)"
+        return 1
+    fi
+    while IFS=$'\t' read -r sha wt; do
+        # 失敗も「辿れない」とみなす。
+        out=$(git -C "$main" for-each-ref --contains "$sha" refs/heads refs/remotes refs/tags 2>/dev/null) || out=""
+        [ -z "$out" ] || continue
+        log "keep  $main (prune 見送り: $wt の detached HEAD $sha がどの ref にも無い)"
+        hit=1
+    done < <(awk 'BEGIN { RS = ""; FS = "\n" } {
+        wt = ""; head = ""; det = 0; pr = 0
+        for (i = 1; i <= NF; i++) {
+            if ($i ~ /^worktree /) { wt = $i; sub(/^worktree /, "", wt) }
+            else if ($i ~ /^HEAD /) { head = $i; sub(/^HEAD /, "", head) }
+            else if ($i == "detached") det = 1
+            else if ($i ~ /^prunable/) pr = 1
+        }
+        if (det && pr) printf "%s\t%s\n", head, wt
+    }' <<<"$list")
+    [ "$hit" = 1 ] || return 0
+    notify_daily "$STATE_ROOT/worktree-gc/prune-skipped-warned" \
+        "$main の git worktree prune を見送っています。detached の HEAD にだけ在るコミットがある (SHA はログに)"
+    return 1
+}
+if prune_safe "$REPO"; then run git -C "$REPO" worktree prune; fi
 
 # ---- Orca の worktree を消す ----
 # 判定から削除までに fetch や gh で数分空くので、直前に状態を取り直す。
