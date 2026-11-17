@@ -3,6 +3,7 @@
 # 掃除ジョブが共有する関数。各スクリプトが自分と同じディレクトリから source する。
 #   . "$(dirname "${BASH_SOURCE[0]}")/cleanup-ledger.sh"
 #   ledger_add <種類> <対象> <当たった規則> <戻し方のコマンド> <戻らないもの>
+#   ledger_plan <鍵> <種類> <対象> <当たった規則> <戻し方のコマンド> <戻らないもの> || log "WARN: …"
 #   keep_load || <この回は何も止めず何も消さない>   # 呼び側で log を定義しておく
 #   if keep_match <対象>...; then <残す>; fi
 #   mode=$(rule_mode <規則名>)   # off / list / on。呼び側で log を定義しておく
@@ -30,6 +31,24 @@ ledger_add() {
         line="$line"$'\t'"${f//$'\n'/ }"
     done
     mkdir -p "${CLEANUP_LEDGER%/*}" && printf '%s\n' "$line" >>"$CLEANUP_LEDGER"
+}
+
+# 規則が list (一覧だけ) のときの「止める・消す予定」を、種類 plan-<種類> の行で台帳に足す。まだ何も止めても消してもいない。
+# 毎時・10 分ごとのジョブが同じ予定を毎回書くと台帳が埋まるので、呼び側が決めた鍵 (例: 規則名 + パス + HEAD の SHA) を
+# 控えに 1 行 1 つで残し、控えに在る鍵なら何も書かない。DRY_RUN=1 では何も書かない。書けなければ 1
+# (呼び側は `|| log "WARN: …"` で受けて続ける)。通知には数えないので、worktree-gc の record は通さず直接呼ぶ。
+# ponytail: 控えは増える一方 (1 行数十バイト)。消してよい。消すと、次の回に同じ予定がもう 1 行ずつ書かれるだけ。
+CLEANUP_PLANNED="$STATE_ROOT/cleanup-ledger/planned"
+ledger_plan() { # ledger_plan <鍵> <種類> <対象> <規則> <戻し方> <戻らないもの>
+    local key=$1 kind=$2
+    [ "${DRY_RUN:-0}" = 1 ] && return 0
+    key=${key//$'\t'/ }
+    key=${key//$'\r'/ }
+    key=${key//$'\n'/ }
+    if [ -f "$CLEANUP_PLANNED" ] && grep -qxF -- "$key" "$CLEANUP_PLANNED"; then return 0; fi
+    shift 2
+    # 台帳を先に書く。控えだけ書けた回は、その予定が台帳に一度も出なくなる (逆なら 2 行になるだけ)。
+    ledger_add "plan-$kind" "$@" && printf '%s\n' "$key" >>"$CLEANUP_PLANNED"
 }
 
 # ---- 「触らない」リスト ----

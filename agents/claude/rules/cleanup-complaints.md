@@ -10,6 +10,7 @@ paths:
 「◯◯を消してほしくなかった」「何が消えた？」と言われたら、次の順に進める。
 
 - 台帳 `~/Library/Application Support/cleanup-ledger/ledger.tsv`（列は 時刻 / 種類 / 対象 / 規則 / 戻し方 / 戻らないもの）を直接読み、ジョブと規則を特定する。種類 `worktree`・`compose-down`・`worktree-remove-failed`・`compose-stop` は worktree-gc、`session` は agent-gc。
+- 種類が `plan-` で始まる行は、規則が `list`（一覧だけ）のときの予定で、まだ何も止めても消してもいない。消してほしくなければ「触らない」リストに足す。
 - 戻し方の列を示し、流す前に何が起きるかを伝える。先頭の `: …;` は注記。
   - `worktree`: `git worktree add …`。`worktree-remove-failed` は残ったフォルダを退けてから。`: HEAD を取れなかった…` は戻せない。
   - `compose-stop`: `docker start <ID…>`。
