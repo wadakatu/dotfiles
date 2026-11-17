@@ -260,6 +260,51 @@ run_gc
 check "orca rm が呼ばれない" test ! -e "$T/rm-calls"
 check "理由がログに出る" logged "keep  $T/orca/wt (feat-o: PR 無し)"
 
+# ---- Orca: worktree の作成時刻が整数でなければ、作成時刻の柵を素通りさせずに残す ----
+created_not_int() { # created_not_int <ケース名> <createdAt (JSON の値)>
+    setup "$1"
+    orca_wt "$T/orca/wt" feat-o "$AFTER" "$CREATED"
+    jq --argjson c "$2" '.result.worktrees[0].createdAt = $c' "$T/ps.json" >"$T/ps.tmp" && mv "$T/ps.tmp" "$T/ps.json"
+    run_gc
+    check "orca rm が呼ばれない" test ! -e "$T/rm-calls"
+    check "理由がログに出る" logged "keep  $T/orca/wt (feat-o: PR #1 が worktree の作成より前に閉じている、または日時が取れない)"
+}
+created_not_int orca-created-fraction 1793000000000.5
+created_not_int orca-created-string '"2026-10-27"'
+
+# ---- Orca: gh が成功で空の出力・JSON でない出力を返したら、PR を引けないとして残す ----
+setup orca-gh-empty
+orca_wt "$T/orca/wt" feat-o "$AFTER" "$CREATED"
+: >"$T/prs.json"
+run_gc
+check "orca rm が呼ばれない" test ! -e "$T/rm-calls"
+check "理由がログに出る" logged "keep  $T/orca/wt (feat-o: gh で PR を引けない)"
+
+setup orca-gh-not-json
+orca_wt "$T/orca/wt" feat-o "$AFTER" "$CREATED"
+echo 'not json' >"$T/prs.json"
+run_gc
+check "orca rm が呼ばれない" test ! -e "$T/rm-calls"
+check "理由がログに出る" logged "keep  $T/orca/wt (feat-o: gh で PR を引けない)"
+
+# ---- Orca: 最後に PR の状態を読めなかったら、理由を出して残す ----
+# PR の状態を読む jq だけを失敗させる偽物を前に差し込む。本物は、偽物の置き場所を PATH から外してから引く
+# (`command -v jq` が shim を返す環境では、shim が PATH から引き直して偽物に戻り、終わらない)。
+setup orca-pr-state-unreadable
+orca_wt "$T/orca/wt" feat-o "$AFTER" "$CREATED"
+mkdir -p "$T/bin"
+cat >"$T/bin/jq" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in *"max_by(.number) | .state"*) exit 1 ;; esac
+d=$(cd "$(dirname "$0")" && pwd)
+PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "$d" | paste -sd: -)
+exec jq "$@"
+EOF
+chmod +x "$T/bin/jq"
+run_gc PATH="$T/bin:$base/bin:$PATH"
+check "orca rm が呼ばれない" test ! -e "$T/rm-calls"
+check "理由がログに出る" logged "keep  $T/orca/wt (feat-o: PR #1 の状態を読めない)"
+
 # ---- Orca: PR の head はその worktree だけの ref に取り、FETCH_HEAD を書き換えない ----
 # PR に無いコミットを持たせて worktree を残す (消すと FETCH_HEAD も ref も一緒に消えて、何も確かめられない)。
 setup fetch-head-kept
@@ -324,6 +369,19 @@ run_gc
 check "残る" exists "$T/repo-wt"
 check "理由がログに出る" logged "keep  $T/repo-wt (削除直前に、cwd がこの中にあるプロセスを検出"
 kill "$(cat "$T/spawned.pid" 2>/dev/null)" 2>/dev/null
+
+# ---- $REPO: 削除の直前に lsof が取れなければ、使用中か分からないので残す ----
+# 2 回目 (削除の直前) からの lsof だけを失敗させる偽物を前に差し込む (判定の前の 1 回目は本物に通す)。
+setup repo-recheck-lsof-fails
+merged_repo_wt "$T/repo-wt" feat-a
+mkdir -p "$T/bin"
+printf '#!/usr/bin/env bash\nn=$(($(cat "$FAKE/lsof-count" 2>/dev/null || echo 0) + 1)); echo "$n" >"$FAKE/lsof-count"\n[ "$n" -lt 2 ] || exit 1\nexec %q "$@"\n' \
+    "$(command -v lsof)" >"$T/bin/lsof"
+chmod +x "$T/bin/lsof"
+run_gc PATH="$T/bin:$base/bin:$PATH"
+check "lsof を 2 回以上呼んだ (前提)" test "$(cat "$T/lsof-count" 2>/dev/null)" -ge 2
+check "残る" exists "$T/repo-wt"
+check "理由がログに出る" logged "keep  $T/repo-wt (削除直前に、cwd がこの中にあるプロセスを検出、または lsof で取れない)"
 
 # ---- compose: 消した worktree のものは名前を問わずボリュームごと、孤児は名前で絞ってボリュームを残す ----
 setup compose
@@ -1272,6 +1330,45 @@ check "ブランチの登録が外れる" unregistered "$T/brwt"
 check "フォルダの在る worktree は残る" registered "$T/live"
 check "見送りのログが出ない" test -z "$(grep 'prune 見送り' "$T/log")"
 check "通知が出ない" test ! -e "$T/notify-calls"
+
+# ---- $REPO の prune: HEAD がリモート追跡ブランチだけ・tag だけから辿れる登録も、見送らずに外す ----
+setup repo-prune-remote-tag-only
+git clone -q "$T/origin.git" "$T/other" 2>/dev/null
+git -C "$T/other" switch -q -c side
+git -C "$T/other" commit -q --allow-empty -m side
+git -C "$T/other" push -q origin side 2>/dev/null
+git -C "$T/repo" fetch -q origin
+git -C "$T/repo" worktree add -q --detach "$T/det-remote" origin/side
+git -C "$T/repo" worktree add -q --detach "$T/det-tag" origin/main
+git -C "$T/det-tag" commit -q --allow-empty -m tagged
+git -C "$T/det-tag" tag only-tag
+check "ローカルのブランチには無い (前提)" test -z "$(git -C "$T/repo" branch --contains "$(git -C "$T/det-remote" rev-parse HEAD)")$(git -C "$T/repo" branch --contains "$(git -C "$T/det-tag" rev-parse HEAD)")"
+mv "$T/det-remote" "$T/det-remote.moved"
+mv "$T/det-tag" "$T/det-tag.moved"
+run_gc
+check "リモート追跡ブランチだけから辿れる登録が外れる" unregistered "$T/det-remote"
+check "tag だけから辿れる登録が外れる" unregistered "$T/det-tag"
+check "見送りのログが出ない" test -z "$(grep 'prune 見送り' "$T/log")"
+
+# ---- $REPO の prune: 登録の一覧を取れない回は、何が外れるか分からないので prune しない ----
+# 2 回目 ($REPO の判定の一覧の次、prune の前の確認) からの git worktree list だけを失敗させる偽物を前に差し込む。
+setup repo-prune-list-fails
+git -C "$T/repo" worktree add -q --detach "$T/det" origin/main
+mv "$T/det" "$T/det.moved"
+mkdir -p "$T/bin"
+printf '#!/usr/bin/env bash
+case " $* " in
+  *" worktree list "*) n=$(($(cat "$FAKE/wtlist-count" 2>/dev/null || echo 0) + 1)); echo "$n" >"$FAKE/wtlist-count"; [ "$n" -lt 2 ] || exit 1 ;;
+esac
+exec %q "$@"
+' \
+    "$(command -v git)" >"$T/bin/git"
+chmod +x "$T/bin/git"
+run_gc PATH="$T/bin:$base/bin:$PATH"
+check "一覧を 2 回以上呼んだ (前提)" test "$(cat "$T/wtlist-count" 2>/dev/null)" -ge 2
+check "登録が残る" registered "$T/det"
+check "理由がログに出る" logged "keep  $T/repo (prune 見送り: git worktree list が失敗)"
+check "通知は出さない" test ! -e "$T/notify-calls"
 
 for f in "$base"/*/log; do grep -q '^exit=0$' "$f" || { echo "FAIL [$(basename "$(dirname "$f")")] exit が 0 でない"; fail=1; }; done
 [ "$fail" = 0 ] && echo "ok: worktree-gc"

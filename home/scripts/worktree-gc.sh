@@ -534,11 +534,15 @@ has_commits_outside_pr() {
 # ブランチの PR で、その worktree を消してよいかを決める。消してよければ 0 を返し、理由を pr_why に、PR が閉じた時刻 (ms) を
 # pr_closed に置く。残すときは理由を keep の行に出して 1 を返す。
 # 呼び側の if や || の中では set -e が効かないので、取れなかった値は全部「残す」に落とす (空の slug で gh を呼ばない)。
+# 時刻は整数だけを比べる。[ -lt ] は整数でないと終了 2 で偽になり、「消してよい」側へ素通りする。
+is_uint() { case "$1" in '' | *[!0-9]*) return 1 ;; esac; }
 pr_stale() { # pr_stale <worktree> <ブランチ> <worktree の作成時刻 (ms)>
     local wt="$1" branch="$2" created="$3" slug prs num closed
     pr_why="" pr_closed=""
     slug=$(git -C "$wt" remote get-url origin 2>/dev/null | sed -E 's#^.*github\.com[:/]##; s#\.git$##') || slug=""
-    if [ -z "$slug" ] || ! prs=$(gh pr list -R "$slug" --head "$branch" --state all --json number,state,closedAt 2>/dev/null); then
+    # gh が成功しても、出力が配列でなければ (空・JSON でない) PR を引けていない。
+    if [ -z "$slug" ] || ! prs=$(gh pr list -R "$slug" --head "$branch" --state all --json number,state,closedAt 2>/dev/null) \
+        || ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$prs"; then
         log "keep  $wt ($branch: gh で PR を引けない)"
         return 1
     fi
@@ -554,7 +558,7 @@ pr_stale() { # pr_stale <worktree> <ブランチ> <worktree の作成時刻 (ms)
     # 閉じた PR と同名のブランチで作り直した worktree (決まった名前のブランチ、`--pr` で切り直したもの) は、
     # 作業前だと clean・固有コミット無しで旧 PR の判定を通ってしまう。作成より後に閉じた PR だけを根拠にする。
     closed=$(jq -r 'max_by(.number) | .closedAt // empty | fromdateiso8601 * 1000 | floor' <<<"$prs") || closed=""
-    if [ -z "$created" ] || [ -z "$closed" ] || [ "$closed" -lt "$created" ]; then
+    if ! is_uint "$created" || ! is_uint "$closed" || [ "$closed" -lt "$created" ]; then
         log "keep  $wt ($branch: PR #$num が worktree の作成より前に閉じている、または日時が取れない)"
         return 1
     fi
@@ -562,7 +566,11 @@ pr_stale() { # pr_stale <worktree> <ブランチ> <worktree の作成時刻 (ms)
         log "keep  $wt ($branch: PR #$num に無いコミットあり)"
         return 1
     fi
-    pr_why="$branch: PR #$num が $(jq -r 'max_by(.number) | .state' <<<"$prs")" || { pr_why=""; return 1; }
+    if ! pr_why="$branch: PR #$num が $(jq -r 'max_by(.number) | .state' <<<"$prs")"; then
+        pr_why=""
+        log "keep  $wt ($branch: PR #$num の状態を読めない)"
+        return 1
+    fi
     pr_closed=$closed
 }
 
