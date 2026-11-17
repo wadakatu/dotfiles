@@ -687,36 +687,50 @@ for wt in ${removable[@]+"${removable[@]}"}; do
     fi
 done
 
-# git worktree prune は、フォルダの無い登録を、その worktree の HEAD と reflog ごと外す。登録を選べない (リポ単位)。
-# detached の HEAD がどのブランチ・リモート追跡ブランチ・タグからも辿れない登録が 1 つでも在れば、そのコミットへの
-# 最後の参照を消しうるので、リポごと見送って 1 を返す (残すなら git branch <名前> <SHA>、要らなければ手で prune)。
-# 人が決めるまで毎時見送り続けるので、黙って止まらないよう 1 日 1 回知らせる。一覧を取れない回も見送る。
+# git worktree prune は、外す登録を、その worktree の HEAD と reflog ごと消す。登録を選べない (リポ単位)。
+# 外す登録は prune --dry-run -v の「Removing worktrees/<名前>: <理由>」で見る。worktree list --porcelain の prunable は、
+# gitdir が無い・空の登録と、同じパスの重複を出さない。detached の HEAD がどのブランチ・リモート追跡ブランチ・タグからも
+# 辿れない登録が 1 つでも在れば、そのコミットへの最後の参照を消しうるので、リポごと見送って 1 を返す (残すなら
+# git branch <名前> <SHA>、要らなければ手で prune)。人が決めるまで毎時見送り続けるので、黙って止まらないよう 1 日 1 回知らせる。
+# 一覧・dry-run が失敗した回、読めない行や HEAD が在った回も、何が外れるか分からないので見送る。
 prune_safe() { # prune_safe <本体>
-    local main="$1" list sha wt out hit=0
-    # パイプで awk に流すと、git の失敗を見落とす。
-    if ! list=$(git -C "$main" worktree list --porcelain 2>/dev/null); then
+    local main="$1" dry common line name head wt out hit=0
+    if ! git -C "$main" worktree list --porcelain >/dev/null 2>&1; then
         log "keep  $main (prune 見送り: git worktree list が失敗)"
         return 1
     fi
-    while IFS=$'\t' read -r sha wt; do
+    # 文言はロケールで訳される (de・fr で確かめた)。出力は stderr。
+    if ! dry=$(LC_ALL=C git -C "$main" worktree prune --dry-run -v 2>&1) ||
+        ! common=$(git -C "$main" rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
+        log "keep  $main (prune 見送り: git worktree prune --dry-run が失敗)"
+        return 1
+    fi
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        head=""
+        case "$line" in
+            "Removing worktrees/"?*": "*)
+                name=${line#Removing worktrees/}
+                name=${name%%: *}
+                # HEAD のファイルは reftable では置き石 (ref: refs/heads/.invalid) なので、git に解決させる。ブランチは対象外。
+                if git -C "$main" symbolic-ref -q "worktrees/$name/HEAD" >/dev/null 2>&1; then continue; fi
+                head=$(git -C "$main" rev-parse --verify -q "worktrees/$name/HEAD" 2>/dev/null) || head="" ;;
+        esac
+        if [ -z "$head" ]; then
+            log "keep  $main (prune 見送り: 読めない行か HEAD: $line)"
+            hit=1
+            continue
+        fi
         # 失敗も「辿れない」とみなす。
-        out=$(git -C "$main" for-each-ref --contains "$sha" refs/heads refs/remotes refs/tags 2>/dev/null) || out=""
+        out=$(git -C "$main" for-each-ref --contains "$head" refs/heads refs/remotes refs/tags 2>/dev/null) || out=""
         [ -z "$out" ] || continue
-        log "keep  $main (prune 見送り: $wt の detached HEAD $sha がどの ref にも無い)"
+        wt=$(sed 's#/\.git$##' "$common/worktrees/$name/gitdir" 2>/dev/null) || wt=""
+        log "keep  $main (prune 見送り: ${wt:-worktrees/$name} の detached HEAD $head がどの ref にも無い)"
         hit=1
-    done < <(awk 'BEGIN { RS = ""; FS = "\n" } {
-        wt = ""; head = ""; det = 0; pr = 0
-        for (i = 1; i <= NF; i++) {
-            if ($i ~ /^worktree /) { wt = $i; sub(/^worktree /, "", wt) }
-            else if ($i ~ /^HEAD /) { head = $i; sub(/^HEAD /, "", head) }
-            else if ($i == "detached") det = 1
-            else if ($i ~ /^prunable/) pr = 1
-        }
-        if (det && pr) printf "%s\t%s\n", head, wt
-    }' <<<"$list")
+    done <<<"$dry"
     [ "$hit" = 1 ] || return 0
     notify_daily "$STATE_ROOT/worktree-gc/prune-skipped-warned" \
-        "$main の git worktree prune を見送っています。detached の HEAD にだけ在るコミットがある (SHA はログに)"
+        "$main の git worktree prune を見送っています。detached の HEAD にだけ在るコミットか、読めない登録がある (ログに)"
     return 1
 }
 if prune_safe "$REPO"; then run git -C "$REPO" worktree prune; fi

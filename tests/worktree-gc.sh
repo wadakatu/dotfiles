@@ -1370,6 +1370,48 @@ check "登録が残る" registered "$T/det"
 check "理由がログに出る" logged "keep  $T/repo (prune 見送り: git worktree list が失敗)"
 check "通知は出さない" test ! -e "$T/notify-calls"
 
+# ---- $REPO の prune: worktree list に prunable で出ない登録 (gitdir が無い・空、同じパスの重複) も、prune が外すなら見る ----
+# どれも worktree list --porcelain からは見えないので、登録が残ったかは $GIT_DIR/worktrees/<名前>/HEAD で見る。
+# git 2.54 では fetch の後の自動メンテナンス (worktree-prune) が、prune_safe より先にこれらを外すので、ここでは切る。
+held() { [ -e "$T/repo/.git/worktrees/$1/HEAD" ]; }
+git_prunes() { LC_ALL=C git -C "$T/repo" worktree prune --dry-run -v 2>&1 | grep -qF "Removing worktrees/$1: "; }
+detached_unique() { # detached_unique <パス>: どの ref にも無いコミットを HEAD に持つ detached の worktree を作る
+    git -C "$T/repo" worktree add -q --detach "$1" origin/main
+    git -C "$1" commit -q --allow-empty -m unique
+    u=$(git -C "$1" rev-parse HEAD)
+}
+setup repo-prune-gitdir-missing
+git -C "$T/repo" config maintenance.auto false
+detached_unique "$T/det"
+rm "$T/repo/.git/worktrees/det/gitdir"
+check "git の prune が外す (前提)" git_prunes det
+run_gc
+check "登録が残る" held det
+check "見送りと SHA がログに出る" logged "keep  $T/repo (prune 見送り: worktrees/det の detached HEAD $u がどの ref にも無い)"
+check "通知が 1 本" notified_once "prune"
+
+setup repo-prune-gitdir-empty
+git -C "$T/repo" config maintenance.auto false
+detached_unique "$T/det"
+mv "$T/det" "$T/det.moved"
+: >"$T/repo/.git/worktrees/det/gitdir"
+check "git の prune が外す (前提)" git_prunes det
+run_gc
+check "登録が残る" held det
+check "見送りと SHA がログに出る" logged "keep  $T/repo (prune 見送り: worktrees/det の detached HEAD $u がどの ref にも無い)"
+
+# git は同じパスの登録のうち、worktrees/<名前> の名前順で最初のものを残し、残りを外す。外れる側にだけ固有のコミットを置く。
+setup repo-prune-duplicate
+git -C "$T/repo" config maintenance.auto false
+git -C "$T/repo" worktree add -q --detach "$T/dup" origin/main
+cp -R "$T/repo/.git/worktrees/dup" "$T/repo/.git/worktrees/dup2"
+u=$(git -C "$T/repo" commit-tree -p origin/main -m unique "origin/main^{tree}")
+echo "$u" >"$T/repo/.git/worktrees/dup2/HEAD"
+check "git の prune が重複の側を外す (前提)" git_prunes dup2
+run_gc
+check "重複の登録が残る" held dup2
+check "見送りと SHA がログに出る" logged "keep  $T/repo (prune 見送り: $T/dup の detached HEAD $u がどの ref にも無い)"
+
 for f in "$base"/*/log; do grep -q '^exit=0$' "$f" || { echo "FAIL [$(basename "$(dirname "$f")")] exit が 0 でない"; fail=1; }; done
 [ "$fail" = 0 ] && echo "ok: worktree-gc"
 exit "$fail"
