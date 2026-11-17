@@ -362,7 +362,7 @@ flake では相対パスを渡すと flake source の store コピーを指し�
 （[home-manager#2085](https://github.com/nix-community/home-manager/issues/2085)）。
 このため、このリポジトリのクローン先は `flake.nix` の `mkDarwin` に渡す
 `dotfilesPath` と一致させる。LaunchAgent（worktree-gc / pr-dispatch /
-memory-maintenance）も同じ値を見るので、クローン先を変えるときは `dotfilesPath` を直して
+memory-maintenance / agent-gc）も同じ値を見るので、クローン先を変えるときは `dotfilesPath` を直して
 `darwin-rebuild switch` する。
 
 これらの LaunchAgent は作業ツリーのスクリプトを直接は動かさない。`home/run-from-main.nix` の起動スクリプトが

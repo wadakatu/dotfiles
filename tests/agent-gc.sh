@@ -97,6 +97,7 @@ case "$*" in
     *) echo "n$FAKE/codex/.codex/sessions/2026/rollout-$p.jsonl" ;;
 esac
 EOF
+# terminal list は、on_list があればそれを流してから返す (判定の後に状態が変わったセッションを作る)。
 # send は送った端末を控え、stuck の無いプロセスを終わらせる。終わったプロセスの sessions/<pid>.json は本物と同じく消す
 # (ID を /exit の前に控えていないと、戻し方から ID が落ちる)。
 cat >"$base/bin/orca" <<'EOF'
@@ -110,6 +111,7 @@ case "$1 $2" in
             jq -R '{paneKey: ("p" + .), state: "done"}' |
             jq -s '{result: {truncated: false, worktrees: [{workspaceStatus: "in-review", agents: .}]}}' ;;
     "terminal list")
+        [ ! -f "$FAKE/on_list" ] || bash "$FAKE/on_list"
         for d in "$FAKE"/procs/*; do [ -d "$d" ] && jq -n --arg h "h${d##*/}" --arg a "$(cat "$d/comm")" '{handle: $h, agentIdentity: $a}'; done |
             jq -s '{result: {terminals: .}}' ;;
     "terminal read")
@@ -140,6 +142,20 @@ exit 0
 EOF
 chmod +x "$base/bin"/*
 export PATH="$base/bin:$PATH"
+# 偽の jq は、jqfail を PATH の先に置いたときだけ効く。$FAKE/jq-fail の行 (引数に含まれる文字列) に当たる呼び出しを、行ごとに 1 回だけ失敗させる。
+# 本物は、PATH から jqfail を外してから引く (mise の shim は PATH から jq を引き直すので、パスで呼ぶと自分に戻る)。
+mkdir -p "$base/jqfail"
+cat >"$base/jqfail/jq" <<EOF
+#!/usr/bin/env bash
+n=0
+while IFS= read -r pat; do
+    n=\$((n + 1))
+    case "\$*" in *"\$pat"*) [ -e "\$FAKE/jq-failed-\$n" ] || { touch "\$FAKE/jq-failed-\$n"; exit 5; } ;; esac
+done < <(cat "\$FAKE/jq-fail" 2>/dev/null)
+PATH=\${PATH#"$base/jqfail:"}
+exec jq "\$@"
+EOF
+chmod +x "$base/jqfail/jq"
 # 本物の orca に届くと、手元のセッションに /exit を送ってしまう。偽物が先に効いていなければ止める。
 for c in ps lsof orca sysctl osascript sleep; do
     [ "$(command -v "$c")" = "$base/bin/$c" ] || { echo "偽の $c が効いていない。中止"; exit 1; }
@@ -301,6 +317,8 @@ proc 101 claude /w/a "" -
 bash "$script" stop 101 >/dev/null 2>&1
 check "/exit を送らない" sent_none
 check "台帳に書かない" ledger_lines 0
+check "ログに unreadable" grep -qF 'pid=101: unreadable' "$LOG"
+check "list の残すものに unreadable" grep -qF "$(printf '101\tclaude\t-\tunreadable')" <<<"$(bash "$script" list 2>/dev/null)"
 
 # ---- stop: 裏で動くもの (止めると resume で戻らない) ----
 reset "stop-bg-shell: 子孫にシェルが居れば送らない"
@@ -310,6 +328,16 @@ child 301 300 zsh
 bash "$script" stop 101 >/dev/null 2>&1
 check "/exit を送らない" sent_none
 check "ログに bg-shell" grep -qF 'pid=101: bg-shell' "$LOG"
+
+reset "dash・ksh もシェルに数える"
+proc 101 claude /w/a "" SID-1
+child 300 101 /bin/dash
+proc 102 claude /w/b "" SID-2
+child 301 102 -ksh
+bash "$script" stop 101 102 >/dev/null 2>&1
+check "/exit を送らない" sent_none
+check "ログに bg-shell (dash)" grep -qF 'pid=101: bg-shell' "$LOG"
+check "ログに bg-shell (ksh)" grep -qF 'pid=102: bg-shell' "$LOG"
 
 reset "stop-login-shell-name: ログインシェルの名前 (-/bin/zsh) も数える"
 proc 101 claude /w/a "" SID-1
@@ -356,6 +384,26 @@ EOF
 bash "$script" stop 101 >/dev/null 2>&1
 check "/exit を送らない" sent_none
 check "ログに changed before send" grep -qF 'pid=101: changed before send' "$LOG"
+
+reset "idle のままでも、状態の時刻が判定のときから変わったら送らない"
+proc 101 claude /w/a "" SID-1
+cat >"$FAKE/procs/101/on_ww" <<'EOF'
+f="$CLAUDE_CONFIG_DIR/sessions/101.json"
+jq '.statusUpdatedAt += 5000' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
+EOF
+bash "$script" stop 101 >/dev/null 2>&1
+check "/exit を送らない" sent_none
+check "ログに changed before send" grep -qF 'pid=101: changed before send' "$LOG"
+
+reset "判定の後に状態が変わった Codex は送らない"
+proc 201 codex /w/c ""
+cat >"$FAKE/on_list" <<'EOF'
+echo '{"type":"event_msg","timestamp":"2026-01-02T00:00:00.000Z","payload":{"type":"task_started"}}' \
+    >>"$FAKE/codex/.codex/sessions/2026/rollout-201.jsonl"
+EOF
+bash "$script" stop 201 >/dev/null 2>&1
+check "/exit を送らない" sent_none
+check "ログに changed before send" grep -qF 'pid=201: changed before send' "$LOG"
 
 reset "ledger-lost-note: Claude の行にだけ戻らないものを書く"
 proc 101 claude /w/a "" SID-1
@@ -409,6 +457,63 @@ tx SID-1 '{"type":"user","message":{"content":"hi"}}'
 bash "$script" stop 101 >/dev/null 2>&1
 check "/exit を送らない" sent_none
 check "ログに sched-unknown" grep -qF 'pid=101: sched-unknown' "$LOG"
+
+reset "sched の入口の jq が失敗したら、予約を確かめないまま送らない"
+proc 101 claude /w/a "" SID-1
+tx SID-1 '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"CronCreate","input":{}}]}}'
+echo '.agent == "claude" and .reason == null' >"$FAKE/jq-fail"
+PATH="$base/jqfail:$PATH" bash "$script" stop 101 >/dev/null 2>&1
+check "偽の jq が失敗した" [ -e "$FAKE/jq-failed-1" ]
+check "/exit を送らない" sent_none
+check "ログに sched-unknown" grep -qF 'pid=101: sched-unknown' "$LOG"
+
+reset "sched-unknown を付ける jq も失敗したら、行ごと消えて送らない"
+proc 101 claude /w/a "" SID-1
+printf '%s\n' '.agent == "claude" and .reason == null' '.reason = "sched-unknown"' >"$FAKE/jq-fail"
+PATH="$base/jqfail:$PATH" bash "$script" stop 101 >/dev/null 2>&1
+check "偽の jq が入口で失敗した" [ -e "$FAKE/jq-failed-1" ]
+check "偽の jq が sched-unknown でも失敗した" [ -e "$FAKE/jq-failed-2" ]
+check "/exit を送らない" sent_none
+check "ログに not running" grep -qF 'pid=101: not running' "$LOG"
+
+reset "NUL を含む会話記録でも予約を見落とさない"
+proc 101 claude /w/a "" SID-1
+printf '{"type":"user","message":{"content":"a\000b"}}\n' >>"$CLAUDE_CONFIG_DIR/projects/x/SID-1.jsonl"
+tx SID-1 '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"CronCreate","input":{}}]}}'
+bash "$script" stop 101 >/dev/null 2>&1
+check "/exit を送らない" sent_none
+check "ログに scheduled" grep -qF 'pid=101: scheduled' "$LOG"
+
+reset "2 つ目の会話記録に予約が在れば残す"
+proc 101 claude /w/a "" SID-1
+mkdir -p "$CLAUDE_CONFIG_DIR/projects/y"
+printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"CronCreate","input":{}}]}}' >"$CLAUDE_CONFIG_DIR/projects/y/SID-1.jsonl"
+bash "$script" stop 101 >/dev/null 2>&1
+check "/exit を送らない" sent_none
+check "ログに scheduled" grep -qF 'pid=101: scheduled' "$LOG"
+
+reset "1 つ目が予約なしで 2 つ目が読めなければ残す"
+proc 101 claude /w/a "" SID-1
+mkdir -p "$CLAUDE_CONFIG_DIR/projects/y"
+echo '{"type":"user","message":{"content":"CronCreate"}}' >"$CLAUDE_CONFIG_DIR/projects/y/SID-1.jsonl"
+chmod 000 "$CLAUDE_CONFIG_DIR/projects/y/SID-1.jsonl"
+bash "$script" stop 101 >/dev/null 2>&1
+check "/exit を送らない" sent_none
+check "ログに sched-unknown" grep -qF 'pid=101: sched-unknown' "$LOG"
+
+reset "DRY_RUN の would stop は、送る条件を全部通ったものにだけ出す"
+proc 101 claude /w/a "" SID-1
+proc 102 claude /w/b "" SID-2
+echo '["❯ あとでこれを", "────"]' >"$FAKE/procs/102/tail"
+proc 103 claude /w/c "" SID-3
+cat >"$FAKE/procs/103/on_ww" <<'EOF'
+f="$CLAUDE_CONFIG_DIR/sessions/103.json"
+jq '.status = "busy"' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
+EOF
+dry=$(DRY_RUN=1 bash "$script" stop 101 102 103 2>/dev/null)
+check "通ったものに would stop" grep -qF 'would stop claude pid=101 /w/a' <<<"$dry"
+check "入力欄・記録で skip になるものには出さない" [ -z "$(grep -E 'pid=10[23]' <<<"$dry")" ]
+check "/exit を送らない" sent_none
 
 # 時刻を除いたログと通知が同じであること。2 回目は鍵が知らせ済みにならないよう、状態を消してから流す。
 scan_out() { # scan_out <scan の引数...>: reset 済みの状態で 1 本置いて scan を流し、ログ (時刻を除く) と通知を出す
@@ -485,6 +590,8 @@ reset "EXCLUDE_RE はリストが空でも今どおり"
 proc 101 claude /w/skip/x "" SID-1
 EXCLUDE_RE='^/w/skip' bash "$script" stop 101 >/dev/null 2>&1
 check "/exit を送らない" sent_none
+check "ログに excluded" grep -qF 'pid=101: excluded' "$LOG"
+check "list の残すものに excluded" grep -qF "$(printf '101\tclaude\t100h\texcluded')" <<<"$(EXCLUDE_RE='^/w/skip' bash "$script" list 2>/dev/null)"
 
 # ---- symlink 経由の起動 ----
 # ~/.local/bin/agent-gc は、nix の store を挟んだ symlink の連なりでリポのスクリプトを指す。相対のリンクも混ぜる。

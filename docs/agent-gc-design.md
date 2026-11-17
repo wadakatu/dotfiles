@@ -59,7 +59,7 @@ launchd（StartInterval 600）→ agent-gc-launcher scan --auto（origin/main �
   - 引数の中にも同じ文字列が出ることがある（codex の `-c shell_environment_policy.set.ORCA_...`）。そのため、前が空白の `NAME=` だけを拾い、最後に出たものを使う。環境変数は引数の後ろに並ぶ。
 - `TZ=UTC ps -o lstart= -p <pid>` を、プロセスの開始時刻とする。止める直前に、この値で同じプロセスかを確かめる。
 - 鍵は `<pid>:<開始時刻>:<最後の状態変化の時刻>`。通知の重複防止と、list で見せたものと同じかの照合に使う（4 節）。
-- `ps -axo pid=,ppid=,comm=` を 1 回の collect につき 1 回だけ取り、セッションの pid から子孫を辿る（`bg_shell`）。コマンド名は空白を含みうるので 3 列目から行末までを取り、先頭の `-`（ログインシェル）とディレクトリを落とした名前が `zsh`・`bash`・`sh`・`fish` のプロセスが居れば `true`、居なければ `false`。タブのシェルは祖先なので数えない。
+- `ps -axo pid=,ppid=,comm=` を 1 回の collect につき 1 回だけ取り、セッションの pid から子孫を辿る（`bg_shell`）。コマンド名は空白を含みうるので 3 列目から行末までを取り、先頭の `-`（ログインシェル）とディレクトリを落とした名前が `zsh`・`bash`・`sh`・`fish`・`dash`・`ksh` のプロセスが居れば `true`、居なければ `false`。タブのシェルは祖先なので数えない。
   - 裏の Bash コマンドが走っている間は、claude の子孫にシェルが残る（Claude Code v2.1.326 の 1 例。そのときの記録の `status` は `shell` で、表の 2 でも残る）。公式が挙げる `status` は `busy`・`waiting`・`idle` だけなので、版が変わって `idle` と出ても残せるよう、プロセスの側でも見る。
   - ponytail: MCP のサーバをシェルのスクリプトで包んで起動している環境では、全部のセッションが `bg-shell` で残る（`agent-gc list` の「残すもの」に出る）。そうなったら、除く名前を設定で渡す。
 
@@ -141,8 +141,8 @@ Orca 上で working が古いまま残っているもの（実測で 2 本）は
 
 - `collect | judge` の後ろの 1 段で、`scan`・`list`・`stop` の 3 か所で通す。jq だけの judge には入れない（ファイルを読むため）。
 - `reason` が null の Claude の行だけ、会話記録 `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/*/<sessionId>.*`（退避された写しも含む）を読む。深さを問わず、`type` が `tool_use` で `name` が `CronCreate` か `ScheduleWakeup` の要素が 1 つでも在れば `scheduled`。実物では `.message.content[]` に在る。
-- 道具の名前は、道具の一覧（`shape.tools[]`）・`attachment.addedNames[]`・本文にも出るので、文字列の一致では決めない。会話記録は数十 MB になるので、`grep -F` で行を絞ってから jq で確かめる。
-- 会話記録が見つからない・読めない、`sessionId` が無いか ID の形（英数字・`-`・`_`）でない、grep に当たった行が JSON として読めないときは `sched-unknown`。どちらも keep で、`stop` は `skip <pid>: <理由>`、`list` の「残すもの」にも同じ理由で出る。`scan` のログの `sched_unknown=<n>` で、会話記録の無いセッションが黙って溜まらないようにする。
+- 道具の名前は、道具の一覧（`shape.tools[]`）・`attachment.addedNames[]`・本文にも出るので、文字列の一致では決めない。会話記録は数十 MB になるので、`grep -a -F` で行を絞ってから jq で確かめる（`-a` は NUL を含む記録でも行を出すため。GNU grep は行の代わりに `binary file matches` を出す）。
+- 会話記録が見つからない・読めない、`sessionId` が無いか ID の形（英数字・`-`・`_`）でない、grep に当たった行が JSON として読めないとき、行が Claude の候補かを jq で読めなかったときは `sched-unknown`。どちらも keep で、`stop` は `skip <pid>: <理由>`、`list` の「残すもの」にも同じ理由で出る。`scan` のログの `sched_unknown=<n>` で、会話記録の無いセッションが黙って溜まらないようにする。
 - ponytail: 済んだ予約・消した予約でも残る。未発火だけを見分けるなら、`CronDelete` と発火を突き合わせる。予約を作った後に会話を替えた（`/clear`・`/resume`）セッションと、プロジェクトの永続の予約（`.claude/scheduled_tasks.json`）は見ない。
 
 ## 4. 通知と list
