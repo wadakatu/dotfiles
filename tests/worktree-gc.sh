@@ -1372,7 +1372,7 @@ check "通知は出さない" test ! -e "$T/notify-calls"
 
 # ---- $REPO の prune: worktree list に prunable で出ない登録 (gitdir が無い・空、同じパスの重複) も、prune が外すなら見る ----
 # どれも worktree list --porcelain からは見えないので、登録が残ったかは $GIT_DIR/worktrees/<名前>/HEAD で見る。
-# git 2.54 では fetch の後の自動メンテナンス (worktree-prune) が、prune_safe より先にこれらを外すので、ここでは切る。
+# git 2.54 以降では、ジョブが自動メンテナンスを切っていないと、fetch の後の worktree prune --expire が prune_safe より先にこれらを外す。
 held() { [ -e "$T/repo/.git/worktrees/$1/HEAD" ]; }
 git_prunes() { LC_ALL=C git -C "$T/repo" worktree prune --dry-run -v 2>&1 | grep -qF "Removing worktrees/$1: "; }
 detached_unique() { # detached_unique <パス>: どの ref にも無いコミットを HEAD に持つ detached の worktree を作る
@@ -1381,7 +1381,6 @@ detached_unique() { # detached_unique <パス>: どの ref にも無いコミッ
     u=$(git -C "$1" rev-parse HEAD)
 }
 setup repo-prune-gitdir-missing
-git -C "$T/repo" config maintenance.auto false
 detached_unique "$T/det"
 rm "$T/repo/.git/worktrees/det/gitdir"
 check "git の prune が外す (前提)" git_prunes det
@@ -1391,7 +1390,6 @@ check "見送りと SHA がログに出る" logged "keep  $T/repo (prune 見送�
 check "通知が 1 本" notified_once "prune"
 
 setup repo-prune-gitdir-empty
-git -C "$T/repo" config maintenance.auto false
 detached_unique "$T/det"
 mv "$T/det" "$T/det.moved"
 : >"$T/repo/.git/worktrees/det/gitdir"
@@ -1402,7 +1400,6 @@ check "見送りと SHA がログに出る" logged "keep  $T/repo (prune 見送�
 
 # git は同じパスの登録のうち、worktrees/<名前> の名前順で最初のものを残し、残りを外す。外れる側にだけ固有のコミットを置く。
 setup repo-prune-duplicate
-git -C "$T/repo" config maintenance.auto false
 git -C "$T/repo" worktree add -q --detach "$T/dup" origin/main
 cp -R "$T/repo/.git/worktrees/dup" "$T/repo/.git/worktrees/dup2"
 u=$(git -C "$T/repo" commit-tree -p origin/main -m unique "origin/main^{tree}")
@@ -1411,6 +1408,58 @@ check "git の prune が重複の側を外す (前提)" git_prunes dup2
 run_gc
 check "重複の登録が残る" held dup2
 check "見送りと SHA がログに出る" logged "keep  $T/repo (prune 見送り: $T/dup の detached HEAD $u がどの ref にも無い)"
+
+# フォルダだけ退けた登録も、index が 3 か月より古いと、ジョブの fetch の後の自動メンテナンスが外しうる (git 2.54 以降)。
+setup repo-prune-detached-unique-old
+gone_detached_unique "$T/det"
+touch -t 202001010000 "$T/repo/.git/worktrees/det/index"
+run_gc
+check "登録が残る" registered "$T/det"
+check "見送りと SHA がログに出る" logged "keep  $T/repo (prune 見送り: $T/det の detached HEAD $u がどの ref にも無い)"
+
+# ---- $REPO の prune: dry-run が失敗した回・読めない行が在った回は、何が外れるか分からないので prune しない ----
+fake_dry_run() { # fake_dry_run <fail|odd>: git worktree prune --dry-run だけを失敗させる / 読めない行を足す偽の git を前に差し込む
+    mkdir -p "$T/bin"
+    printf '#!/usr/bin/env bash
+case " $* " in
+  *" prune --dry-run "*) [ %q != fail ] || exit 1; %q "$@"; rc=$?; echo "Entferne worktrees/x: y" >&2; exit "$rc" ;;
+esac
+exec %q "$@"
+' "$1" "$(command -v git)" "$(command -v git)" >"$T/bin/git"
+    chmod +x "$T/bin/git"
+}
+setup repo-prune-dry-run-fails
+git -C "$T/repo" worktree add -q --detach "$T/det" origin/main
+mv "$T/det" "$T/det.moved"
+fake_dry_run fail
+run_gc PATH="$T/bin:$base/bin:$PATH"
+check "登録が残る" registered "$T/det"
+check "理由がログに出る" logged "keep  $T/repo (prune 見送り: git worktree prune --dry-run が失敗)"
+check "通知は出さない" test ! -e "$T/notify-calls"
+
+setup repo-prune-dry-run-unreadable
+git -C "$T/repo" worktree add -q --detach "$T/det" origin/main
+mv "$T/det" "$T/det.moved"
+fake_dry_run odd
+run_gc PATH="$T/bin:$base/bin:$PATH"
+check "登録が残る" registered "$T/det"
+check "読めない行がログに出る" logged "keep  $T/repo (prune 見送り: 読めない行か HEAD: Entferne worktrees/x: y)"
+check "通知が 1 本" notified_once "prune"
+
+# ---- $REPO の prune: reftable のリポでは worktrees/<名前>/HEAD のファイルが置き石なので、git が解決した HEAD で見る ----
+setup repo-prune-reftable
+if git clone -q --ref-format=reftable "$T/origin.git" "$T/rt" 2>/dev/null; then
+    git -C "$T/rt" worktree add -q --detach "$T/det" origin/main
+    git -C "$T/det" commit -q --allow-empty -m unique
+    u=$(git -C "$T/det" rev-parse HEAD)
+    mv "$T/det" "$T/det.moved"
+    check "HEAD のファイルは置き石 (前提)" grep -qx 'ref: refs/heads/.invalid' "$T/rt/.git/worktrees/det/HEAD"
+    run_gc REPO="$T/rt"
+    check "登録が残る" test -e "$T/rt/.git/worktrees/det/HEAD"
+    check "見送りと SHA がログに出る" logged "keep  $T/rt (prune 見送り: $T/det の detached HEAD $u がどの ref にも無い)"
+else
+    echo "skip [$CASE] git が reftable に対応していない"
+fi
 
 for f in "$base"/*/log; do grep -q '^exit=0$' "$f" || { echo "FAIL [$(basename "$(dirname "$f")")] exit が 0 でない"; fail=1; }; done
 [ "$fail" = 0 ] && echo "ok: worktree-gc"

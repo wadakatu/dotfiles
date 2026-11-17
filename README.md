@@ -422,6 +422,8 @@ git が解決する `worktrees/<名前>/HEAD` がブランチでなく（detache
 （`gitdir` が読めなければ `<パス>` は `worktrees/<名前>`）をログに出し、通知を 1 日 1 回出す（`DRY_RUN=1` では出さない）。
 一覧・dry-run が失敗した回と、読めない行や HEAD が在った回も見送る。人が決めるまで見送り続けるので、残すなら `git branch <名前> <SHA>`、
 要らなければ手で `git worktree prune` する。
+git 2.54 では fetch や merge の後の自動メンテナンスが `git worktree prune --expire 3.months.ago` を流し、この確認より先に登録を外すので、
+ジョブの git では `GIT_CONFIG_COUNT` で `maintenance.auto=false` にする。ジョブの外で打つ git が起こす自動メンテナンスは防がない。
 
 Orca の worktree（`~/orca/workspaces/` 配下、全リポジトリ）は上の表とは別に判定し、
 `orca worktree rm` で消す。こちらも次を **全て** 満たすものだけ。
