@@ -16,6 +16,10 @@ set -euo pipefail
 PATH="$PATH:/etc/profiles/per-user/${USER}/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 export PATH
 
+# fetch や merge の後に git が起こす自動メンテナンスは、git 2.54 では worktree prune --expire 3.months.ago を含み、
+# prune_safe が確かめる前に登録を外す。このジョブの git (子プロセスも) では起こさない。
+export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=maintenance.auto GIT_CONFIG_VALUE_0=false
+
 # どのリポを掃除するか (REPO・BASE・PROJECT_PREFIXES・FF_CHECKOUTS) は公開リポに置かず、手元の設定ファイルで渡す。
 # 環境変数で渡した値はそちらが勝つ。REPO が無ければ掃除はしない (FF_CHECKOUTS の追従だけ動く)。
 CONFIG="${WORKTREE_GC_CONFIG:-$HOME/.config/worktree-gc.env}"
