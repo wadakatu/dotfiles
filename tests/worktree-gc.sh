@@ -1101,6 +1101,18 @@ plan k2 worktree /a/wt 規則 戻し方 ""
 check "鍵が違えば 2 行" rows 2
 check "控えも 2 行" lines "$(PLANNED)" 2
 
+# 鍵は行の完全一致・文字どおりで比べる。k1 は k11 に、a.b は aXb に当たらない。- で始まる鍵も引ける。
+# 2 周呼んで 5 行のまま (部分一致・正規表現なら減り、- の鍵を引けなければ増える)。
+setup plan-exact-key
+for k in k11 k1 aXb a.b -k k11 k1 aXb a.b -k; do plan "$k" worktree /a/wt 規則 戻し方 ""; done
+check "5 つの鍵で 5 行" rows 5
+check "控えも 5 行" lines "$(PLANNED)" 5
+
+# 引数が足りなくても、set -u で呼び側のシェルごと落とさず 1 を返す。
+setup plan-few-args
+check "引数 1 つは || で受けられ、次の行へ進む" test "$(bash -c 'set -euo pipefail; . "$0"; ledger_plan k || echo caught; echo next' "$lib" 2>/dev/null)" = "caught"$'\n'"next"
+check "引数なしも同じ" test "$(bash -c 'set -euo pipefail; . "$0"; ledger_plan || echo caught; echo next' "$lib" 2>/dev/null)" = "caught"$'\n'"next"
+
 setup plan-dry-run
 DRY_RUN=1 plan k1 worktree /a/wt 規則 戻し方 ""
 check "戻り値 0" test "$?" = 0
@@ -1122,10 +1134,11 @@ if [ "$(id -u)" != 0 ]; then # root は書き込み権限を無視する
     STATE_ROOT="$T/ro" plan k1 worktree /a/wt 規則 戻し方 "" 2>/dev/null
     check "書けなければ戻り値 1" test "$?" = 1
     check "set -e の下で || true が落ちない" test "$(STATE_ROOT="$T/ro" bash -c 'set -euo pipefail; . "$0"; ledger_plan k1 worktree /a/wt r c "" 2>/dev/null || true; echo after' "$lib")" = after
-    # 台帳は書けたが控えに書けない回も 1 (次の回は同じ予定をもう 1 行書く)。
+    # 台帳は書けたが控えに書けない回も 1 (次の回は同じ予定をもう 1 行書く)。台帳を先に書くので、予定は台帳に残る。
     mkdir -p "$T/ro2/cleanup-ledger/planned"
     STATE_ROOT="$T/ro2" plan k1 worktree /a/wt 規則 戻し方 "" 2>/dev/null
     check "控えに書けなければ戻り値 1" test "$?" = 1
+    check "控えに書けなくても台帳には 1 行書かれている" test "$(grep -c . "$T/ro2/cleanup-ledger/ledger.tsv" 2>/dev/null)" = 1
     chmod 755 "$T/ro"
 fi
 

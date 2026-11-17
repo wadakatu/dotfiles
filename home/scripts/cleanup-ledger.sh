@@ -40,6 +40,8 @@ ledger_add() {
 # ponytail: 控えは増える一方 (1 行数十バイト)。消してよい。消すと、次の回に同じ予定がもう 1 行ずつ書かれるだけ。
 CLEANUP_PLANNED="$STATE_ROOT/cleanup-ledger/planned"
 ledger_plan() { # ledger_plan <鍵> <種類> <対象> <規則> <戻し方> <戻らないもの>
+    # 引数が足りないと、下の $2 で set -u が呼び側のシェルごと落とす (|| で受けていても)。
+    [ $# -ge 2 ] || return 1
     local key=$1 kind=$2
     [ "${DRY_RUN:-0}" = 1 ] && return 0
     key=${key//$'\t'/ }
@@ -47,7 +49,8 @@ ledger_plan() { # ledger_plan <鍵> <種類> <対象> <規則> <戻し方> <戻�
     key=${key//$'\n'/ }
     if [ -f "$CLEANUP_PLANNED" ] && grep -qxF -- "$key" "$CLEANUP_PLANNED"; then return 0; fi
     shift 2
-    # 台帳を先に書く。控えだけ書けた回は、その予定が台帳に一度も出なくなる (逆なら 2 行になるだけ)。
+    # 台帳を先に書く。逆の順で控えだけ書けた回は、その予定が台帳に一度も出なくなる。この順では、控えに書けない間は
+    # 呼ばれるたびに台帳が 1 行増える。
     ledger_add "plan-$kind" "$@" && printf '%s\n' "$key" >>"$CLEANUP_PLANNED"
 }
 
