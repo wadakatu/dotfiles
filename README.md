@@ -529,7 +529,8 @@ ready にするのは人。キューへの供給は `/issue-queue plan` と `/is
 
 ## 放置セッションの検出と停止
 
-`home/agent-gc.nix` の LaunchAgent が 10 分ごとに `home/scripts/agent-gc.sh scan` を回す。
+`home/agent-gc.nix` の LaunchAgent が 10 分ごとに `home/scripts/agent-gc.sh scan --auto` を回す。巡回は worktree-gc と同じく
+origin/main の写しを動かす（`home/run-from-main.nix`。手で打つ `agent-gc` は checkout のまま）。
 idle が 24 時間（memory pressure が WARN 以上なら 6 時間）を超え、Orca でも done のまま放置された
 Claude / Codex のセッションを見つけると通知する。自動では止めない。設計は `docs/agent-gc-design.md`。
 
@@ -542,12 +543,15 @@ tail -50 ~/Library/Logs/agent-gc.log
 ```
 
 入力欄に書きかけがあるもの、Orca の端末が分からないもの、cwd が分からないもの、cwd が「触らない」リスト（上の `~/.config/cleanup-keep`）か
-`EXCLUDE_RE` に当たるものは止めない。リストは cwd が行そのものか行の下のときだけ当たる（worktree-gc と違い、行が cwd の中を指しても守らない）。
+`EXCLUDE_RE` に当たるものは止めない。裏で動くものも止めない: 子孫にシェルが居るもの（`bg-shell`。裏の Bash コマンド）と、
+会話記録に予約を作る呼び出し（`CronCreate`・`ScheduleWakeup`）が在る Claude（`scheduled`。済んだ予約でも残る。
+会話記録が引けなければ `sched-unknown`）。止めたいときは、そのタブで `/exit` を打つ。入力欄と記録は、送る直前に確かめ直す。リストは cwd が行そのものか行の下のときだけ当たる（worktree-gc と違い、行が cwd の中を指しても守らない）。
 **リストが無い・読めない回の `stop` は 1 本も止めず**、通知を 1 日 1 回出す。
 止めたセッションは、残ったタブに表示される `claude --resume <id>` / `codex resume <id>` で戻れる。タブを閉じた後は、
 台帳（zsh の別名 `cleanup-ledger`）の戻し方を打つ。起動時の引数のうち `--plugin-dir`・`--model`・`--effort` だけを `--resume` の前に付ける
 （位置引数の指示や `--prefill` は、再開のときに次のターンとして実行されるので付けない）。Codex は ID を残さず `codex resume` の一覧から選ぶ。
 `/exit` を送っても待ち時間のうちに終わらなかったものも、規則に `(/exit 送信済み・終了は未確認)` を付けて台帳に残す。
+Claude の行の「戻らないもの」には、`--resume` で戻らない裏のコマンド・モニター・自分で間隔を決める `/loop` を書く（在ったかは分からない）。
 
 ## コンテナの異常終了の記録
 

@@ -20,7 +20,7 @@ unset STATE_DIR EXCLUDE_RE DRY_RUN IDLE_H IDLE_WARN_H
 : >"$CLEANUP_KEEP"
 
 # 候補になる材料。各ケースはここから 1 か所だけ変える。
-base_row='{"pid":1,"agent":"claude","readable":true,"status":"idle","idle_sec":90000,"pressure":1,"path":"/w/a",
+base_row='{"pid":1,"agent":"claude","readable":true,"status":"idle","idle_sec":90000,"pressure":1,"path":"/w/a","bg_shell":false,
        "orca":{"ok":true,"found":true,"state":"done","workspace_status":"in-review","sub_states":[]}}'
 
 judge() { # judge <説明> <期待する reason (候補なら null)> <jq で base_row に当てる変更>
@@ -46,6 +46,9 @@ judge "subagent の状態が欠けていたら残す" "orca-sub null" '.orca.sub
 judge "subagent が idle と done だけなら候補" null '.orca.sub_states = ["idle", "done"]'
 judge "workspace_status が無い" orca-incomplete 'del(.orca.workspace_status)'
 judge "needs-decision" needs-decision '.orca.workspace_status = "needs-decision"'
+judge "子孫にシェルが居る" bg-shell '.bg_shell = true'
+judge "bg_shell が無い" bg-unknown 'del(.bg_shell)'
+judge "status=shell も残す" "status=shell" '.status = "shell"'
 judge "EXCLUDE_RE" excluded '.path = "/w/skip/x"'
 
 prompt() { # prompt <説明> <agent> <0=空 / 1=空でない> <端末の末尾>
@@ -64,14 +67,16 @@ prompt "Codex 別の placeholder" codex 1 $'› Explain this codebase'
 prompt "知らない agent" other 1 $'❯'
 
 # ---- stop: 偽のコマンド ----
-# プロセスは $FAKE/procs/<pid>/ のファイルで表す。exited があれば終わったもの。
+# プロセスは $FAKE/procs/<pid>/ のファイルで表す。exited があれば終わったもの。ppid が無ければ親は 1。
 mkdir -p "$base/bin"
 # 本物の ps と同じく、引数は空白で繋いだ 1 行で返す (argv の境界は残らない)。eww は引数の後ろに環境変数を並べる。
+# 一覧は本物と同じく pid と ppid を右に寄せ、コマンド名は空白を含んだまま行末まで出す。
+# -ww (戻し方を組むときに呼ばれる) は、on_ww があればそれを流してから返す (送る直前の確認より前に呼ばれたかを見る)。
 cat >"$base/bin/ps" <<'EOF'
 #!/usr/bin/env bash
-if [ "$*" = "-axo pid=,comm=" ]; then
+if [ "$*" = "-axo pid=,ppid=,comm=" ]; then
     for d in "$FAKE"/procs/*; do
-        [ -d "$d" ] && [ ! -f "$d/exited" ] && echo "${d##*/} $(cat "$d/comm")"
+        [ -d "$d" ] && [ ! -f "$d/exited" ] && printf '%5s %5s %s\n' "${d##*/}" "$(cat "$d/ppid" 2>/dev/null || echo 1)" "$(cat "$d/comm")"
     done
     exit 0
 fi
@@ -79,7 +84,7 @@ d="$FAKE/procs/${!#}"
 [ -d "$d" ] && [ ! -f "$d/exited" ] || exit 1
 case "$1" in
     eww) echo "$(cat "$d/args") $(cat "$d/env")" ;;
-    -ww) cat "$d/args" ;;
+    -ww) [ ! -f "$d/on_ww" ] || bash "$d/on_ww"; cat "$d/args" ;;
     -o) cat "$d/lstart" ;;
     *) exit 1 ;;
 esac
@@ -112,6 +117,7 @@ case "$1 $2" in
             claude) tail='["❯ ", "────"]' ;;
             *) tail='["› Ask Codex to do anything"]' ;;
         esac
+        [ ! -f "$FAKE/procs/$p/tail" ] || tail=$(cat "$FAKE/procs/$p/tail")
         jq -n --argjson t "$tail" '{result: {terminal: {source: "screen", draft: "", tail: $t}}}' ;;
     "terminal send")
         echo "$term" >>"$FAKE/sent"
@@ -151,7 +157,12 @@ reset() {
     : >"$CLEANUP_KEEP"
 }
 lstart="Mon Nov 17 01:00:00 2026"
+# 会話記録に 1 行足す。tx <sessionId> <JSON の 1 行>
+tx() { mkdir -p "$CLAUDE_CONFIG_DIR/projects/x" && printf '%s\n' "$2" >>"$CLAUDE_CONFIG_DIR/projects/x/$1.jsonl"; }
+# セッションでないプロセス (シェル・MCP のサーバ) を置く。child <pid> <ppid> <コマンド名>
+child() { mkdir -p "$FAKE/procs/$1" && echo "$3" >"$FAKE/procs/$1/comm" && echo "$2" >"$FAKE/procs/$1/ppid"; }
 # proc <pid> <agent> <cwd> <起動時の引数> [sessionId (- なら記録を置かない、空なら sessionId を書かない)]
+# sessionId を書くときは、予約の呼び出しの無い会話記録も置く。
 proc() {
     local d="$FAKE/procs/$1"
     mkdir -p "$d"
@@ -169,6 +180,7 @@ proc() {
             --argjson at "$((($(date +%s) - 360000) * 1000))" '
             {pid: $pid, procStart: $ls, kind: "interactive", status: "idle", statusUpdatedAt: $at, cwd: $cwd}
             + (if $sid == "" then {} else {sessionId: $sid} end)' >"$CLAUDE_CONFIG_DIR/sessions/$1.json"
+        [ -z "${5-}" ] || tx "$5" '{"type":"user","message":{"role":"user","content":"hi"}}'
     fi
 }
 ledger="$STATE_ROOT/cleanup-ledger/ledger.tsv"
@@ -211,19 +223,18 @@ check "台帳に 1 行" ledger_lines 1
 check "種類は session" [ "$(col 2)" = session ]
 check "対象はエージェントと cwd" [ "$(col 3)" = "claude /w/a" ]
 check "規則に idle と閾値" [ "$(col 4)" = "idle 100h >= 24h" ]
-check "戻らないものは空" [ -z "$(col 6)" ]
+check "戻らないものに、resume で戻らない裏の作業" [ "$(col 6)" = "裏のコマンド・モニター・自分で間隔を決める /loop（在ったかは分からない）" ]
 check_restore "戻し方は cd と、許可した引数だけと --resume ID (空白入りの値も 1 つの引数)" \
     "$(printf '%s\n' cd /w/a claude --plugin-dir "$base/plug dir" --plugin-dir "$base/p2" --model opus --effort high --resume SID-1)"
 check "--prefill も位置引数も戻し方に入らない" absent 'prefill|some-command|example\.test'
 
-reset "ID が無ければ一覧から選ぶ"
+# ID が無いと会話記録を引けず、予約を作ったかが分からない (sched-unknown)。
+reset "Claude の ID が無ければ送らない"
 proc 102 claude /w/b "" ""
 bash "$script" stop 102 >/dev/null 2>&1
-check "台帳に 1 行" ledger_lines 1
-check_restore "ID 無しの --resume" "$(printf '%s\n' cd /w/b claude --resume)"
-check "一覧から選ぶと書く" grep -qF '一覧から選ぶ' "$ledger"
-# 対話の zsh は既定で # をコメントにしないので、貼ると注記が引数として渡る。
-check "戻し方に # を使わない" absent '#'
+check "/exit を送らない" sent_none
+check "台帳に書かない" ledger_lines 0
+check "ログに sched-unknown" grep -qF 'pid=102: sched-unknown' "$LOG"
 
 reset "Codex は codex resume"
 proc 201 codex /w/c "--model gpt"
@@ -232,6 +243,9 @@ check "/exit を送る" sent 201
 check "台帳に 1 行" ledger_lines 1
 check "対象は codex と cwd" [ "$(col 3)" = "codex /w/c" ]
 check_restore "codex resume" "$(printf '%s\n' cd /w/c codex resume)"
+check "一覧から選ぶと書く" grep -qF '一覧から選ぶ' "$ledger"
+# 対話の zsh は既定で # をコメントにしないので、貼ると注記が引数として渡る。
+check "戻し方に # を使わない" absent '#'
 
 reset "DRY_RUN は台帳に書かない"
 proc 101 claude /w/a "" SID-1
@@ -287,6 +301,115 @@ proc 101 claude /w/a "" -
 bash "$script" stop 101 >/dev/null 2>&1
 check "/exit を送らない" sent_none
 check "台帳に書かない" ledger_lines 0
+
+# ---- stop: 裏で動くもの (止めると resume で戻らない) ----
+reset "stop-bg-shell: 子孫にシェルが居れば送らない"
+proc 101 claude /w/a "" SID-1
+child 300 101 node
+child 301 300 zsh
+bash "$script" stop 101 >/dev/null 2>&1
+check "/exit を送らない" sent_none
+check "ログに bg-shell" grep -qF 'pid=101: bg-shell' "$LOG"
+
+reset "stop-login-shell-name: ログインシェルの名前 (-/bin/zsh) も数える"
+proc 101 claude /w/a "" SID-1
+child 300 101 -/bin/zsh
+bash "$script" stop 101 >/dev/null 2>&1
+check "/exit を送らない" sent_none
+check "ログに bg-shell" grep -qF 'pid=101: bg-shell' "$LOG"
+
+reset "stop-shell-elsewhere: 対象の子孫でないシェルは数えない"
+child 500 1 -/bin/zsh # 対象のタブのシェル (親)
+proc 101 claude /w/a "" SID-1
+echo 500 >"$FAKE/procs/101/ppid"
+child 501 1 zsh
+child 502 501 bash
+proc 102 claude /w/b "" SID-2 # 別のセッションの子のシェル
+child 503 102 zsh
+bash "$script" stop 101 >/dev/null 2>&1
+check "/exit を送る" sent 101
+check "別のセッションには送らない" not_sent 102
+
+reset "stop-mcp-children: 子孫がシェルでない (空白入りの名前も) なら送る"
+proc 101 claude /w/a "" SID-1
+child 300 101 node
+child 301 300 "npm exec sh"
+child 302 101 /opt/x/bin/zshrc-lint
+bash "$script" stop 101 >/dev/null 2>&1
+check "/exit を送る" sent 101
+
+reset "stop-prompt-checked-last: 入力欄は送る直前に見る"
+proc 101 claude /w/a "" SID-1
+cat >"$FAKE/procs/101/on_ww" <<'EOF'
+echo '["❯ あとでこれを", "────"]' >"$FAKE/procs/101/tail"
+EOF
+bash "$script" stop 101 >/dev/null 2>&1
+check "/exit を送らない" sent_none
+check "ログに input not empty" grep -qF 'pid=101: input not empty' "$LOG"
+
+reset "stop-status-changed-last: 記録は送る直前に読み直す"
+proc 101 claude /w/a "" SID-1
+cat >"$FAKE/procs/101/on_ww" <<'EOF'
+f="$CLAUDE_CONFIG_DIR/sessions/101.json"
+jq '.status = "busy"' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
+EOF
+bash "$script" stop 101 >/dev/null 2>&1
+check "/exit を送らない" sent_none
+check "ログに changed before send" grep -qF 'pid=101: changed before send' "$LOG"
+
+reset "ledger-lost-note: Claude の行にだけ戻らないものを書く"
+proc 101 claude /w/a "" SID-1
+proc 201 codex /w/c ""
+bash "$script" stop 101 201 >/dev/null 2>&1
+check "台帳に 2 行" ledger_lines 2
+check "claude の行に /loop" grep -qF '/loop' <<<"$(awk -F'\t' '$3 == "claude /w/a" { print $6 }' "$ledger")"
+check "codex の行は空" [ -z "$(awk -F'\t' '$3 == "codex /w/c" { print $6 }' "$ledger")" ]
+
+# 会話記録の形は実物に合わせる (tool_use は .message.content[] の要素)。
+reset "stop-scheduled: 予約を作る呼び出しが在るセッションは送らない"
+proc 101 claude /w/a "" SID-1
+tx SID-1 '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"予約します"},{"type":"tool_use","id":"t1","name":"CronCreate","input":{"cron":"*/5 * * * *"}}]}}'
+proc 102 claude /w/b "" SID-2
+tx SID-2 '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t2","name":"ScheduleWakeup","input":{}}]}}'
+listed=$(bash "$script" list 2>/dev/null)
+check "list の残すものに CronCreate の分" grep -qF "$(printf '101\tclaude\t100h\tscheduled')" <<<"$listed"
+check "list の残すものに ScheduleWakeup の分" grep -qF "$(printf '102\tclaude\t100h\tscheduled')" <<<"$listed"
+bash "$script" stop 101 102 >/dev/null 2>&1
+check "/exit を送らない" sent_none
+check "ログに scheduled (CronCreate)" grep -qF 'pid=101: scheduled' "$LOG"
+check "ログに scheduled (ScheduleWakeup)" grep -qF 'pid=102: scheduled' "$LOG"
+
+reset "stop-scheduled-mention: 道具の一覧や本文の名前だけなら送る"
+proc 101 claude /w/a "" SID-1
+tx SID-1 '{"type":"system","shape":{"tools":[{"name":"CronCreate","description":"Schedule a prompt"},{"name":"ScheduleWakeup","description":"/loop"}]}}'
+tx SID-1 '{"type":"attachment","attachment":{"addedNames":["CronCreate","ScheduleWakeup"]}}'
+tx SID-1 '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"CronCreate は使わない"},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"echo ScheduleWakeup"}}]}}'
+bash "$script" stop 101 >/dev/null 2>&1
+check "/exit を送る" sent 101
+
+reset "stop-sched-unknown: 会話記録が無ければ送らない"
+proc 101 claude /w/a "" SID-1
+rm -f "$CLAUDE_CONFIG_DIR/projects/x/SID-1.jsonl"
+bash "$script" stop 101 >/dev/null 2>&1
+check "/exit を送らない" sent_none
+check "ログに sched-unknown" grep -qF 'pid=101: sched-unknown' "$LOG"
+bash "$script" scan >/dev/null 2>&1
+check "scan のログに sched_unknown=1" grep -qE '^[^ ]+ [^ ]+ scan .* sched_unknown=1( |$)' "$LOG"
+
+# 時刻を除いたログと通知が同じであること。2 回目は鍵が知らせ済みにならないよう、状態を消してから流す。
+scan_out() { # scan_out <scan の引数...>: reset 済みの状態で 1 本置いて scan を流し、ログ (時刻を除く) と通知を出す
+    proc 101 claude /w/a "" SID-1
+    bash "$script" scan "$@" >/dev/null 2>&1
+    sed 's/^[^ ]* [^ ]* //' "$LOG"
+    echo "--"
+    cat "$FAKE/notified" 2>/dev/null
+}
+reset "scan-auto-ignored: scan --auto は scan と同じ"
+plain=$(scan_out)
+reset "scan-auto-ignored: scan --auto は scan と同じ"
+auto=$(scan_out --auto)
+check "候補を知らせる" grep -qF '止める候補 1 本' <<<"$plain"
+check "ログと通知が同じ" same "$auto" "$plain"
 
 # ---- stop: 「触らない」リスト ----
 reset "リストが無い回は 1 本も止めない"
