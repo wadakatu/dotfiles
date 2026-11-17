@@ -454,10 +454,10 @@ Orca でピン留めした worktree も、`$REPO` の節と Orca の節の両方
 
 新しい判定は `~/.config/worktree-gc.env` の `RULE_<規則名>=off|list|on` で有効にする（`home/scripts/cleanup-ledger.sh` の `rule_mode`）。
 未設定と、3 つのどれでもない値は `off`。マージした次の毎時から本番で動くので、マージと有効化をここで分ける。
-`list` は何も止めず消さず、止める・消す予定を下の台帳に種類 `plan-…` の行で書く（`ledger_plan`。同じ予定は 1 度だけ書き、通知には数えない）。予定だけを見るには次の 1 行。
+`list` は何も止めず消さず、止める・消す予定を下の台帳に種類 `plan-…` の行で書く（`ledger_plan`。同じ予定は 1 度だけ書き、通知には数えない）。予定だけを見るには次の 1 行（種類の列だけを見る）。
 
 ```sh
-grep "$(printf '\tplan-')" "$HOME/Library/Application Support/cleanup-ledger/ledger.tsv" | column -t -s "$(printf '\t')"
+awk -F'\t' '$2 ~ /^plan-/' "$HOME/Library/Application Support/cleanup-ledger/ledger.tsv" | column -t -s "$(printf '\t')"
 ```
 
 `git worktree remove` はブランチを消さないので、コミットは常に残る。ただし ignore された
