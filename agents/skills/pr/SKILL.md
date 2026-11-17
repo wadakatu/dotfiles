@@ -16,21 +16,26 @@ description: 実装が一区切りつき、変更をレビューに出す段階�
 2. **適切な粒度でのコミット作成**
     - `/commit` と同じ規約でコミットを作成する（既定=英語 Conventional Commits、プロジェクト側の明示規約が優先、`Co-Authored-By` トレーラー禁止）
 
-3. **動かして確かめる**
+3. **issue と突き合わせる**（この PR で閉じる issue が在るときだけ。issue-worker の手順から本文の形だけを読みに来たときは行わない）
+    - [issue-check.md](issue-check.md) を読み、そのとおりにサブエージェントを 1 回呼ぶ。結果が届くまで（裏で走ったら完了の通知まで）次の手順へ進まない
+    - 指摘はコードと issue で裏を取ってから扱う。裏が取れた漏れ・食い違いは直して commit する。頼まれていない変更は、この PR に要るなら残し、要らなければ外す。直した分は、実装レビュー済みならレビューに通し直す。直さない・残すと決めたものは本文の「判断」に 1 行。裏が取れないものは本文に書かず、報告に理由を添える
+    - 詳細の「検証」に `issue 照合: 指摘 <n>、直した <m>` を足す。呼べない（Agent ツールが無い）・失敗したときは、やり直さず外の「未検証」に `issue 照合（<理由>）` と書く。テンプレートを使うリポジトリでは、検証にあたる欄に書く
+
+4. **動かして確かめる**
     - 変更を動かして確かめる skill があれば（使える skill の一覧やリポジトリの CLAUDE.md で探す）、push の前に実行する。この変更ですでに確かめていれば省く
     - 確かめるケースと期待する結果は、diff・issue・依頼から自分で決める。正常系に加え、境界のケースと、バグ修正なら修正前の再現も入れる
     - 動かす対象が無い変更（ドキュメント・CI・設定だけ）は、詳細の「検証」にその旨を書く。環境の都合で確かめられなかったときは、外の「未検証」に 1 行書く
 
-4. **ブランチのプッシュ**
+5. **ブランチのプッシュ**
     - `git push -u origin <current-branch>` でリモートにプッシュ
 
-5. **PR 作成**
+6. **PR 作成**
     - `gh pr create` で作成
     - **リポジトリに `.github/PULL_REQUEST_TEMPLATE.md` や直近 PR から読み取れるタイトル規約がある場合はそちらが最優先**で、下記の既定は使わない。テンプレートの条件付きセクション（migration チェックリスト等）は該当時に必ず埋める
     - タイトルは既定でプロジェクト指定の言語 + 種別プレフィックス: `Bugfix:` / `Refactoring:` / `New Feature:` / `Incident:` / `Document:`
     - draft で出したときは、ユーザーへの報告に draft にした理由と、ready にする条件を書く
 
-6. **Orca への書き戻し**（Orca が管理する worktree のときだけ）
+7. **Orca への書き戻し**（Orca が管理する worktree のときだけ）
     - `orca worktree current --json` が `"ok": true` のときに、次の 2 つを実行する
         - `orca reference add <PR の URL> --worktree current --json`
         - `orca worktree set --worktree current --workspace-status in-review --comment "PR #<番号>" --json`
@@ -89,3 +94,5 @@ Closes #<この PR で閉じる issue>
 - **push するものが無い** — 未コミットの変更も base との差分もない場合は中断
 - **同じブランチの PR が既に開いている** — `gh pr view --json url,state` で確認。あれば新規作成せず、既存 PR への push で足りるかを確認する
 - **`gh` の認証エラー** — `gh auth status` の出力をそのまま提示して中断。自分で再認証を試みない
+
+手順 3 は mattpocock/skills の code-review（Spec の軸。MIT, Matt Pocock, 5863806）の要点を抜き出したもの。
