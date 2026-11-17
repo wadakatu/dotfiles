@@ -3,6 +3,7 @@
 - v1（2026-11-02）: 自分で TERM → KILL し、子孫と agent-resume の印を片付ける案。
 - v2（2026-11-02）: Codex の設計レビューで、KILL の経路に穴が多いと分かった（同じプロセスのまま別のセッションに切り替わる、子孫の範囲、印の競合、終了の確認）。
   止め方を「Orca の端末に `/exit` を送り、エージェント自身に終わってもらう」に変え、ユーザーの承認を得た。
+- v3（#187）: 自動で止める前の柵。巡回を origin/main の写しに替え、子孫のシェルと予約を作ったセッションを残し、送る直前に記録と入力欄を確かめ直し、台帳に戻らないものを書く。
 
 材料の出典：
 
@@ -31,12 +32,13 @@
 ## 2. 全体像
 
 ```
-launchd（StartInterval 600）→ agent-gc.sh scan
+launchd（StartInterval 600）→ agent-gc-launcher scan --auto（origin/main の写しの agent-gc.sh）
   1. memory pressure を読む
   2. Claude と Codex のプロセスを集め、1 本ずつ材料を JSON 1 行にする（3.1）
   3. judge（純粋な jq）で、候補か、keep とその理由かを決める（3.2）
-  4. まだ知らせていない候補があれば通知する（4.1）
-  5. ログに 1 行書く
+  4. sched で、候補の Claude のうち予約を作ったものを keep にする（3.3）
+  5. まだ知らせていない候補があれば通知する（4.1）
+  6. ログに 1 行書く
 
 ユーザー: agent-gc list           … 候補と、残した理由を一覧にし、listed.tsv に書く
           agent-gc stop <pid>...  … 判定し直し、入力欄が空なら /exit を送り、終わったかを確かめる
@@ -44,6 +46,8 @@ launchd（StartInterval 600）→ agent-gc.sh scan
 ```
 
 1 つのスクリプト `home/scripts/agent-gc.sh` にまとめる。言語は既存のジョブと同じ bash と jq。launchd は `/bin/bash`（3.2）で起動するので、連想配列は使わない。
+
+巡回は、worktree-gc・pr-dispatch と同じく `home/run-from-main.nix` の起動スクリプトで origin/main の写しを動かす（checkout がレビュー前のブランチに居ても、その版は無人で動かない）。起動スクリプトは引数をそのまま渡す。`--auto` は LaunchAgent からの巡回の印で、今の `scan` は読まない（`scan` と同じに動く）。手で打つ `agent-gc`（`~/.local/bin/agent-gc`）は checkout のまま。
 
 ## 3. 判定
 
@@ -55,6 +59,9 @@ launchd（StartInterval 600）→ agent-gc.sh scan
   - 引数の中にも同じ文字列が出ることがある（codex の `-c shell_environment_policy.set.ORCA_...`）。そのため、前が空白の `NAME=` だけを拾い、最後に出たものを使う。環境変数は引数の後ろに並ぶ。
 - `TZ=UTC ps -o lstart= -p <pid>` を、プロセスの開始時刻とする。止める直前に、この値で同じプロセスかを確かめる。
 - 鍵は `<pid>:<開始時刻>:<最後の状態変化の時刻>`。通知の重複防止と、list で見せたものと同じかの照合に使う（4 節）。
+- `ps -axo pid=,ppid=,comm=` を 1 回の collect につき 1 回だけ取り、セッションの pid から子孫を辿る（`bg_shell`）。コマンド名は空白を含みうるので 3 列目から行末までを取り、先頭の `-`（ログインシェル）とディレクトリを落とした名前が `zsh`・`bash`・`sh`・`fish` のプロセスが居れば `true`、居なければ `false`。タブのシェルは祖先なので数えない。
+  - 裏の Bash コマンドが走っている間は、claude の子孫にシェルが残る（Claude Code v2.1.326 の 1 例。そのときの記録の `status` は `shell` で、表の 2 でも残る）。公式が挙げる `status` は `busy`・`waiting`・`idle` だけなので、版が変わって `idle` と出ても残せるよう、プロセスの側でも見る。
+  - ponytail: MCP のサーバをシェルのスクリプトで包んで起動している環境では、全部のセッションが `bg-shell` で残る（`agent-gc list` の「残すもの」に出る）。そうなったら、除く名前を設定で渡す。
 
 **Claude**（`~/.claude/sessions/<pid>.json`。非公式の形式）
 
@@ -104,7 +111,7 @@ launchd（StartInterval 600）→ agent-gc.sh scan
 > - 10 分平均では、短い負荷を取りこぼす。待ちの多い処理も拾えない。
 > - idle の MCP と、動いている子を区別できない。
 >
-> 代わりに、止める前にユーザーが list を見る。Claude には終了時の確認もある。必要が出たら「Claude のバックグラウンドタスクの有無」を材料に足す。
+> 代わりに、子孫にシェルが居るか（上の `bg_shell`）と、予約を作ったか（3.3）を見る。モニターは見分けられない（動いている間の `status` も確かめていない）。
 
 ### 3.2 判定（`agent-gc.sh judge`）
 
@@ -121,11 +128,22 @@ stdin から 1 セッション 1 行の JSON を受け取り、`reason` を足�
 | 7 | subagent に、`done`・`idle` 以外がある | `orca-sub <state>` |
 | 8 | `workspace_status` が文字列でない | `orca-incomplete` |
 | 9 | `workspace_status == "needs-decision"` | `needs-decision` |
-| 10 | パスが `EXCLUDE_RE` に合う | `excluded` |
+| 10 | `bg_shell` が `true`。`false` 以外（欠け）も残す | `bg-shell` / `bg-unknown` |
+| 11 | パスが `EXCLUDE_RE` に合う | `excluded` |
 
 judge は macOS のコマンドを呼ばない。このため Linux の CI でもテストできる。
 
 Orca 上で working が古いまま残っているもの（実測で 2 本）は、表の 6 で keep になる。`agent-gc list` に `orca working` と出るので、ユーザーは目で拾える。
+
+### 3.3 予約を作ったセッション（`sched`。Claude だけ）
+
+未発火の予約タスク（`CronCreate`・`/loop`）は記録の `status` に出ない（1 例では、未発火の一度きりの予約が残る間も `idle` で、子孫にシェルも居なかった）。止めると、自分で間隔を決める `/loop` は `claude --resume` で戻らない（https://code.claude.com/docs/en/scheduled-tasks.md の Limitations）。未発火かを外から読む方法は確かめていないので、「会話記録に予約を作る呼び出しが 1 つでも在るセッションは残す」で粗く守る。
+
+- `collect | judge` の後ろの 1 段で、`scan`・`list`・`stop` の 3 か所で通す。jq だけの judge には入れない（ファイルを読むため）。
+- `reason` が null の Claude の行だけ、会話記録 `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/*/<sessionId>.*`（退避された写しも含む）を読む。深さを問わず、`type` が `tool_use` で `name` が `CronCreate` か `ScheduleWakeup` の要素が 1 つでも在れば `scheduled`。実物では `.message.content[]` に在る。
+- 道具の名前は、道具の一覧（`shape.tools[]`）・`attachment.addedNames[]`・本文にも出るので、文字列の一致では決めない。会話記録は数十 MB になるので、`grep -F` で行を絞ってから jq で確かめる。
+- 会話記録が見つからない・読めない、`sessionId` が無いか ID の形（英数字・`-`・`_`）でない、grep に当たった行が JSON として読めないときは `sched-unknown`。どちらも keep で、`stop` は `skip <pid>: <理由>`、`list` の「残すもの」にも同じ理由で出る。`scan` のログの `sched_unknown=<n>` で、会話記録の無いセッションが黙って溜まらないようにする。
+- ponytail: 済んだ予約・消した予約でも残る。未発火だけを見分けるなら、`CronDelete` と発火を突き合わせる。予約を作った後に会話を替えた（`/clear`・`/resume`）セッションと、プロジェクトの永続の予約（`.claude/scheduled_tasks.json`）は見ない。
 
 ## 4. 通知と list
 
@@ -166,9 +184,16 @@ DRY_RUN=1 agent-gc stop …  判定し直して、止める対象を表示する
 - 共有ファイル `home/scripts/cleanup-ledger.sh` を、スクリプトの実体の隣から読む。`~/.local/bin/agent-gc` は nix の store を挟んだ symlink の連なりなので、`readlink` を 1 段ずつ辿って実体を求める。読めなければ 1 本も止めない（scan と list は今どおり）。
 - 「触らない」リスト（`keep_load`）を読む。無い・読めない回（解釈できない行がある回を含む）は 1 本も `/exit` を送らず、ログに理由を書き、通知をその日 1 回だけ出す（印は「無い」が `keep-missing-warned`、「読めない行が在る」が `keep-unreadable-warned` で、同じ日に両方出せる。worktree-gc のものとは別。`DRY_RUN=1` では通知も印も出さない）。
 
-1. 材料を取り直して judge に通す。候補でなければ `skip <pid>: <理由>` とする。`--listed` のときは、鍵が listed.tsv と違えば `skip <pid>: changed since list` とする。cwd が空か絶対パスでなければ（記録に `cwd` が無い、Codex の `lsof` が失敗した）、リストに当たるか判定できないので `skip <pid>: cwd が分からない` とする。cwd が「触らない」リストの行そのものか行の下なら（`keep_match`。行が cwd の中を指す祖先の一致は使わない。セッションを止めても中身は消えないため）skip する。`EXCLUDE_RE` は judge の表の 10 に残し、どちらかに当たれば止めない。
+1. 材料を取り直して judge と sched に通す。候補でなければ `skip <pid>: <理由>` とする。`--listed` のときは、鍵が listed.tsv と違えば `skip <pid>: changed since list` とする。cwd が空か絶対パスでなければ（記録に `cwd` が無い、Codex の `lsof` が失敗した）、リストに当たるか判定できないので `skip <pid>: cwd が分からない` とする。cwd が「触らない」リストの行そのものか行の下なら（`keep_match`。行が cwd の中を指す祖先の一致は使わない。セッションを止めても中身は消えないため）skip する。`EXCLUDE_RE` は judge の表の 11 に残し、どちらかに当たれば止めない。
 2. `ORCA_TERMINAL_HANDLE` が `orca terminal list` にあり、その `agentIdentity` がこのエージェント（claude / codex）であることを確かめる。そうでなければ skip する。
-3. `orca terminal read --screen` の末尾から、入力欄が空であることを確かめる。書きかけの文字があるところに `/exit` を送ると、それが続けて送信されてしまうため。
+3. 戻し方と規則を組む。セッション ID（`sessions/<pid>.json` の `sessionId`）も起動時の引数も終了で消えるので、送る前に控える。下の (a)・(b) の後に外部コマンド（`ps`・`jq`）を挟まないよう、確認より先に組む。
+   - Claude：`cd <cwd> && claude <引数> --resume <ID>`。引数は、起動時の引数のうち `--plugin-dir`・`--model`・`--effort`（`--flag 値` と `--flag=値` の両方。値が空か `-` で始まるものは除く）だけを `printf %q` で付ける。位置引数の指示（`/some-command <URL>`）や `--prefill` は、再開のときに次のターンとして実行されるので付けない。
+     - 引数を `--resume` の前に置くのは、この戻し方で再開したセッションを次に止めたとき、`--resume` の ID を位置引数と取り違えて引数を落とさないため。走査は `--resume`・`-r` とその値（`-` で始まらないトークン）を読み飛ばす。
+     - `ps` は argv の境界を残さないので、`--plugin-dir` の値は続くトークンを足して実在するディレクトリになる最長のものにする（`~/Library/Application Support/...` のように空白を含む）。走査は位置引数の始まりで止める。
+   - Codex：`cd <cwd> && codex resume`（一覧から選ぶ）。ID は rollout の 1 行目（`session_meta`）から引けそうだが、`codex resume <ID>` で再開まで通るかを確かめていないので残さない。
+   - ID が無ければ、先頭に `: 一覧から選ぶ;` を付ける。`#` のコメントにしないのは、対話の zsh が既定で `interactive_comments` を無効にしていて、貼ると注記が引数として渡るため。
+4. (a) 記録を読み直す。判定の後に始まったターンを拾うため。Claude は `sessions/<pid>.json` の `status` が `idle` で、`statusUpdatedAt`（無ければ `updatedAt`）が判定時（鍵の最後の欄）と同じこと。Codex は `codex_state` が idle で、時刻が判定時と同じこと。違えば `skip <pid>: changed before send`。
+5. (b) `orca terminal read --screen` の末尾から、入力欄が空であることを確かめる。書きかけの文字があるところに `/exit` を送ると、それが続けて送信されてしまうため。
    - `--screen` を付けないと、描画された画面ではなく出力の履歴が返る。そうすると、後から差分で描かれた書きかけを見落とす。応答の `source` が `screen` でなければ、止めない。
    - `draft`（Orca の入力欄に書きかけの文字）があるときも、止めない。
    - Claude：最後の `❯` の行が `❯` だけで、その次の行が入力欄の下の罫線である。複数行の書きかけは、2 行目以降に出るため。
@@ -176,16 +201,10 @@ DRY_RUN=1 agent-gc stop …  判定し直して、止める対象を表示する
      - 実測では、空の入力欄にこの placeholder が出ていた。
      - 書きかけの文字と placeholder は文字だけでは見分けられないので、この文言のときだけを空とみなす。
    - 当たらなければ `skip <pid>: input not empty`。
-4. `DRY_RUN=1` なら、ここで `would stop` を出して次へ進む。
-5. 戻し方を組む。セッション ID（`sessions/<pid>.json` の `sessionId`）も起動時の引数も終了で消えるので、送る前に控える。
-   - Claude：`cd <cwd> && claude <引数> --resume <ID>`。引数は、起動時の引数のうち `--plugin-dir`・`--model`・`--effort`（`--flag 値` と `--flag=値` の両方。値が空か `-` で始まるものは除く）だけを `printf %q` で付ける。位置引数の指示（`/some-command <URL>`）や `--prefill` は、再開のときに次のターンとして実行されるので付けない。
-     - 引数を `--resume` の前に置くのは、この戻し方で再開したセッションを次に止めたとき、`--resume` の ID を位置引数と取り違えて引数を落とさないため。走査は `--resume`・`-r` とその値（`-` で始まらないトークン）を読み飛ばす。
-     - `ps` は argv の境界を残さないので、`--plugin-dir` の値は続くトークンを足して実在するディレクトリになる最長のものにする（`~/Library/Application Support/...` のように空白を含む）。走査は位置引数の始まりで止める。
-   - Codex：`cd <cwd> && codex resume`（一覧から選ぶ）。ID は rollout の 1 行目（`session_meta`）から引けそうだが、`codex resume <ID>` で再開まで通るかを確かめていないので残さない。
-   - ID が無ければ、先頭に `: 一覧から選ぶ;` を付ける。`#` のコメントにしないのは、対話の zsh が既定で `interactive_comments` を無効にしていて、貼ると注記が引数として渡るため。
-6. `orca terminal send --terminal <handle> --text /exit --enter` を送る。
-7. 最大 20 秒、プロセスが消えるのを待つ。開始時刻が変わった場合も、消えたとみなす。
-   - 消えたら：`stopped` をログに書き、共有の台帳（`ledger_add`）に 1 行足す。種類 `session`、対象 `<agent> <cwd>`、規則 `idle <n>h >= <閾値>h`（pressure が WARN 以上なら ` (memory pressure WARN)`）、戻し方、戻らないもの（空）。
+6. `DRY_RUN=1` なら、ここで `would stop` を出して次へ進む。(b) の後は、外部コマンドを挟まずに 7 を送る。
+7. `orca terminal send --terminal <handle> --text /exit --enter` を送る。
+8. 最大 20 秒、プロセスが消えるのを待つ。開始時刻が変わった場合も、消えたとみなす。
+   - 消えたら：`stopped` をログに書き、共有の台帳（`ledger_add`）に 1 行足す。種類 `session`、対象 `<agent> <cwd>`、規則 `idle <n>h >= <閾値>h`（pressure が WARN 以上なら ` (memory pressure WARN)`）、戻し方、戻らないもの。戻らないものは、Claude は `裏のコマンド・モニター・自分で間隔を決める /loop（在ったかは分からない）`（`claude --resume` は期限内の `CronCreate` の予約を戻すが、これらは戻さない。https://code.claude.com/docs/en/scheduled-tasks.md の Limitations）、Codex は空（確かめていない）。
    - 消えなければ：`failed: still running` をログに書き、KILL はしない。終了の確認画面などで止まっている可能性がある。ユーザーが端末を見て判断する。`/exit` は届いていて待ち時間の後で終わることもあるので、台帳にも規則に ` (/exit 送信済み・終了は未確認)` を付けて 1 行足す。
 
 ログの例：
@@ -194,6 +213,8 @@ DRY_RUN=1 agent-gc stop …  判定し直して、止める対象を表示する
 2026-11-02 22:40:01 stopped claude pid=15450 idle=80h wt=/Users/.../gardening
 2026-11-02 22:40:22 failed claude pid=31218: still running after /exit
 2026-11-02 22:40:22 skip codex pid=68047: input not empty
+2026-11-02 22:40:23 skip claude pid=50112: bg-shell
+2026-11-02 22:40:23 skip claude pid=50190: scheduled
 ```
 
 Orca のタブは閉じない。シェルが残るので、表示された `claude --resume <id>` か `codex resume <id>` で、そこから再開できる。
@@ -209,7 +230,7 @@ Orca のタブは閉じない。シェルが残るので、表示された `clau
 
 ## 7. 安全策
 
-- 自動では止めない。stop は止める直前に必ず判定し直し、鍵・端末・入力欄を確かめる。
+- 自動では止めない。stop は止める直前に必ず判定し直し、鍵・端末を確かめ、送る直前に記録と入力欄を続けて確かめ直す。
 - 材料が欠けたら、keep に倒す。
 - KILL しない。`/exit` で終わらなければ、失敗としてログに残すだけにする。
 - 形式の変化を検知する：claude のプロセスがあるのに、読めた記録が 0 本なら、`WARN` をログに書き、その日 1 回だけ通知する。
@@ -236,14 +257,14 @@ Orca のタブは閉じない。シェルが残るので、表示された `clau
 ログは `~/Library/Logs/agent-gc.log`。scan は毎回 1 行書く。stop は 1 件ごとに 1 行書き、端末にも出す。
 
 ```
-2026-11-02 22:30:00 scan pressure=2 sessions=36 candidates=15 new=3 unreadable=1
+2026-11-02 22:30:00 scan pressure=2 sessions=36 candidates=15 new=3 unreadable=1 sched_unknown=0
 ```
 
 ## 9. テスト
 
-`tests/agent-gc.sh` に置く。CI（`nix.yml` の check ジョブ）で回す。judge と prompt-empty は偽のコマンドを使わずに試す。stop（#157 の台帳と「触らない」リスト）は `ps`・`lsof`・`sysctl`・`orca`・`osascript`・`sleep` を偽物にして試す。偽の `ps` は本物と同じく引数を空白で繋いだ 1 行で返す。
+`tests/agent-gc.sh` に置く。CI（`nix.yml` の check ジョブ）で回す。judge と prompt-empty は偽のコマンドを使わずに試す。stop（#157 の台帳と「触らない」リスト、#187 の子孫のシェル・予約・送る直前の確認）は `ps`・`lsof`・`sysctl`・`orca`・`osascript`・`sleep` を偽物にして試す。偽の `ps` は本物と同じく引数を空白で繋いだ 1 行で返す。
 
-- `agent-gc.sh judge` に JSON の行を流し、表の 1〜10 の各理由と候補を照合する。
+- `agent-gc.sh judge` に JSON の行を流し、表の 1〜11 の各理由と候補を照合する。
   - pressure による閾値の切り替え。
   - 値が欠けたときに keep になること。
   - Codex の候補。
@@ -277,7 +298,7 @@ ps・lsof・orca からの収集は macOS 専用で、形式も非公式なの�
 
 ## 12. 後回しにしたこと
 
-- 子孫の CPU やバックグラウンドタスクによる判定（3.1 の ponytail）。
+- 子孫の CPU による判定と、モニターの検出（3.1 の ponytail）。未発火の予約だけを見分けること（3.3）。
 - Orca の外のセッション。
 - 候補が残り続けるときの再通知。
 - Orca のカードへの印。

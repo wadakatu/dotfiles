@@ -1,7 +1,8 @@
 #!/bin/bash
 # 放置された Claude / Codex のセッションを見つけて知らせ、ユーザーが確かめたものだけを
 # Orca の端末に /exit を送って終わらせる。KILL はしない。設計は docs/agent-gc-design.md。
-#   agent-gc.sh scan              launchd が 10 分ごとに回す。新しい候補があれば通知する
+#   agent-gc.sh scan --auto       launchd が 10 分ごとに origin/main の写しで回す。新しい候補があれば通知する
+#                                 (--auto は巡回の印。今は読まず、scan と同じに動く)
 #   agent-gc list                 候補と残した理由を一覧にし、listed.tsv に書く
 #   agent-gc stop <pid>...        判定し直し、入力欄が空なら /exit を送る (DRY_RUN=1 で表示だけ)
 #   agent-gc stop --listed        最後に list で見せた候補を止める
@@ -17,6 +18,7 @@ EXCLUDE_RE=${EXCLUDE_RE:-}     # 候補にしないパスの正規表現 (「触
 STATE_DIR=${STATE_DIR:-"${STATE_ROOT:-$HOME/Library/Application Support}/agent-gc"}
 LOG=${LOG:-"$HOME/Library/Logs/agent-gc.log"}
 CLAUDE_SESSIONS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/sessions"
+CLAUDE_PROJECTS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"
 
 # 止めたものの台帳と「触らない」リストは、掃除ジョブの共有ファイル cleanup-ledger.sh から読む。
 # ~/.local/bin/agent-gc は nix の store を挟んだ symlink の連なりでこのファイルを指すので、BASH_SOURCE の
@@ -67,6 +69,8 @@ judge() {
             elif ($sub | length) > 0 then "orca-sub \($sub[0])"
             elif (.orca.workspace_status | type) != "string" then "orca-incomplete"
             elif .orca.workspace_status == "needs-decision" then "needs-decision"
+            elif .bg_shell == true then "bg-shell"
+            elif .bg_shell != false then "bg-unknown"
             elif $exclude != "" and ((.path // "") | test($exclude)) then "excluded"
             else null end)'
 }
@@ -108,7 +112,7 @@ codex_state() {
 # 1 セッション 1 行の JSON を出す。pid を渡せばその 1 本だけ。macOS 専用。
 collect() {
     local only=${1:-}
-    local now pressure orca_json orca_ok pid comm envs lstart pane term wt f readable status ts path key st sid
+    local now pressure orca_json orca_ok pid comm bg envs lstart pane term wt f readable status ts path key st sid
     now=$(date +%s)
     pressure=$(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null || echo 0)
     orca_ok=false
@@ -119,7 +123,37 @@ collect() {
         orca_json='{}'
     fi
 
-    ps -axo pid=,comm= | awk -v only="$only" '($2 == "claude" || $2 == "codex") && (only == "" || $1 == only) { print $1, $2 }' | while read -r pid comm; do
+    # プロセスの一覧は 1 回だけ取り、セッションごとに子孫を辿る。子孫にシェルが居れば、ターンを終えた後も
+    # 裏のコマンドが走っている (止めると resume で戻らない)。コマンド名は空白を含みうるので 3 列目から行末まで取り、
+    # 先頭の - (ログインシェル) とディレクトリを落として比べる。タブのシェルは祖先なので数えない。
+    # ponytail: MCP のサーバをシェルのスクリプトで包んで起動している環境では、全部のセッションが bg-shell で残る
+    # (agent-gc list の「残すもの」に出る)。そうなったら、除く名前を設定で渡す。
+    ps -axo pid=,ppid=,comm= | awk -v only="$only" '
+        match($0, /^ *[0-9]+ +[0-9]+ /) {
+            split(substr($0, 1, RLENGTH), f, " ")
+            comm = substr($0, RLENGTH + 1)
+            n++; P[n] = f[1]; C[n] = comm; kids[f[2]] = kids[f[2]] " " f[1]
+            name = comm; sub(/^-/, "", name); sub(/.*\//, "", name)
+            if (name == "zsh" || name == "bash" || name == "sh" || name == "fish") shell[f[1]] = 1
+        }
+        END {
+            for (i = 1; i <= n; i++) {
+                if ((C[i] != "claude" && C[i] != "codex") || (only != "" && P[i] != only)) continue
+                bg = "false"; q = P[i]; split("", seen); seen[P[i]] = 1
+                while (q != "" && bg == "false") {
+                    m = split(q, cur, " "); q = ""
+                    for (j = 1; j <= m; j++) {
+                        k = split(kids[cur[j]], ch, " ")
+                        for (l = 1; l <= k; l++) {
+                            if (ch[l] in seen) continue
+                            seen[ch[l]] = 1; q = q " " ch[l]
+                            if (ch[l] in shell) bg = "true"
+                        }
+                    }
+                }
+                print P[i], C[i], bg
+            }
+        }' | while read -r pid comm bg; do
         envs=$(ps eww -o command= -p "$pid" 2>/dev/null) || continue
         lstart=$(lstart_of "$pid")
         pane=$(env_of "$envs" ORCA_PANE_KEY)
@@ -155,14 +189,61 @@ collect() {
         jq -cn --argjson pid "$pid" --arg agent "$comm" --arg lstart "$lstart" --arg key "$key" \
             --argjson readable "$readable" --arg status "$status" --arg ts "$ts" --argjson now "$now" \
             --argjson pressure "$pressure" --arg path "$path" --arg term "$term" --arg wt "$wt" \
-            --arg pane "$pane" --argjson orca_ok "$orca_ok" --argjson o "$orca_json" --arg sid "$sid" '
+            --arg pane "$pane" --argjson orca_ok "$orca_ok" --argjson o "$orca_json" --arg sid "$sid" --arg bg "$bg" '
             ([$o.result.worktrees[]? as $w | $w.agents[]? | select($pane != "" and .paneKey == $pane)
               | {state, workspace_status: $w.workspaceStatus}] | first) as $a
             | {pid: $pid, agent: $agent, lstart: $lstart, key: $key, readable: $readable, sid: $sid,
                status: $status, idle_sec: (if $ts == "" then null else $now - ($ts | tonumber) end),
                pressure: $pressure, path: $path, term: $term, worktree: $wt,
+               bg_shell: (if $bg == "true" then true elif $bg == "false" then false else null end),
                orca: {ok: $orca_ok, found: ($a != null), state: $a.state, workspace_status: $a.workspace_status,
                       sub_states: [$o.result.worktrees[]?.agents[]? | select($pane != "" and .parentPaneKey == $pane) | .state]}}'
+    done
+}
+
+# judge の後ろの 1 段。候補の Claude のうち、会話記録に予約を作る呼び出し (CronCreate・ScheduleWakeup の tool_use) が
+# 在るものを scheduled、会話記録が引けないものを sched-unknown にする (どちらも keep)。未発火の予約は記録の status に
+# 出ず、止めると自分で間隔を決める /loop は戻らない。jq だけの judge に置かないのは、ファイルを読むため。
+# 道具の名前は道具の一覧や本文にも出るので、文字列の一致では決めない。数十 MB になるので grep で行を絞り、
+# 当たった行を jq で tool_use の要素か確かめる。当たった行が JSON として読めなければ、分からないとして残す。
+# ponytail: 済んだ予約・消した予約でも残る。未発火だけを見分けるなら、CronDelete と発火を突き合わせる。
+sched() {
+    local row sid f got ok err
+    while IFS= read -r row; do
+        if ! jq -e '.agent == "claude" and .reason == null' <<<"$row" >/dev/null 2>&1; then
+            printf '%s\n' "$row"
+            continue
+        fi
+        sid=$(jq -r '.sid // ""' <<<"$row")
+        got="" ok=0 err=0
+        # ID は glob に入れるので、ID の形でないもの (空も) は引かない。
+        case $sid in
+            '' | *[!A-Za-z0-9_-]*) ;;
+            *)
+                # 退避された写し (<ID>.* の別名) も読む。
+                for f in "$CLAUDE_PROJECTS"/*/"$sid".*; do
+                    [ -f "$f" ] || continue
+                    # "<0 予約なし / 1 読めない行 / 2 予約あり> <grep の終了コード> <jq の終了コード>"。grep は 1 が当たらない、2 が読めない。
+                    got=$(grep -h -F -e CronCreate -e ScheduleWakeup -- "$f" 2>/dev/null |
+                        jq -njR 'reduce (inputs | try (fromjson
+                                | if any(.. | objects; .type == "tool_use" and (.name == "CronCreate" or .name == "ScheduleWakeup"))
+                                  then 2 else 0 end) catch 1) as $s (0; if $s > . then $s else . end)' 2>/dev/null
+                        printf ' %s %s' "${PIPESTATUS[0]}" "${PIPESTATUS[1]}")
+                    case $got in
+                        "2 "[01]" 0") got=scheduled; break ;;
+                        "0 "[01]" 0") ok=1 ;;
+                        *) err=1 ;;
+                    esac
+                done
+                ;;
+        esac
+        if [ "$got" = scheduled ]; then
+            jq -c '.reason = "scheduled"' <<<"$row"
+        elif [ "$ok" = 1 ] && [ "$err" = 0 ]; then
+            printf '%s\n' "$row"
+        else
+            jq -c '.reason = "sched-unknown"' <<<"$row"
+        fi
     done
 }
 
@@ -170,7 +251,7 @@ scan() {
     local rows cands n new seen alive
     mkdir -p "$STATE_DIR"
     touch "$STATE_DIR/notified.tsv"
-    rows=$(collect | judge)
+    rows=$(collect | judge | sched)
     cands=$(jq -r 'select(.reason == null) | .key' <<<"$rows")
     n=$(grep -c . <<<"$cands")
     new=$(grep -vxF -f "$STATE_DIR/notified.tsv" <<<"$cands" | grep -c .)
@@ -189,13 +270,14 @@ scan() {
         date +%F >"$STATE_DIR/format-warned"
     fi
     log "scan pressure=$(jq -rs '.[0].pressure // "-"' <<<"$rows") sessions=$(grep -c . <<<"$rows")" \
-        "candidates=$n new=$new unreadable=$(jq -s 'map(select(.reason == "unreadable")) | length' <<<"$rows")"
+        "candidates=$n new=$new unreadable=$(jq -s 'map(select(.reason == "unreadable")) | length' <<<"$rows")" \
+        "sched_unknown=$(jq -s 'map(select(.reason == "sched-unknown")) | length' <<<"$rows")"
 }
 
 list() {
     local rows
     mkdir -p "$STATE_DIR"
-    rows=$(collect | judge)
+    rows=$(collect | judge | sched)
     jq -r 'select(.reason == null) | "\(.pid)\t\(.key)"' <<<"$rows" >"$STATE_DIR/listed.tsv"
     jq -rs '
         def h: if .idle_sec == null then "-" else "\(.idle_sec / 3600 | floor)h" end;
@@ -272,7 +354,7 @@ resume_args() {
 }
 
 stop() {
-    local targets rows row pid want reason term agent terms path sid restore rule warned msg
+    local targets rows row pid want reason term agent terms path sid restore lost key rule warned msg
     if [ "${1:-}" = --listed ]; then
         targets=$(cat "$STATE_DIR/listed.tsv" 2>/dev/null)
         [ -n "$targets" ] || { echo "listed.tsv が空です。先に agent-gc list を打ってください" >&2; return 1; }
@@ -310,7 +392,7 @@ stop() {
         [ -n "$pid" ] || continue
         # 前の 1 本の終了待ちの間に再開されることがあるので、送る直前に 1 本ずつ取り直す
         [[ "$pid" =~ ^[0-9]+$ ]] || { log "skip pid=$pid: not a pid"; continue; }
-        row=$(collect "$pid" | judge)
+        row=$(collect "$pid" | judge | sched)
         terms=$(orca terminal list --json 2>/dev/null)
         agent=$(jq -r '.agent // "?"' <<<"$row" 2>/dev/null)
         if [ -z "$row" ]; then log "skip pid=$pid: not running"; continue; fi
@@ -328,15 +410,8 @@ stop() {
             'any(.result.terminals[]?; .handle == $h and (.agentIdentity == null or .agentIdentity == $a))' <<<"$terms" >/dev/null 2>&1; then
             log "skip $agent pid=$pid: Orca の端末が見つからない"; continue
         fi
-        # 既定の read は出力の履歴なので、差分で描いた書きかけを見落とす。今の描画 (--screen) で見る。
-        # draft は Orca の入力欄に書きかけの文字。あれば使うつもりなので止めない。
-        if ! orca terminal read --terminal "$term" --screen --json 2>/dev/null |
-            jq -r '.result.terminal | if .source == "screen" and ((.draft // "") == "") then .tail[] else empty end' |
-            prompt_empty "$agent"; then
-            log "skip $agent pid=$pid: input not empty"; continue
-        fi
-        if [ "${DRY_RUN:-0}" = 1 ]; then echo "would stop $agent pid=$pid $path"; continue; fi
         # 台帳に残す戻し方。起動時の引数はプロセスと一緒に消えるので、/exit を送る前に組む。
+        # 送る直前の確認 (下の a・b) の後に外部コマンドを挟まないよう、確認より先に組む。
         # 許可した引数は --resume の前に置く (再開したセッションを次に止めたとき、resume_args が --resume の値を
         # 位置引数と取り違えずに済む。Orca 自身の再開も --resume を最後に置く)。
         # Codex の ID は rollout の 1 行目から引けそうだが、codex resume <ID> で再開まで通るかを確かめていないので
@@ -344,14 +419,34 @@ stop() {
         sid=$(jq -r '.sid // ""' <<<"$row")
         if [ "$agent" = claude ]; then
             restore="cd $(printf %q "$path") && claude$(resume_args "$(ps -ww -o args= -p "$pid" 2>/dev/null)") --resume${sid:+ $(printf %q "$sid")}"
+            # resume で戻らないもの (https://code.claude.com/docs/en/scheduled-tasks.md の Limitations)。在ったかは見ていない。
+            lost="裏のコマンド・モニター・自分で間隔を決める /loop（在ったかは分からない）"
         else
-            restore="cd $(printf %q "$path") && codex resume" sid=""
+            restore="cd $(printf %q "$path") && codex resume" sid="" lost=""
         fi
         # 注記は # のコメントにしない。対話の zsh は既定で interactive_comments が無効なので、貼ると # 以降が
         # 引数として渡り、再開のときに次のターンとして実行される。: は引数を読み捨てるだけなので bash でも zsh でも無害。
         [ -n "$sid" ] || restore=": 一覧から選ぶ; $restore"
         rule="idle $(jq -r '.idle_sec / 3600 | floor' <<<"$row")h >= $(jq -r '.threshold_h' <<<"$row")h"
         [ "$(jq -r '.pressure // 0' <<<"$row")" -ge 2 ] && rule="$rule (memory pressure WARN)"
+        # 判定の後に始まったターンを拾うため、送る直前に (a) 記録の読み直し、(b) 入力欄の順に続けて確かめる。
+        # (a) 判定のときと同じく idle で、状態の時刻も判定のときのまま (鍵の最後の欄。lstart にも : が入るので最後を取る)。
+        key=$(jq -r .key <<<"$row")
+        if [ "$agent" = claude ]; then
+            jq -e --arg ts "${key##*:}" '.status == "idle" and ((.statusUpdatedAt // .updatedAt) / 1000 | floor | tostring) == $ts' \
+                "$CLAUDE_SESSIONS/$pid.json" >/dev/null 2>&1
+        else
+            [ "$(codex_state "$pid")" = "idle ${key##*:}" ]
+        fi || { log "skip $agent pid=$pid: changed before send"; continue; }
+        # (b) 既定の read は出力の履歴なので、差分で描いた書きかけを見落とす。今の描画 (--screen) で見る。
+        # draft は Orca の入力欄に書きかけの文字。あれば使うつもりなので止めない。
+        if ! orca terminal read --terminal "$term" --screen --json 2>/dev/null |
+            jq -r '.result.terminal | if .source == "screen" and ((.draft // "") == "") then .tail[] else empty end' |
+            prompt_empty "$agent"; then
+            log "skip $agent pid=$pid: input not empty"; continue
+        fi
+        # (b) の後は外部コマンドを挟まずに送る。
+        if [ "${DRY_RUN:-0}" = 1 ]; then echo "would stop $agent pid=$pid $path"; continue; fi
         orca terminal send --terminal "$term" --text /exit --enter --json >/dev/null 2>&1 || { log "failed $agent pid=$pid: send"; continue; }
         local lstart i
         lstart=$(jq -r .lstart <<<"$row")
@@ -367,7 +462,7 @@ stop() {
             log "stopped $agent pid=$pid idle=$(jq -r '.idle_sec / 3600 | floor' <<<"$row")h path=$path"
         fi
         # 書けなくても次の 1 本は続ける。
-        ledger_add session "$agent $path" "$rule" "$restore" "" || log "WARN: 台帳に書けない $CLEANUP_LEDGER"
+        ledger_add session "$agent $path" "$rule" "$restore" "$lost" || log "WARN: 台帳に書けない $CLEANUP_LEDGER"
     done <<<"$targets"
 }
 
