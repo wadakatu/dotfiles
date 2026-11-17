@@ -419,16 +419,75 @@ git -C "$REPO" fetch --prune --all --quiet 2>/dev/null || { fetch_ok=0; log "WAR
 
 # ---- 削除してよい worktree を選ぶ ----
 removable=() removable_why=()
+# 時刻は整数だけを比べる。[ -lt ] は整数でないと終了 2 で偽になり、「消してよい」側へ素通りする。
+is_uint() { case "$1" in '' | *[!0-9]*) return 1 ;; esac; }
 # cwd が worktree の中にあるプロセス (シェル、エージェント、テスト) が居れば使用中とみなす。
 # ルートの mtime はサブディレクトリの編集では変わらないので、それだけでは見逃す。
 # lsof が使えないときは誰が使っているか分からないので、削除を全部見送る。
+# lsof の出力は p<pid> と n<パス> の行が組で出る。規則 idle_shell が off でなければ、同じ時点のプロセスの一覧も取る。
+idle_mode=$(rule_mode idle_shell)
 cwd_snapshot() {
     cwds_ok=1
-    cwds=$(lsof -a -d cwd -Fn -u "$USER" 2>/dev/null | sed -n 's/^n//p') || cwds_ok=0
+    cwd_raw=$(lsof -a -d cwd -Fpn -u "$USER" 2>/dev/null) || cwds_ok=0
+    cwds=$(sed -n 's/^n//p' <<<"$cwd_raw")
     [ -n "$cwds" ] || cwds_ok=0
+    idle_ok=0
+    [ "$idle_mode" = off ] || idle_snapshot
+}
+in_use() { awk -v p="$1" '$0 == p || index($0, p "/") == 1 { f = 1; exit } END { exit !f }' <<<"$cwds"; }
+
+# 規則 idle_shell の材料を取る。使える回だけ idle_ok=1 にし、プロセスの一覧 (pid ppid tty コマンド名) を procs に置く。
+# 長く眠った直後は全部の端末が古く見えるので、起きてから 1 時間たつまでは使わない。起きた時刻が読めない・数字でない・
+# 今より先の回も使わない。出力は `{ sec = <秒>, usec = <マイクロ秒> } <日付>` の形 (agent-resume.sh の kern.boottime と同じ)。
+# 失敗は全部「使わない」で受けて 0 を返す (トップレベルから呼ぶので、1 を返すと set -e がジョブごと落とす)。
+idle_snapshot() {
+    local wake now
+    procs=""
+    wake=$(sysctl -n kern.waketime 2>/dev/null | sed -nE 's/^\{ sec = ([0-9]+),.*/\1/p') || return 0
+    now=$(date +%s) || return 0
+    # 今より先の時刻は差が負になり、ここで落ちる。
+    is_uint "$wake" && [ $((now - wake)) -ge 3600 ] || return 0
+    procs=$(ps -axo pid=,ppid=,tty=,comm= 2>/dev/null) || return 0
+    if [ -n "$procs" ]; then idle_ok=1; fi
+    return 0
+}
+
+# <worktree> の中に cwd を持つプロセスが全部「放置されたシェル」なら 0 を返し、本数を idle_n に、端末が最後に動いてからの
+# 時間 (いちばん新しい端末で、時間単位) を idle_h に置く。放置されたシェルは、コマンド名 (先頭の - とディレクトリを落とす。
+# ログインシェルは -/bin/zsh の形) が zsh・bash・sh・fish で、それを親とするプロセスが無く、端末を持ち、端末の atime と mtime の
+# 新しい方 (出力だけが在った端末も動いているとみなす) が MIN_AGE_HOURS 以上前のもの。1 つでも欠ける・取れない・形が想定外
+# (ps に居ない pid、stat の失敗、数字でない時刻、今より先の時刻) なら 1 (使用中)。if の中で呼ぶので set -e は効かない。
+idle_only() {
+    local pid row p ppid tty name t a m now kids newest=0
+    idle_n=0 idle_h=""
+    [ "$idle_ok" = 1 ] || return 1
+    now=$(date +%s) || return 1
+    while IFS= read -r pid; do
+        is_uint "$pid" || return 1
+        row=$(awk -v p="$pid" '$1 == p { print; exit }' <<<"$procs") || return 1
+        [ -n "$row" ] || return 1
+        # コマンド名は空白を含みうるので、4 列目から行末までを取る。
+        read -r p ppid tty name <<<"$row"
+        name=${name#-}
+        case "${name##*/}" in zsh | bash | sh | fish) ;; *) return 1 ;; esac
+        # 端末の無いプロセスの ?? も、英数字と / 以外を含むのでここで落ちる。
+        case "$tty" in '' | *[!A-Za-z0-9/]*) return 1 ;; esac
+        kids=$(awk -v p="$pid" '$2 == p { n++ } END { print n + 0 }' <<<"$procs") || return 1
+        [ "$kids" = 0 ] || return 1
+        t=$(stat -f '%a %m' "/dev/$tty" 2>/dev/null) || return 1
+        read -r a m <<<"$t"
+        is_uint "$a" && is_uint "$m" || return 1
+        if [ "$a" -gt "$m" ]; then m=$a; fi
+        # 今より先の時刻 (時計の巻き戻り) は差が負になり、ここで落ちる。
+        [ $((now - m)) -ge $((MIN_AGE_HOURS * 3600)) ] || return 1
+        if [ "$m" -gt "$newest" ]; then newest=$m; fi
+        idle_n=$((idle_n + 1))
+    done < <(awk -v p="$1" '/^p/ { pid = substr($0, 2) }
+        /^n/ { x = substr($0, 2); if ((x == p || index(x, p "/") == 1) && !seen[pid]++) print pid }' <<<"$cwd_raw")
+    [ "$idle_n" -gt 0 ] || return 1
+    idle_h=$(((now - newest) / 3600))
 }
 cwd_snapshot
-in_use() { awk -v p="$1" '$0 == p || index($0, p "/") == 1 { f = 1; exit } END { exit !f }' <<<"$cwds"; }
 
 # Orca でピン留めした worktree は、$REPO の節でも Orca の節でも残す。Orca の一覧は $ORCA_ROOT の外の worktree も
 # 持つので、両方の節の前で 1 回だけ取る。orca コマンドが無い環境では、ピン留めは無いものとして進む。
@@ -538,8 +597,7 @@ has_commits_outside_pr() {
 # ブランチの PR で、その worktree を消してよいかを決める。消してよければ 0 を返し、理由を pr_why に、PR が閉じた時刻 (ms) を
 # pr_closed に置く。残すときは理由を keep の行に出して 1 を返す。
 # 呼び側の if や || の中では set -e が効かないので、取れなかった値は全部「残す」に落とす (空の slug で gh を呼ばない)。
-# 時刻は整数だけを比べる。[ -lt ] は整数でないと終了 2 で偽になり、「消してよい」側へ素通りする。
-is_uint() { case "$1" in '' | *[!0-9]*) return 1 ;; esac; }
+# 時刻は is_uint で整数と確かめてから比べる。
 pr_stale() { # pr_stale <worktree> <ブランチ> <worktree の作成時刻 (ms)>
     local wt="$1" branch="$2" created="$3" slug prs num closed
     pr_why="" pr_closed=""
@@ -601,9 +659,15 @@ if [ "$orca_state" = ok ]; then
             log "keep  $wt (lsof でプロセスの cwd を取れず、使用中か判定できない)"
             continue
         fi
+        # 規則 idle_shell (off 以外) では、中に居るのが放置されたシェルだけなら、PR が閉じてからの時間を見るまで持ち越す。
+        # PR を引けない detached は対象外。
+        idle_why=""
         if in_use "$wt"; then
-            log "keep  $wt (cwd がこの中にあるプロセスが居る)"
-            continue
+            if [ "$idle_mode" = off ] || [ -z "$branch" ] || ! idle_only "$wt"; then
+                log "keep  $wt (cwd がこの中にあるプロセスが居る)"
+                continue
+            fi
+            idle_why="idle_shell: シェル $idle_n 本 (端末 ${idle_h}h 無操作) を使用中に数えない"
         fi
         busy=$(agents_busy "$wt" "$ps_json")
         if [ -n "$busy" ]; then
@@ -648,6 +712,22 @@ if [ "$orca_state" = ok ]; then
         fi
 
         pr_stale "$wt" "$branch" "$created" || continue
+        if [ -n "$idle_why" ]; then
+            # 端末の時刻だけでは、セッションを止めた翌日に PR をマージすると次の毎時に消える。閉じた時刻だけでは、プロンプトで
+            # 手を止めている人の worktree が消える。両方を要る。pr_closed は pr_stale が整数と確かめた ms (比べられなければ残す)。
+            if ! [ "$pr_closed" -le $((($(date +%s) - MIN_AGE_HOURS * 3600) * 1000)) ]; then
+                log "keep  $wt (cwd がこの中にあるプロセスが居る / 放置されたシェルだけだが、PR が閉じてから ${MIN_AGE_HOURS}h たっていない)"
+                continue
+            fi
+            pr_why="$idle_why / $pr_why"
+            if [ "$idle_mode" = list ]; then
+                wt_snapshot "$wt"
+                ledger_plan "idle_shell $wt $(git -C "$wt" rev-parse --verify --quiet HEAD 2>/dev/null || true)" \
+                    worktree "$wt" "$pr_why" "$wt_restore" "$wt_lost" || log "WARN: 台帳に予定を書けない $CLEANUP_LEDGER"
+                log "PLAN  $wt ($pr_why)"
+                continue
+            fi
+        fi
         log "STALE $wt ($pr_why$(ignored_note "$wt"))"
         orca_removable+=("$wt")
         orca_why+=("$pr_why")
@@ -762,9 +842,11 @@ for wt in ${orca_removable[@]+"${orca_removable[@]}"}; do
         log "keep  $wt (削除直前に Orca でピン留め)"
         continue
     fi
-    # 1 つ消すのに 1 分かかることがあるので、worktree ごとに取り直す。
+    # 1 つ消すのに 1 分かかることがあるので、worktree ごとに取り直す。判定で放置されたシェルだけと出たもの (規則が
+    # idle_shell: で始まる) は、取り直しても放置されたシェルだけなら使用中に数えない。ほかは PR が閉じてからの時間を
+    # 見ていないので、中にプロセスが 1 つでも居れば残す。
     cwd_snapshot
-    if [ "$cwds_ok" = "0" ] || in_use "$wt"; then
+    if [ "$cwds_ok" = "0" ] || { in_use "$wt" && ! { [ "${why#idle_shell: }" != "$why" ] && idle_only "$wt"; }; }; then
         log "keep  $wt (削除直前に、cwd がこの中にあるプロセスを検出、または lsof で取れない)"
         continue
     fi
