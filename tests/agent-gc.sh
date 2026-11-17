@@ -396,6 +396,20 @@ check "ログに sched-unknown" grep -qF 'pid=101: sched-unknown' "$LOG"
 bash "$script" scan >/dev/null 2>&1
 check "scan のログに sched_unknown=1" grep -qE '^[^ ]+ [^ ]+ scan .* sched_unknown=1( |$)' "$LOG"
 
+reset "名前に当たる行が JSON として読めなければ送らない"
+proc 101 claude /w/a "" SID-1
+tx SID-1 '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"CronCreate","inp'
+bash "$script" stop 101 >/dev/null 2>&1
+check "/exit を送らない" sent_none
+check "ログに sched-unknown" grep -qF 'pid=101: sched-unknown' "$LOG"
+
+reset "ID の形でない sessionId は会話記録を引かない"
+proc 101 claude /w/a "" 'SID*'
+tx SID-1 '{"type":"user","message":{"content":"hi"}}'
+bash "$script" stop 101 >/dev/null 2>&1
+check "/exit を送らない" sent_none
+check "ログに sched-unknown" grep -qF 'pid=101: sched-unknown' "$LOG"
+
 # 時刻を除いたログと通知が同じであること。2 回目は鍵が知らせ済みにならないよう、状態を消してから流す。
 scan_out() { # scan_out <scan の引数...>: reset 済みの状態で 1 本置いて scan を流し、ログ (時刻を除く) と通知を出す
     proc 101 claude /w/a "" SID-1
