@@ -533,6 +533,17 @@ check "台帳に行が無い" test ! -s "$LEDGER"
 check "通知が出ない" test ! -e "$T/notify-calls"
 check "戻し方が貼って通る" restores_parse
 
+# ---- 台帳: 「一覧だけ」の予定 (plan-…) の行が在っても、何も消さなかった回は通知を出さない ----
+setup ledger-nothing-plan
+git_wt "$T/repo-wt" feat-a # upstream 健在 = PR 進行中
+touch -t 202601010000 "$T/repo-wt"
+mkdir -p "${LEDGER%/*}"
+printf '%s\t%s\t%s\t%s\t%s\t%s\n' 2026-11-01T00:00:00+0900 plan-worktree "$T/repo-wt" rule restore "" >"$LEDGER"
+run_gc
+check "残る" exists "$T/repo-wt"
+check "台帳は予定の 1 行のまま" rows 1
+check "通知が出ない" test ! -e "$T/notify-calls"
+
 # ---- 台帳: DRY_RUN は台帳にも通知にも出さない ----
 setup ledger-dry-run
 merged_repo_wt "$T/repo-wt" feat-a
@@ -723,6 +734,17 @@ check "別名を zsh.nix から取り出せる" test -n "$alias_cmd"
 check "3 行出る" test "$(grep -c . "$T/table")" = 3
 check "どの行も 6 列" test "$(awk '{print NF}' "$T/table" | sort -u)" = 6
 check "古い行の値が出る" grep -q '/w/old  *rule-old  *restore-old' "$T/table"
+
+# ---- 台帳の別名: 「一覧だけ」の予定 (plan-…、戻らないものが空) の行が混ざっても、どの行も同じ列数 ----
+setup ledger-alias-plan
+mkdir -p "$T/home/Library/Application Support/cleanup-ledger"
+printf '%s\t%s\t%s\t%s\t%s\t%s\n' 2026-11-01T00:00:00+0900 worktree /w/new rule-new restore-new lost-new \
+    2026-11-01T01:00:00+0900 plan-worktree /w/plan rule-plan restore-plan "" \
+    >"$T/home/Library/Application Support/cleanup-ledger/ledger.tsv"
+HOME="$T/home" bash -c "$alias_cmd" >"$T/table" 2>&1
+check "2 行出る" test "$(grep -c . "$T/table")" = 2
+check "どの行も 6 列" test "$(awk '{print NF}' "$T/table" | sort -u)" = 6
+check "予定の行の値が出る" grep -q 'plan-worktree  */w/plan  *rule-plan  *restore-plan' "$T/table"
 
 # ---- 「触らない」リスト: パスの行は、ほかの条件を全部満たす worktree も残す。区切りで比べる ----
 kept() { logged "keep  $1 (「触らない」リスト)"; }
@@ -1050,6 +1072,62 @@ check "打ち間違いは off (標準出力は値だけ)" test "$(rule RULE_x=ye
 check "打ち間違いは WARN を標準エラーに 1 行" test "$(grep -c 'WARN' "$T/err")" = 1
 check "大文字は打ち間違い" test "$(rule RULE_x=ON)" = off
 check "規則名に使えない文字は off" test "$(env bash -c 'set -euo pipefail; log() { :; }; . "$0"; rule_mode "a-b"' "$lib" 2>/dev/null)" = off
+
+# ---- 「一覧だけ」の予定: ledger_plan は台帳に plan-<種類> の行を足し、同じ鍵は 1 度だけ書く ----
+# plan <引数...>: set -euo pipefail の下で source して ledger_plan を呼び、戻り値を返す。呼び側と同じく || で受ける
+# (直に呼ぶと、関数の中の失敗で set -e がシェルごと抜け、関数が返す値を見られない)。
+plan() { bash -c 'set -euo pipefail; . "$0"; rc=0; ledger_plan "$@" || rc=$?; exit "$rc"' "$lib" "$@"; }
+PLANNED() { echo "$T/state/cleanup-ledger/planned"; }
+lines() { [ "$(grep -c '' "$1" 2>/dev/null)" = "$2" ]; }
+
+setup plan-writes-one-row
+plan k1 worktree /a/wt 規則 戻し方 ""
+check "台帳が 1 行" rows 1
+check "6 列" test "$(awk -F'\t' '{print NF}' "$LEDGER")" = 6
+check "種類の列が plan-worktree" test "$(cut -f2 "$LEDGER")" = plan-worktree
+check "対象・規則・戻し方の列" test "$(cut -f3-5 "$LEDGER")" = "/a/wt"$'\t'"規則"$'\t'"戻し方"
+check "控えに k1 が 1 行" test "$(cat "$(PLANNED)")" = k1
+
+setup plan-same-key-once
+plan k1 worktree /a/wt 規則 戻し方 ""
+plan k1 worktree /a/wt 規則 戻し方 ""
+check "2 回目の戻り値も 0" test "$?" = 0
+check "台帳は 1 行のまま" rows 1
+check "控えも 1 行のまま" lines "$(PLANNED)" 1
+
+setup plan-new-key-adds
+plan k1 worktree /a/wt 規則 戻し方 ""
+plan k2 worktree /a/wt 規則 戻し方 ""
+check "鍵が違えば 2 行" rows 2
+check "控えも 2 行" lines "$(PLANNED)" 2
+
+setup plan-dry-run
+DRY_RUN=1 plan k1 worktree /a/wt 規則 戻し方 ""
+check "戻り値 0" test "$?" = 0
+check "台帳が出来ない" test ! -e "$LEDGER"
+check "控えが出来ない" test ! -e "$(PLANNED)"
+
+setup plan-tab-newline
+plan "$(printf 'k\t1\nx\ry')" worktree "$(printf '/a/w\tt\nz')" 規則 戻し方 ""
+plan "$(printf 'k\t1\nx\ry')" worktree "$(printf '/a/w\tt\nz')" 規則 戻し方 ""
+check "台帳は 1 行" rows 1
+check "6 列のまま" test "$(awk -F'\t' '{print NF}' "$LEDGER")" = 6
+check "控えも 1 行" lines "$(PLANNED)" 1
+check "鍵のタブ・改行・CR は空白に" test "$(cat "$(PLANNED)")" = "k 1 x y"
+
+setup plan-unwritable
+if [ "$(id -u)" != 0 ]; then # root は書き込み権限を無視する
+    mkdir -p "$T/ro"
+    chmod 555 "$T/ro"
+    STATE_ROOT="$T/ro" plan k1 worktree /a/wt 規則 戻し方 "" 2>/dev/null
+    check "書けなければ戻り値 1" test "$?" = 1
+    check "set -e の下で || true が落ちない" test "$(STATE_ROOT="$T/ro" bash -c 'set -euo pipefail; . "$0"; ledger_plan k1 worktree /a/wt r c "" 2>/dev/null || true; echo after' "$lib")" = after
+    # 台帳は書けたが控えに書けない回も 1 (次の回は同じ予定をもう 1 行書く)。
+    mkdir -p "$T/ro2/cleanup-ledger/planned"
+    STATE_ROOT="$T/ro2" plan k1 worktree /a/wt 規則 戻し方 "" 2>/dev/null
+    check "控えに書けなければ戻り値 1" test "$?" = 1
+    chmod 755 "$T/ro"
+fi
 
 for f in "$base"/*/log; do grep -q '^exit=0$' "$f" || { echo "FAIL [$(basename "$(dirname "$f")")] exit が 0 でない"; fail=1; }; done
 [ "$fail" = 0 ] && echo "ok: worktree-gc"
