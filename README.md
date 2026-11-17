@@ -409,10 +409,16 @@ FF_CHECKOUTS="$HOME/src/some-tool" # origin のデフォルトブランチに追
 | 条件 | 意図 |
 |---|---|
 | main worktree ではない | 本体は対象外 |
-| `git status --porcelain` が空（失敗したら変更ありとみなす） | 未コミットの作業を消さない |
-| cwd がその中にあるプロセスが居ない（`lsof`。取れなければこの節は全部残す） | サブディレクトリで作業中のシェル・エージェントを消さない |
+| `git status --porcelain` が空（失敗したら変更ありとみなす。削除の直前にも取り直す） | 未コミットの作業を消さない |
+| cwd がその中にあるプロセスが居ない（`lsof`。取れなければこの節は全部残す。削除の直前にも worktree ごとに取り直す） | サブディレクトリで作業中のシェル・エージェントを消さない |
 | ディレクトリの mtime が 24 時間より古い | 稼働中のエージェントが作った直後のものを除外 |
 | upstream が remote から消えている（= PR が merge / close 済み）<br>または detached かつ `$BASE`（既定 `origin/main`）から辿れる | 固有のコミットを持たないものだけ消す |
+
+削除の後、`$REPO` で `git worktree prune` を流し、フォルダの無い登録を外す。prune は登録をその worktree の HEAD と reflog ごと消し、
+リポ単位でしか流せないので、その前に `git worktree list --porcelain` の `prunable` の登録を見る。`detached` で、HEAD の SHA が
+どのブランチ・リモート追跡ブランチ・タグからも辿れない（`git for-each-ref --contains`。失敗も辿れないとみなす）ものが 1 つでも在れば、
+そのリポは prune せず、`keep  <本体> (prune 見送り: <パス> の detached HEAD <SHA> がどの ref にも無い)` をログに出し、通知を 1 日 1 回出す
+（`DRY_RUN=1` では出さない）。人が決めるまで見送り続けるので、残すなら `git branch <名前> <SHA>`、要らなければ手で `git worktree prune` する。
 
 Orca の worktree（`~/orca/workspaces/` 配下、全リポジトリ）は上の表とは別に判定し、
 `orca worktree rm` で消す。こちらも次を **全て** 満たすものだけ。

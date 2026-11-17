@@ -70,7 +70,16 @@ case "$1 $2" in
         if [ -f "$FAKE/ps.$n.json" ]; then cat "$FAKE/ps.$n.json"
         elif [ -f "$FAKE/ps.json" ]; then cat "$FAKE/ps.json"
         else echo '{"ok": true, "result": {"truncated": false, "totalCount": 0, "worktrees": []}}'; fi ;;
-    "worktree list") cat "$FAKE/list.json" ;;
+    # dirty-at-list / spawn-at-list があれば、一覧を返す前 ($REPO の節の判定の後、削除の前) に、そこに書かれたパスに
+    # 未コミットのファイルを置く / そこを cwd にしたプロセスを起こす。
+    "worktree list")
+        [ ! -f "$FAKE/dirty-at-list" ] || touch "$(cat "$FAKE/dirty-at-list")/late.txt"
+        if [ -f "$FAKE/spawn-at-list" ]; then
+            (cd "$(cat "$FAKE/spawn-at-list")" && exec sleep 60) >/dev/null 2>&1 &
+            echo $! >"$FAKE/spawned.pid"
+            sleep 1
+        fi
+        cat "$FAKE/list.json" ;;
     "worktree rm")
         wt=${4#path:}; echo "$wt" >>"$FAKE/rm-calls"; echo "rm $wt" >>"$FAKE/order"
         [ -f "$FAKE/rm-fail" ] && { echo '{"ok": false}'; exit 0; }
@@ -235,6 +244,86 @@ ps_json "$T/orca/wt" "$CREATED" working >"$T/ps.2.json"
 run_gc
 check "orca rm が呼ばれない" test ! -e "$T/rm-calls"
 check "理由がログに出る" logged "削除直前にエージェントが working"
+
+# ---- Orca: PR が開いている・PR が無いなら残す ----
+setup orca-pr-open
+orca_wt "$T/orca/wt" feat-o "$AFTER" "$CREATED"
+echo '[{"number": 1, "state": "OPEN", "closedAt": null}]' >"$T/prs.json"
+run_gc
+check "orca rm が呼ばれない" test ! -e "$T/rm-calls"
+check "理由がログに出る" logged "keep  $T/orca/wt (feat-o: PR 進行中)"
+
+setup orca-no-pr
+orca_wt "$T/orca/wt" feat-o "$AFTER" "$CREATED"
+echo '[]' >"$T/prs.json"
+run_gc
+check "orca rm が呼ばれない" test ! -e "$T/rm-calls"
+check "理由がログに出る" logged "keep  $T/orca/wt (feat-o: PR 無し)"
+
+# ---- Orca: PR の head はその worktree だけの ref に取り、FETCH_HEAD を書き換えない ----
+# PR に無いコミットを持たせて worktree を残す (消すと FETCH_HEAD も ref も一緒に消えて、何も確かめられない)。
+setup fetch-head-kept
+orca_wt "$T/orca/wt" feat-o "$AFTER" "$CREATED"
+echo amended >"$T/orca/wt/f.txt"
+git -C "$T/orca/wt" commit -q -a --amend -m "change feat-o"
+fh="$(git -C "$T/orca/wt" rev-parse --git-dir)/FETCH_HEAD"
+echo marker >"$fh"
+run_gc
+check "PR の判定を通った (前提)" logged "keep  $T/orca/wt (feat-o: PR #1 に無いコミットあり)"
+check "FETCH_HEAD が変わらない" test "$(cat "$fh")" = marker
+check "PR の head をその worktree の ref に取った" git -C "$T/orca/wt" rev-parse --verify --quiet refs/worktree/gc/pr-head
+check "本体の ref に出ない (名前で探す: 共有の ref に取った回も拾う)" test -z "$(git -C "$T/repo" for-each-ref | grep pr-head)"
+
+# PR の head にだけ在るコミットを指す tag も、本体に連れてこない。コミットは別の clone で作る (本体にオブジェクトが在ると、
+# ほかの fetch も tag を自動で連れてきて、PR の head の fetch を見分けられない)。
+setup fetch-no-tags
+orca_wt "$T/orca/wt" feat-o "$AFTER" "$CREATED"
+git clone -q "$T/origin.git" "$T/other" 2>/dev/null
+git -C "$T/other" fetch -q origin refs/pull/1/head
+git -C "$T/other" switch -q --detach FETCH_HEAD
+git -C "$T/other" commit -q --allow-empty -m pr-only
+git -C "$T/other" tag pr-tag
+git -C "$T/other" push -q -f origin HEAD:refs/pull/1/head pr-tag 2>/dev/null
+run_gc
+check "PR の判定を通った (前提)" logged "STALE $T/orca/wt (feat-o: PR #1 が MERGED"
+check "本体に tag が増えない" test -z "$(git -C "$T/repo" tag)"
+
+# ---- Orca: origin が無く PR を引く先が分からなければ、空の名前で gh を呼ばずに残す (実行ごと止めない) ----
+setup orca-no-origin
+orca_wt "$T/orca/wt" feat-o "$AFTER" "$CREATED"
+git -C "$T/repo" remote remove origin
+run_gc
+check "orca rm が呼ばれない" test ! -e "$T/rm-calls"
+check "理由がログに出る" logged "keep  $T/orca/wt (feat-o: gh で PR を引けない)"
+
+# ---- Orca: PR の head を取れなかった回は、前の回に取った ref を読まずに「PR に無いコミットあり」で残す ----
+setup fetch-fails-stale-ref
+orca_wt "$T/orca/wt" feat-o "$AFTER" "$CREATED"
+git -C "$T/orca/wt" update-ref refs/worktree/gc/pr-head HEAD
+git -C "$T/origin.git" update-ref -d refs/pull/1/head
+run_gc
+check "orca rm が呼ばれない" test ! -e "$T/rm-calls"
+check "理由がログに出る" logged "keep  $T/orca/wt (feat-o: PR #1 に無いコミットあり)"
+check "本体の ref に出ない (名前で探す: 共有の ref に取った回も拾う)" test -z "$(git -C "$T/repo" for-each-ref | grep pr-head)"
+
+# ---- $REPO: 判定の後 (Orca の節の途中) で未コミットの変更が入ったら、compose を止めずに残す ----
+setup repo-recheck-dirty
+merged_repo_wt "$T/repo-wt" feat-a
+printf '%s\t%s\n' wt-stack "$T/repo-wt/docker" >"$T/docker-ps.tsv"
+echo "$T/repo-wt" >"$T/dirty-at-list"
+run_gc
+check "残る" exists "$T/repo-wt"
+check "理由がログに出る" logged "keep  $T/repo-wt (削除直前に未コミットの変更を検出)"
+check "compose を止めない" not_called wt-stack
+
+# ---- $REPO: 判定の後でプロセスが入ってきたら消さない ----
+setup repo-recheck-cwd
+merged_repo_wt "$T/repo-wt" feat-a
+echo "$T/repo-wt" >"$T/spawn-at-list"
+run_gc
+check "残る" exists "$T/repo-wt"
+check "理由がログに出る" logged "keep  $T/repo-wt (削除直前に、cwd がこの中にあるプロセスを検出"
+kill "$(cat "$T/spawned.pid" 2>/dev/null)" 2>/dev/null
 
 # ---- compose: 消した worktree のものは名前を問わずボリュームごと、孤児は名前で絞ってボリュームを残す ----
 setup compose
@@ -1141,6 +1230,48 @@ if [ "$(id -u)" != 0 ]; then # root は書き込み権限を無視する
     check "控えに書けなくても台帳には 1 行書かれている" test "$(grep -c . "$T/ro2/cleanup-ledger/ledger.tsv" 2>/dev/null)" = 1
     chmod 755 "$T/ro"
 fi
+
+# ---- $REPO の prune: detached の HEAD がどの ref にも無い登録が在れば、リポごと prune を見送り、1 日 1 回知らせる ----
+registered() { git -C "$T/repo" worktree list --porcelain | grep -qxF "worktree $1"; }
+unregistered() { ! registered "$1"; }
+gone_detached_unique() { # gone_detached_unique <パス>: どの ref にも無いコミットを HEAD に持つ detached の worktree を作り、フォルダだけ退ける
+    git -C "$T/repo" worktree add -q --detach "$1" origin/main
+    git -C "$1" commit -q --allow-empty -m unique
+    u=$(git -C "$1" rev-parse HEAD)
+    mv "$1" "$1.moved"
+}
+setup repo-prune-detached-unique
+gone_detached_unique "$T/det"
+run_gc
+check "登録が残る" registered "$T/det"
+check "見送りと SHA がログに出る" logged "keep  $T/repo (prune 見送り: $T/det の detached HEAD $u がどの ref にも無い)"
+check "通知が 1 本" notified_once "prune"
+run_gc
+check "同じ日の 2 回目は通知しない" test "$(grep -c . "$T/notify-calls" 2>/dev/null)" = 1
+check "2 回目も登録が残る" registered "$T/det"
+
+setup repo-prune-detached-unique-dry-run
+gone_detached_unique "$T/det"
+run_gc DRY_RUN=1
+check "見送りはログに出る" logged "prune 見送り: $T/det の detached HEAD $u"
+check "通知が出ない" test ! -e "$T/notify-calls"
+check "通知済みの印を書かない" test ! -e "$T/state/worktree-gc/prune-skipped-warned"
+
+# ---- $REPO の prune: detached の HEAD が既定ブランチに在る登録と、ブランチの登録は今どおり外す ----
+# フォルダの在る worktree は prune の対象でないので、固有のコミットを持つ detached でも prune を止めない。
+setup repo-prune-detached-merged
+git -C "$T/repo" worktree add -q --detach "$T/det" origin/main
+git_wt "$T/brwt" feat-b
+git -C "$T/repo" worktree add -q --detach "$T/live" origin/main
+git -C "$T/live" commit -q --allow-empty -m live
+mv "$T/det" "$T/det.moved"
+mv "$T/brwt" "$T/brwt.moved"
+run_gc
+check "detached の登録が外れる" unregistered "$T/det"
+check "ブランチの登録が外れる" unregistered "$T/brwt"
+check "フォルダの在る worktree は残る" registered "$T/live"
+check "見送りのログが出ない" test -z "$(grep 'prune 見送り' "$T/log")"
+check "通知が出ない" test ! -e "$T/notify-calls"
 
 for f in "$base"/*/log; do grep -q '^exit=0$' "$f" || { echo "FAIL [$(basename "$(dirname "$f")")] exit が 0 でない"; fail=1; }; done
 [ "$fail" = 0 ] && echo "ok: worktree-gc"
