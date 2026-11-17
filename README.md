@@ -432,7 +432,7 @@ Orca の worktree（`~/orca/workspaces/` 配下、全リポジトリ）は上の
 |---|---|
 | デフォルトブランチではない | 本体相当のブランチは対象外 |
 | `git status --porcelain` が空（失敗したら変更ありとみなす） | 未コミットの作業を消さない |
-| cwd がその中にあるプロセスが居ない（`lsof`。取れなければ Orca の節は全部残す。削除の直前にも worktree ごとに取り直す） | ターンを終えて次の指示を待つセッションは `done` になる。PR をマージした直後に同じ worktree で作業を続けるものを消さない |
+| cwd がその中にあるプロセスが居ない（`lsof`。取れなければ Orca の節は全部残す。削除の直前にも worktree ごとに取り直す）。規則 `idle_shell` が `on` なら、放置されたシェルだけが居るものは居ないとみなす（`list` は予定を書くだけ。下） | ターンを終えて次の指示を待つセッションは `done` になる。PR をマージした直後に同じ worktree で作業を続けるものを消さない |
 | 中のエージェントが全員 `done`（`orca worktree ps`。取れない・打ち切られたら Orca の節は全部残す。削除の直前にも取り直す） | 作業中・入力待ちのものを消さない |
 | ブランチの PR があり、OPEN が 1 本も無い（MERGED / CLOSED） | PR が終わったものだけ消す |
 | PR が worktree の作成より後に閉じている | 同名ブランチの古い PR で、作り直したばかりの worktree を消さない |
@@ -470,6 +470,18 @@ Orca でピン留めした worktree も、`$REPO` の節と Orca の節の両方
 ```sh
 awk -F'\t' '$2 ~ /^plan-/' "$HOME/Library/Application Support/cleanup-ledger/ledger.tsv" | column -t -s "$(printf '\t')"
 ```
+
+規則 `idle_shell`（`RULE_idle_shell`）は、エージェントが終わった後のタブに残ったシェルだけが居る Orca の worktree を、使用中に数えない。
+当てるのはブランチが在って PR を引く Orca の worktree だけ（`$REPO` の節と detached は今どおり）。次を全部満たすときだけ、cwd の条件を通す。
+
+- cwd がその中に在るプロセス（`lsof -a -d cwd -Fpn`）が全部「放置されたシェル」: `ps -axo pid=,ppid=,tty=,comm=` のコマンド名（先頭の `-` とディレクトリを落とす）が
+  `zsh`・`bash`・`sh`・`fish`、それを親とするプロセスが無い、端末を持ち、端末（`/dev/<tty>`）の atime と mtime（`stat -f '%a %m'`）の新しい方が `MIN_AGE_HOURS`（既定 24）時間以上前。
+- PR が閉じてから `MIN_AGE_HOURS` 時間以上たっている（端末の時刻だけだと、セッションを止めた翌日にマージした worktree が次の毎時に消える）。
+- `sysctl -n kern.waketime` が読めて、起きてから 1 時間以上たっている（長く眠った直後は、全部の端末が古く見える）。
+
+ps に居ない pid、`stat` の失敗、数字でない時刻、今より先の時刻は、どれも使用中とみなす。削除の直前の取り直しでも同じ判定をやり直す。
+`list` では `PLAN  <パス> (<理由>)` をログに出し、台帳に `plan-worktree` の行を書く。`on` では台帳の規則の列が `idle_shell: シェル <n> 本 (端末 <h>h 無操作) を使用中に数えない / ` で始まる。
+`off` では `ps`・`stat`・`sysctl` を呼ばない。シェル自体は止めない。
 
 `git worktree remove` はブランチを消さないので、コミットは常に残る。ただし ignore された
 ファイル（`.env` など）は worktree と一緒に消える。判定には使わず、件数を STALE のログに出す。

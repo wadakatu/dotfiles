@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # home/scripts/worktree-gc.sh の「消してよいか」の判定を確かめる。CI (.github/workflows/nix.yml) と手元で回す。
 #   bash tests/worktree-gc.sh
-# git と lsof は本物、orca / gh / docker は偽物。作業中の worktree を消さないことを主に見る。
+# git は本物、orca / gh / docker / ps / stat / sysctl は偽物。lsof は本物 (lsof-cwd を置いたケースだけ偽物)。作業中の worktree を消さないことを主に見る。
 # shellcheck disable=SC2016  # '...' の中の $x は偽コマンドや eval の変数
 set -u
 
@@ -67,6 +67,8 @@ case "$1 $2" in
             echo $! >"$FAKE/spawned.pid"
             sleep 1
         fi
+        # lsof-at-ps2 があれば、2 回目に、その中身を偽の lsof の答え (lsof-cwd) に足す (中身が固定の偽の lsof には、起こしたプロセスは見えない)。
+        if [ "$n" = 2 ] && [ -f "$FAKE/lsof-at-ps2" ]; then cat "$FAKE/lsof-at-ps2" >>"$FAKE/lsof-cwd"; fi
         if [ -f "$FAKE/ps.$n.json" ]; then cat "$FAKE/ps.$n.json"
         elif [ -f "$FAKE/ps.json" ]; then cat "$FAKE/ps.json"
         else echo '{"ok": true, "result": {"truncated": false, "totalCount": 0, "worktrees": []}}'; fi ;;
@@ -96,6 +98,24 @@ EOF
 cat >"$base/bin/osascript" <<'EOF'
 #!/usr/bin/env bash
 echo "${!#}" >>"$FAKE/notify-calls"
+EOF
+# lsof は lsof-cwd があるときだけ、cwd の問い合わせにその中身 (p<pid> と n<パス> の行) を返す。無ければ本物に渡す。
+printf '#!/usr/bin/env bash\ncase " $* " in *" -d cwd "*) [ ! -f "$FAKE/lsof-cwd" ] || { cat "$FAKE/lsof-cwd"; exit 0; } ;; esac\nexec %q "$@"\n' \
+    "$(command -v lsof)" >"$base/bin/lsof"
+# ps・stat・sysctl は呼ばれた引数を <名前>-calls に控え、<名前>-fail があれば失敗し、無ければ置いた値を返す
+# (CI の ubuntu には BSD の stat -f と kern.waketime が無い)。stat は stat-times の「<パス> <atime> <mtime>」の行から引く。
+cat >"$base/bin/ps" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >>"$FAKE/ps-calls"; [ ! -f "$FAKE/ps-fail" ] || exit 1; cat "$FAKE/ps-out"
+EOF
+cat >"$base/bin/stat" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >>"$FAKE/stat-calls"; [ ! -f "$FAKE/stat-fail" ] || exit 1
+awk -v f="${!#}" '$1 == f { print $2, $3; n = 1 } END { exit !n }' "$FAKE/stat-times"
+EOF
+cat >"$base/bin/sysctl" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >>"$FAKE/sysctl-calls"; [ ! -f "$FAKE/sysctl-fail" ] || exit 1; cat "$FAKE/sysctl-out"
 EOF
 chmod +x "$base/bin/"*
 
@@ -1460,6 +1480,172 @@ if git clone -q --ref-format=reftable "$T/origin.git" "$T/rt" 2>/dev/null; then
 else
     echo "skip [$CASE] git が reftable に対応していない"
 fi
+
+# ---- idle_shell: 放置されたシェルだけが居る Orca の worktree は、PR が閉じて MIN_AGE_HOURS たてば使用中に数えない ----
+# 放置されたシェルは、偽の lsof (pid 900 の cwd が worktree)・偽の ps (900 の親は 1、端末 ttys123、子なし)・偽の stat (端末の時刻) で作る。
+# 残すケースは、消すケース (idle-shell-on-removes) と同じ入力から 1 つだけ変える。削除の直前の取り直しも同じ判定で残すので、
+# 判定の段の keep の行まで見る (rm が呼ばれないことだけだと、判定の柵を外しても取り直しが残して通ってしまう)。
+H=3600
+ago() { jq -nr --argjson s "$(($(date +%s) - $1))" '$s | todate'; } # ago <秒>: その秒数前の ISO 8601 (GNU と BSD の date の違いを避ける)
+idle_shell() { # idle_shell <worktree> <端末の atime の秒前> [<mtime の秒前>]: 起きてから 1 週間たった回に、放置されたシェルを 1 本置く
+    local now
+    now=$(date +%s)
+    printf 'p900\nfcwd\nn%s\n' "$1" >"$T/lsof-cwd"
+    printf '  900     1 ttys123  -/bin/zsh\n  800     1 ??       /usr/sbin/daemon\n' >"$T/ps-out"
+    printf '/dev/ttys123 %s %s\n' "$((now - $2))" "$((now - ${3:-$2}))" >"$T/stat-times"
+    printf '{ sec = %s, usec = 0 } Mon Nov  9 00:00:00 2026\n' "$((now - 7 * 24 * H))" >"$T/sysctl-out"
+}
+idle_case() { # idle_case <ケース名> [<$T からのパス>]: 端末が 30h 前の放置されたシェルだけが居て、PR が 30h 前に閉じた Orca の worktree を WT に
+    setup "$1"
+    WT=$T/${2:-orca/wt}
+    orca_wt "$WT" feat-o "$(ago $((30 * H)))" "$((($(date +%s) - 72 * H) * 1000))"
+    idle_shell "$WT" $((30 * H))
+}
+idle_kept() { # idle_kept <判定の段の keep の行の理由 (先頭から)>
+    check "orca rm が呼ばれない" test ! -e "$T/rm-calls"
+    check "残る" exists "$WT"
+    check "理由がログに出る" logged "keep  $WT ($1"
+}
+IN_USE="cwd がこの中にあるプロセスが居る)"
+RULE_COL="idle_shell: シェル 1 本 (端末 30h 無操作) を使用中に数えない / feat-o: PR #1 が MERGED"
+ps_line() { sed -i.bak "s#^  900 .*#$1#" "$T/ps-out"; } # ps_line <行>: pid 900 の行を差し替える
+
+idle_case idle-shell-off
+run_gc
+idle_kept "$IN_USE"
+check "ps を呼ばない" test ! -e "$T/ps-calls"
+check "stat を呼ばない" test ! -e "$T/stat-calls"
+check "sysctl を呼ばない" test ! -e "$T/sysctl-calls"
+
+idle_case idle-shell-on-removes
+run_gc RULE_idle_shell=on
+check "orca rm が呼ばれる" grep -qxF "$WT" "$T/rm-calls"
+check "STALE に規則が出る" logged "STALE $WT ($RULE_COL"
+check "台帳の worktree の行" col_has "$WT" 2 worktree
+check "規則の列の先頭に idle_shell" col_starts "$WT" 4 "$RULE_COL"
+
+idle_case idle-shell-list-plans
+sha=$(git -C "$WT" rev-parse HEAD)
+run_gc RULE_idle_shell=list
+check "orca rm が呼ばれない" test ! -e "$T/rm-calls"
+check "残る" exists "$WT"
+check "PLAN の行" logged "PLAN  $WT ($RULE_COL)"
+check "台帳は plan-worktree の 1 行だけ" test "$(awk -F'\t' '$2 == "plan-worktree"' "$LEDGER" 2>/dev/null | grep -c .)" = 1
+check "台帳は 1 行 (worktree の行が無い)" rows 1
+check "予定の規則" col_starts "$WT" 4 "$RULE_COL"
+check "予定の戻し方" col_has "$WT" 5 "cd $T/repo && git worktree add -B feat-o $WT $sha"
+check "鍵は規則・パス・HEAD" grep -qxF "idle_shell $WT $sha" "$T/state/cleanup-ledger/planned"
+check "通知が出ない" test ! -e "$T/notify-calls"
+run_gc RULE_idle_shell=list
+check "もう 1 回流しても 1 行のまま" rows 1
+check "2 回目も通知が出ない" test ! -e "$T/notify-calls"
+
+idle_case idle-shell-path-with-space "orca/w t"
+run_gc RULE_idle_shell=on
+check "orca rm が呼ばれる" grep -qxF "$WT" "$T/rm-calls"
+
+idle_case idle-shell-pr-closed-recently
+jq --arg c "$(ago $((2 * H)))" '.[0].closedAt = $c' "$T/prs.json" >"$T/prs.tmp" && mv "$T/prs.tmp" "$T/prs.json"
+run_gc RULE_idle_shell=on
+idle_kept "cwd がこの中にあるプロセスが居る"
+
+idle_case idle-shell-tty-recent # 入力だけが在った (atime だけが新しい)
+idle_shell "$WT" $((2 * H)) $((30 * H))
+run_gc RULE_idle_shell=on
+idle_kept "$IN_USE"
+
+idle_case idle-shell-boundary-short # 実行に数秒かかるので、足りない側は 60 秒で作る
+idle_shell "$WT" $((24 * H - 60))
+run_gc RULE_idle_shell=on
+idle_kept "$IN_USE"
+
+idle_case idle-shell-boundary-exact
+idle_shell "$WT" $((24 * H))
+run_gc RULE_idle_shell=on
+check "orca rm が呼ばれる" grep -qxF "$WT" "$T/rm-calls"
+
+idle_case idle-shell-tty-future # 時計の巻き戻り
+idle_shell "$WT" $((-H))
+run_gc RULE_idle_shell=on
+idle_kept "$IN_USE"
+
+idle_case idle-shell-stat-fails
+touch "$T/stat-fail"
+run_gc RULE_idle_shell=on
+idle_kept "$IN_USE"
+
+idle_case idle-shell-has-child
+printf '  905   900 ttys123  sleep\n' >>"$T/ps-out"
+run_gc RULE_idle_shell=on
+idle_kept "$IN_USE"
+
+idle_case idle-shell-no-tty # /dev/?? の時刻も置く (stat の失敗で残るのと見分ける)
+ps_line '  900     1 ??       -/bin/zsh'
+printf '/dev/?? %s %s\n' $(($(date +%s) - 30 * H)) $(($(date +%s) - 30 * H)) >>"$T/stat-times"
+run_gc RULE_idle_shell=on
+idle_kept "$IN_USE"
+
+idle_case idle-shell-not-a-shell
+ps_line '  900     1 ttys123  node'
+run_gc RULE_idle_shell=on
+idle_kept "$IN_USE"
+
+idle_case idle-shell-not-a-shell-space
+ps_line '  900     1 ttys123  /Applications/Some App/bin/tool'
+run_gc RULE_idle_shell=on
+idle_kept "$IN_USE"
+
+idle_case idle-shell-mixed # 放置されたシェル 1 本と、サブディレクトリに居る別のプロセス (端末は同じく 30h 前。stat で残るのと見分ける)
+printf 'p902\nfcwd\nn%s/sub\n' "$WT" >>"$T/lsof-cwd"
+printf '  902     1 ttys124  node\n' >>"$T/ps-out"
+printf '/dev/ttys124 %s %s\n' $(($(date +%s) - 30 * H)) $(($(date +%s) - 30 * H)) >>"$T/stat-times"
+run_gc RULE_idle_shell=on
+idle_kept "$IN_USE"
+
+idle_case idle-shell-after-wake # 起きてから 10 分
+printf '{ sec = %s, usec = 0 } Tue Nov 17 00:00:00 2026\n' $(($(date +%s) - 600)) >"$T/sysctl-out"
+run_gc RULE_idle_shell=on
+idle_kept "$IN_USE"
+
+idle_case idle-shell-sysctl-fails
+touch "$T/sysctl-fail"
+run_gc RULE_idle_shell=on
+idle_kept "$IN_USE"
+
+idle_case idle-shell-waketime-odd
+echo 'kern.waketime: unknown' >"$T/sysctl-out"
+run_gc RULE_idle_shell=on
+idle_kept "$IN_USE"
+
+idle_case idle-shell-pid-missing-in-ps # 放置されたシェル 1 本と、ps に居ない pid
+printf 'p903\nfcwd\nn%s\n' "$WT" >>"$T/lsof-cwd"
+run_gc RULE_idle_shell=on
+idle_kept "$IN_USE"
+
+setup idle-shell-detached # PR を引けないので範囲外
+WT=$T/orca/wt
+git -C "$T/repo" worktree add -q --detach "$WT" origin/main
+jq -n --arg p "$WT" '{result: {worktrees: [{path: $p, branch: null, isMainWorktree: false}]}}' >"$T/list.json"
+ps_json "$WT" "$CREATED" done >"$T/ps.json"
+idle_shell "$WT" $((30 * H))
+run_gc RULE_idle_shell=on
+idle_kept "$IN_USE"
+
+setup idle-shell-repo-section # $REPO の節は PR を引かないので範囲外
+WT=$T/repo-wt
+merged_repo_wt "$WT" feat-a
+idle_shell "$WT" $((30 * H))
+run_gc RULE_idle_shell=on
+check "残る" exists "$WT"
+check "理由がログに出る" logged "keep  $WT ($IN_USE"
+
+idle_case idle-shell-recheck # 判定の後、削除の直前 (2 回目の worktree ps) に、シェルでないプロセスが入ってくる
+printf 'p902\nfcwd\nn%s\n' "$WT" >"$T/lsof-at-ps2"
+printf '  902     1 ??       node\n' >>"$T/ps-out"
+run_gc RULE_idle_shell=on
+check "判定は通った (前提)" logged "STALE $WT ($RULE_COL"
+check "orca rm が呼ばれない" test ! -e "$T/rm-calls"
+check "理由がログに出る" logged "keep  $WT (削除直前に、cwd がこの中にあるプロセスを検出"
 
 for f in "$base"/*/log; do grep -q '^exit=0$' "$f" || { echo "FAIL [$(basename "$(dirname "$f")")] exit が 0 でない"; fail=1; }; done
 [ "$fail" = 0 ] && echo "ok: worktree-gc"
