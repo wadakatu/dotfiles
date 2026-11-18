@@ -483,6 +483,38 @@ ps に居ない pid、`stat` の失敗、数字でない時刻、今より先の
 `list` では `PLAN  <パス> (<理由>)` をログに出し、台帳に `plan-worktree` の行を書く。`on` では台帳の規則の列が `idle_shell: シェル <n> 本 (端末 <h>h 無操作) を使用中に数えない / ` で始まる。
 `off` では `ps`・`stat`・`sysctl` を呼ばない。シェル自体は止めない。
 
+規則 `scratch_worktrees`（`RULE_scratch_worktrees`）は、セッションが scratchpad の中に `git worktree add` で作って残した、どのリポの worktree でも
+（別のリポへのコミットは `<scratchpad>/wt/<名前>` で行う。`agents/claude/rules/sibling-repo-commits.md`）、PR が閉じた後に消す。
+Claude Code が自分で掃除するのは自分が作った印の在る worktree だけで（https://code.claude.com/docs/en/worktrees.md ）、scratchpad が消えても
+git の登録とブランチの占有は残る（https://code.claude.com/docs/en/claude-directory.md ）。探すのは `SCRATCH_WT_GLOB`
+（既定 `/private/tmp/claude-<uid>/*/*/scratchpad/wt/*`。空白を含むパターンは使えない）に当たるディレクトリのうち linked worktree だけ
+（`git rev-parse --absolute-git-dir` と `--git-common-dir` が違い、`--show-toplevel` がそのディレクトリ自身。ただのフォルダ・clone・submodule は見ず、ログにも出さない）。
+`$REPO` の worktree は上の `$REPO` の節が判定する。`off` では探さず、`ps` も `gh` も呼ばない。`REPO` が無い回は動かない。次を **全て** 満たすものだけを、その worktree の本体（`git worktree list --porcelain` の 1 行目）から `git worktree remove` する。
+
+| 条件 | 意図 |
+|---|---|
+| 「触らない」リストに当たらない。Orca でピン留めでない（Orca に届かない回は残す） | 守ると決めたものは消さない |
+| lock されていない（`git worktree list --porcelain` の `locked`。一覧に無い・取れないときも残す） | lock は「消すな」の印 |
+| `git status --porcelain` が空（失敗は変更あり） | 未コミットの作業を消さない |
+| cwd がその中にあるプロセスが居ない（`lsof`。取れなければ残す） | 中で作業中のものを消さない |
+| 持ち主のセッション（パスの `scratchpad` の 1 つ上の名前）が動いていない。`ps -axo pid=,ppid=,tty=,comm=` のコマンド名（先頭の `-` とディレクトリを落とす）が `claude` の pid ごとに `${CLAUDE_CONFIG_DIR:-~/.claude}/sessions/<pid>.json` の文字列の `sessionId` を読み、同じ ID が無い | エージェントの cwd は scratchpad の外なので、cwd では守れない |
+| ディレクトリの mtime が `MIN_AGE_HOURS`（24）時間より古い | 作った直後のものを除く |
+| 無視されるファイル（`git status --porcelain --ignored` の `!!`）の先頭のパス要素が、全部 `IGNORED_OK`（空白区切りの名前。既定は空）に在る | `.env` などの戻らないファイルを消さない |
+| ブランチの、自分の PR（`gh pr list --author @me`）が在り、OPEN が無く、PR に無いコミットが無い（Orca の節と同じ） | PR が終わったものだけ消す |
+| その PR が worktree の作成（管理ディレクトリ `<共通の .git>/worktrees/<名前>` の `stat -f %B`）より後に、`MIN_AGE_HOURS` 時間以上前に閉じた | 同名ブランチの古い PR で消さない。閉じた直後は残す |
+
+detached は PR の 2 行の代わりに「作成から `MIN_AGE_HOURS` 時間以上たち、`origin/HEAD` から辿れる」で見る。ブランチが `origin/HEAD` のブランチなら残す。
+ps が失敗した・空だった回と、記録を読めない claude が 1 本でも居る回は全部残し、`claude <n> 本のうち <m> 本の記録を読めない。scratchpad の worktree は全部残す` を出す
+（記録の形は公開されていない。この行が毎回出るなら、規則は発火していない）。作成時刻が数字でない・0 以下（作成時刻を持たないファイルシステム）なら残す。
+削除の直前に、未コミットの変更と cwd に加えて、lock と持ち主のセッションも取り直す。ほかのリポを fetch はしない（`origin/HEAD` が古ければ残す側に倒れる）。
+`list` では `PLAN  <パス> (<理由>)` と台帳の `plan-worktree`（鍵は `scratch_worktrees <パス> <HEAD の SHA>`）、`on` では台帳の規則の列が `scratch_worktrees: ` で始まる。
+
+```bash
+RULE_scratch_worktrees=list           # off / list / on
+IGNORED_OK="node_modules"             # 一緒に消えてよい無視されるファイル (先頭のパス要素の名前)
+# SCRATCH_WT_GLOB="/private/tmp/claude-$(id -u)/*/*/scratchpad/wt/*"  # CLAUDE_CODE_TMPDIR で scratchpad を動かしたときだけ
+```
+
 `git worktree remove` はブランチを消さないので、コミットは常に残る。ただし ignore された
 ファイル（`.env` など）は worktree と一緒に消える。判定には使わず、件数を STALE のログに出す。
 

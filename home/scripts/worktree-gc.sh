@@ -47,6 +47,11 @@ BUILDER_CACHE_MAX_AGE="${BUILDER_CACHE_MAX_AGE:-168h}"
 # checkout のまま使う道具など、誰も pull しないリポの絶対パス (空白区切り)。空なら何もしない。
 # ponytail: 空白区切りなので空白を含むパスは扱えない。要るなら設定ファイルで配列にする。
 FF_CHECKOUTS="${FF_CHECKOUTS-}"
+# 規則 scratch_worktrees が探す、セッションの scratchpad の下の worktree。
+# ponytail: 空白で割ってから glob を展開するので、パターンに空白を含められない (既定のパスには無い)。要るようになったら配列にする。
+SCRATCH_WT_GLOB="${SCRATCH_WT_GLOB:-/private/tmp/claude-$(id -u)/*/*/scratchpad/wt/*}"
+# 規則 scratch_worktrees で、一緒に消えてよい無視されるファイルの、先頭のパス要素の名前 (空白区切り。例: node_modules)。
+IGNORED_OK="${IGNORED_OK-}"
 DRY_RUN="${DRY_RUN:-0}"
 
 log() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
@@ -146,12 +151,12 @@ record_removed() { # record_removed <worktree> <当たった規則> [<戻らな�
 # git worktree remove が失敗しても、中身を消す途中で失敗した回は登録だけ外れ、.git の残ったフォルダになる
 # (実測: ignore された書けないディレクトリがあると Permission denied で止まり、登録は外れる)。そうなると残った
 # フォルダからはブランチも SHA も引けないので 0 を返す。登録が残っていれば (lock など) 何も変わっていない。
-wt_broken() {
+wt_broken() { # wt_broken <worktree> <本体>
     local list
     [ -e "$1/.git" ] || return 0
     # 一覧を取れない回は登録が外れたか分からないので、壊れていないとみなす (分からないことを台帳に書かない)。
     # パイプの grep -q は git を SIGPIPE で落とし、pipefail で「登録が無い」に化けうるので、出力を受けてから探す。
-    list=$(git -C "$REPO" worktree list --porcelain 2>/dev/null) || return 1
+    list=$(git -C "$2" worktree list --porcelain 2>/dev/null) || return 1
     ! grep -qxF -- "worktree $1" <<<"$list"
 }
 
@@ -168,7 +173,7 @@ stack_volumes() {
 # `git worktree remove` を直接叩くとその状態と食い違う。herdr は Nix 管理外で
 # 自己更新するため launchd から CLI を叩くのも壊れやすい。ここは候補として
 # ログに出すだけに留め、削除はユーザーが herdr 経由で行う。
-mark_stale() {
+mark_stale() { # mark_stale <worktree> <理由> [<本体> (既定は $REPO)]
     local wt="$1" why="$2"
     case "$wt" in
         "$HOME/.herdr/worktrees/"*)
@@ -180,6 +185,7 @@ mark_stale() {
     # 規則は台帳に書くので、同じ添字で並べて持つ (bash 3.2 には連想配列が無い)。
     removable+=("$wt")
     removable_why+=("$why")
+    removable_main+=("${3:-$REPO}")
 }
 
 # .env などの ignore されたファイルは「未コミット変更なし」扱いで worktree ごと消える。
@@ -418,7 +424,7 @@ fetch_ok=1
 git -C "$REPO" fetch --prune --all --quiet 2>/dev/null || { fetch_ok=0; log "WARN: fetch 失敗。upstream-gone 判定はスキップする"; }
 
 # ---- 削除してよい worktree を選ぶ ----
-removable=() removable_why=()
+removable=() removable_why=() removable_main=()
 # 時刻は整数だけを比べる。[ -lt ] は整数でないと終了 2 で偽になり、「消してよい」側へ素通りする。
 is_uint() { case "$1" in '' | *[!0-9]*) return 1 ;; esac; }
 # cwd が worktree の中にあるプロセス (シェル、エージェント、テスト) が居れば使用中とみなす。
@@ -597,13 +603,15 @@ has_commits_outside_pr() {
 # ブランチの PR で、その worktree を消してよいかを決める。消してよければ 0 を返し、理由を pr_why に、PR が閉じた時刻 (ms) を
 # pr_closed に置く。残すときは理由を keep の行に出して 1 を返す。
 # 呼び側の if や || の中では set -e が効かないので、取れなかった値は全部「残す」に落とす (空の slug で gh を呼ばない)。
-# 時刻は is_uint で整数と確かめてから比べる。
-pr_stale() { # pr_stale <worktree> <ブランチ> <worktree の作成時刻 (ms)>
+# 時刻は is_uint で整数と確かめてから比べる。own を渡すと自分の PR だけを引く (gh pr list --author @me)。
+pr_stale() { # pr_stale <worktree> <ブランチ> <worktree の作成時刻 (ms)> [own]
     local wt="$1" branch="$2" created="$3" slug prs num closed
     pr_why="" pr_closed=""
     slug=$(git -C "$wt" remote get-url origin 2>/dev/null | sed -E 's#^.*github\.com[:/]##; s#\.git$##') || slug=""
     # gh が成功しても、出力が配列でなければ (空・JSON でない) PR を引けていない。
-    if [ -z "$slug" ] || ! prs=$(gh pr list -R "$slug" --head "$branch" --state all --json number,state,closedAt 2>/dev/null) \
+    # --author は配列で組まない (bash 3.2 の set -u では、空の配列の展開で落ちる)。
+    # shellcheck disable=SC2086
+    if [ -z "$slug" ] || ! prs=$(gh pr list -R "$slug" --head "$branch" ${4:+--author @me} --state all --json number,state,closedAt 2>/dev/null) \
         || ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$prs"; then
         log "keep  $wt ($branch: gh で PR を引けない)"
         return 1
@@ -737,6 +745,167 @@ if [ "$orca_state" = ok ]; then
         | [.path, ((.branch // "") | sub("^refs/heads/"; ""))] | @tsv')
 fi
 
+# ---- セッションが scratchpad に作って残した worktree (規則 scratch_worktrees) ----
+# エージェントは別のリポへのコミットを <scratchpad>/wt/<名前> の worktree で行い、途中で止まったセッションの分が残る。
+# どのリポのものでも、持ち主のセッションが居なくなり、自分の PR が閉じてから MIN_AGE_HOURS たったものを、その worktree の本体から消す。
+
+# 動いている claude (ps のコマンド名から先頭の - とディレクトリを落として claude) の記録
+# ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/sessions/<pid>.json から、文字列の sessionId を owners (改行区切り) に置く。
+# 記録の形は公開されていないので、ps が失敗した・空だった回と、記録を読めない claude が 1 本でも居る回は 1 を返す
+# (呼び側は全部「生きている」として残す)。if や || の中で呼ぶ。
+scratch_owners() {
+    local out pid sid n=0 m=0
+    owners=""
+    out=$(ps -axo pid=,ppid=,tty=,comm= 2>/dev/null) && [ -n "$out" ] || { log "WARN: ps でプロセスの一覧を取れない。scratchpad の worktree は全部残す"; return 1; }
+    while IFS= read -r pid; do
+        [ -n "$pid" ] || continue
+        n=$((n + 1))
+        if sid=$(jq -er '.sessionId | strings | select(. != "")' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/sessions/$pid.json" 2>/dev/null); then
+            owners+="$sid"$'\n'
+        else
+            m=$((m + 1))
+        fi
+    done < <(awk 'match($0, /^ *[0-9]+ +[0-9]+ +[^ ]+ +/) {
+        c = substr($0, RLENGTH + 1); sub(/^-/, "", c); sub(/.*\//, "", c); if (c == "claude") print $1 }' <<<"$out")
+    [ "$m" = 0 ] && return 0
+    log "claude $n 本のうち $m 本の記録を読めない。scratchpad の worktree は全部残す"
+    return 1
+}
+# パスの scratchpad の 1 つ上の名前 (持ち主のセッション ID) を出す。パスに /scratchpad/ が無い、名前が英数字と - _ 以外を含むなら 1。
+scratch_sid() {
+    local p=${1%/scratchpad/*}
+    [ "$p" != "$1" ] || return 1
+    p=${p##*/}
+    case "$p" in '' | *[!A-Za-z0-9_-]*) return 1 ;; esac
+    printf '%s' "$p"
+}
+# <本体> の一覧に <worktree> が在り、lock されていなければ 0。一覧を取れない・見つからないときは 1 (lock か分からない)。
+wt_unlocked() { # wt_unlocked <本体> <worktree>
+    local list
+    list=$(git -C "$1" worktree list --porcelain 2>/dev/null) || return 1
+    awk -v p="$2" '/^worktree / { cur = substr($0, 10) } cur == p { found = 1 } cur == p && /^locked( |$)/ { locked = 1 }
+        END { exit !(found && !locked) }' <<<"$list"
+}
+# 無視されるファイルのうち、先頭のパス要素が IGNORED_OK に無いものを、先頭 3 件まで ", " 区切りで出す。git status の失敗は 1。
+ignored_unknown() {
+    local out
+    out=$(git -C "$1" status --porcelain --ignored 2>/dev/null) || return 1
+    awk -v ok="$IGNORED_OK" 'BEGIN { k = split(ok, a, /[ \t]+/); for (i = 1; i <= k; i++) if (a[i] != "") A[a[i]] = 1 }
+        sub(/^!! /, "") { c = $0; sub(/\/.*/, "", c); if (!(c in A) && n++ < 3) printf "%s%s", (n > 1 ? ", " : ""), $0 }' <<<"$out"
+}
+
+scratch_mode=$(rule_mode scratch_worktrees)
+# off では探しもしない (ps も gh も呼ばない)。$REPO の worktree は上の $REPO の節で判定したので、本体の .git で見分けて飛ばす
+# ($REPO の節が残すと決めたもの (upstream が健在など) を、この節の別の条件で消さない。パスの綴りでなく .git で比べる)。
+if [ "$scratch_mode" != off ] && ! repo_common=$(git -C "$REPO" rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
+    log "WARN: $REPO の .git を引けず、scratchpad の worktree と見分けられない。scratchpad の worktree は全部残す"
+elif [ "$scratch_mode" != off ]; then
+    owners_ok=1
+    scratch_owners || owners_ok=0
+    # shellcheck disable=SC2086 # パターンを glob として展開する
+    for wt in $SCRATCH_WT_GLOB; do
+        [ -d "$wt" ] || continue
+        # linked worktree だけを見る。ただのフォルダ・clone・submodule はここで外れ、ログにも出さない。
+        gd=$(git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null) || continue
+        common=$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || continue
+        top=$(git -C "$wt" rev-parse --show-toplevel 2>/dev/null) || continue
+        [ "$gd" != "$common" ] && [ "$top" = "$wt" ] || continue
+        [ "$common" != "$repo_common" ] || continue
+        main=$(git -C "$wt" worktree list --porcelain 2>/dev/null | sed -n '1s/^worktree //p') || main=""
+        if [ -z "$main" ]; then
+            log "keep  $wt (scratchpad: 本体を引けない)"
+            continue
+        fi
+        if keep_match "$wt"; then
+            log "keep  $wt (「触らない」リスト)"
+            continue
+        fi
+        if [ "$orca_state" = unknown ]; then
+            log "keep  $wt (Orca に届かず、ピン留めが分からない)"
+            continue
+        fi
+        if [ "$orca_state" = ok ] && pinned "$wt" "$ps_json"; then
+            log "keep  $wt (Orca でピン留め)"
+            continue
+        fi
+        # lock と持ち主は gh より前に見る (削除の直前にも取り直す)。
+        if ! wt_unlocked "$main" "$wt"; then
+            log "keep  $wt (lock されている、または $main の git worktree list に見つからない)"
+            continue
+        fi
+        if is_dirty "$wt"; then
+            log "keep  $wt (未コミットの変更あり、または git status 失敗)"
+            continue
+        fi
+        if [ "$cwds_ok" = "0" ]; then
+            log "keep  $wt (lsof でプロセスの cwd を取れず、使用中か判定できない)"
+            continue
+        fi
+        if in_use "$wt"; then
+            log "keep  $wt (cwd がこの中にあるプロセスが居る)"
+            continue
+        fi
+        if ! sid=$(scratch_sid "$wt"); then
+            log "keep  $wt (パスから持ち主のセッションを読めない)"
+            continue
+        fi
+        if [ "$owners_ok" = 0 ] || grep -qxF -- "$sid" <<<"$owners"; then
+            log "keep  $wt (持ち主のセッション $sid が動いている、または分からない)"
+            continue
+        fi
+        if [ -z "$(find "$wt" -maxdepth 0 -mmin "+$((MIN_AGE_HOURS * 60))" 2>/dev/null)" ]; then
+            log "keep  $wt (${MIN_AGE_HOURS}h 以内に更新: 使用中の可能性)"
+            continue
+        fi
+        if ! ig=$(ignored_unknown "$wt"); then
+            log "keep  $wt (git status --ignored 失敗)"
+            continue
+        fi
+        if [ -n "$ig" ]; then
+            log "keep  $wt (無視されるファイル: $ig が IGNORED_OK に無い)"
+            continue
+        fi
+        # 作成時刻は管理ディレクトリ (<共通の .git>/worktrees/<名前>) の作成時刻 (秒)。作成時刻を持たないファイルシステムは 0 を返す。
+        created=$(stat -f %B "$gd" 2>/dev/null) || created=""
+        if ! is_uint "$created" || [ "$created" -le 0 ]; then
+            log "keep  $wt (作成時刻を取れない)"
+            continue
+        fi
+        def=$(git -C "$wt" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+        if branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null); then
+            if [ "$branch" = "${def#origin/}" ]; then
+                log "keep  $wt ($branch: デフォルトブランチ)"
+                continue
+            fi
+            pr_stale "$wt" "$branch" "$((created * 1000))" own || continue
+            if ! [ "$pr_closed" -le $((($(date +%s) - MIN_AGE_HOURS * 3600) * 1000)) ]; then
+                log "keep  $wt ($pr_why だが、閉じてから ${MIN_AGE_HOURS}h たっていない)"
+                continue
+            fi
+            why="scratch_worktrees: $pr_why"
+        else
+            # detached は PR を引けない。Orca の detached と同じく、作成から時間がたち、固有のコミットを持たないものだけ。
+            if [ "$created" -gt $(($(date +%s) - MIN_AGE_HOURS * 3600)) ]; then
+                log "keep  $wt (detached: 作成から ${MIN_AGE_HOURS}h 以内)"
+                continue
+            fi
+            if [ -z "$def" ] || ! git -C "$wt" merge-base --is-ancestor HEAD "$def" 2>/dev/null; then
+                log "keep  $wt (detached: デフォルトブランチに無いコミットを持つ、または判定不能)"
+                continue
+            fi
+            why="scratch_worktrees: detached: $def に含まれる"
+        fi
+        if [ "$scratch_mode" = list ]; then
+            wt_snapshot "$wt"
+            ledger_plan "scratch_worktrees $wt $(git -C "$wt" rev-parse --verify --quiet HEAD 2>/dev/null || true)" \
+                worktree "$wt" "$why" "$wt_restore" "$wt_lost" || log "WARN: 台帳に予定を書けない $CLEANUP_LEDGER"
+            log "PLAN  $wt ($why)"
+            continue
+        fi
+        mark_stale "$wt" "$why" "$main"
+    done
+fi
+
 # ---- worktree を消す。ブランチは残るのでコミットは失われない ----
 # 消せたものだけを removed に入れ、compose を落とす対象はここから決める。
 # 候補の段階で落とすと、削除が拒否された worktree の環境だけが毎時壊れる。
@@ -744,6 +913,7 @@ removed=()
 i=0
 for wt in ${removable[@]+"${removable[@]}"}; do
     why=${removable_why[$i]}
+    main=${removable_main[$i]}
     i=$((i + 1))
     # 判定から削除までに Orca の節 (fetch と gh) で数分空くので、Orca の節と同じく compose を止める前に取り直す。
     if is_dirty "$wt"; then
@@ -755,16 +925,24 @@ for wt in ${removable[@]+"${removable[@]}"}; do
         log "keep  $wt (削除直前に、cwd がこの中にあるプロセスを検出、または lsof で取れない)"
         continue
     fi
+    # scratchpad の worktree を作ったエージェントの cwd は scratchpad の外に在り、上の取り直しでは見えないので、lock と持ち主のセッションも取り直す。
+    if [ "${why#scratch_worktrees: }" != "$why" ]; then
+        sid=$(scratch_sid "$wt") || sid=""
+        if [ -z "$sid" ] || ! wt_unlocked "$main" "$wt" || ! scratch_owners || grep -qxF -- "$sid" <<<"$owners"; then
+            log "keep  $wt (削除直前に、lock または持ち主のセッションを検出、または取れない)"
+            continue
+        fi
+    fi
     wt_snapshot "$wt"
     stop_stacks "$wt" || continue
-    if run git -C "$REPO" worktree remove "$wt" 2>/dev/null; then
+    if run git -C "$main" worktree remove "$wt" 2>/dev/null; then
         log "removed $wt"
         removed+=("$wt")
         record_removed "$wt" "$why"
     else
         log "WARN: remove 失敗 $wt"
         # 登録が外れて残ったフォルダがあると git worktree add は already exists で通らないので、先に退けてもらう。
-        if wt_broken "$wt"; then
+        if wt_broken "$wt" "$main"; then
             record worktree-remove-failed "$wt" "$why (削除が途中で失敗し、登録だけ外れた)" ": 残ったフォルダを退けてから; $wt_restore" "$wt_lost"
         fi
         restart_stacks "$wt"
