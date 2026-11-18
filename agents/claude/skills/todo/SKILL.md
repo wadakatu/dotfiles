@@ -30,6 +30,6 @@ JSON
 
 - handler の答えは `.result.result`。`ok: false` なら `reason` をそのまま伝える（`bad-title`・`duplicate`・`full`・`off`・`store-broken` など。`off` はタブでまだ使い始めていない状態）。
 - 一覧には `ok` が無い。`off: true` は上の `off` と同じ、`broken` が null でなければそのまま伝える。
-- 一覧は `.result.result.groups` の `todo`・`doing`・`waiting`・`candidate`・`closed` ごとに、`rows`（`id`・`title`・`next`・`from`・`state`・`url` など）と `total`。`rows` は束ごとに `size` 件までなので、`total` の方が多ければ続きが在ると伝える。束・id・題を 1 行ずつ出すなら:
+- 一覧は `.result.result.groups` の `todo`・`doing`・`waiting`・`candidate`・`closed` ごとに、`rows`（`id`・`title`・`next`・`from`・`state`・`url` など）と `total`。`rows` は束ごとに `size` 件までなので、`total` の方が多ければ、`{"brief":true,"pages":{"candidate":1}}` のように束ごとのページ（0 始まり。範囲の外は最後のページになる）を足して続きを読む。束・id・題を 1 行ずつ出すなら:
   `jq -r '.result.result.groups | to_entries[] | .key as $g | .value.rows[] | "\($g)\t\(.id)\t\(.title)"'`
 - 答えが `{code, message}` のとき（CLI が失敗した。`plugin_not_found` は plugin が開発用に読み込まれていない）や、Orca が動いていないときは、足せなかったと伝えて止まる。別の場所に書き留めない。plugin の読み込みや再読み込みは自分でしない。
