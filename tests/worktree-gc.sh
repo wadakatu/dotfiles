@@ -1939,6 +1939,38 @@ check "判定は通った (前提)" logged "STALE $WT (scratch_worktrees: "
 scratch_kept "削除直前に、lock または持ち主のセッションを検出"
 check "compose を止めない" not_called wt-stack
 
+# 同じ時点で IGNORED_OK に無い無視されるファイルが現れたら、残す (直前の is_dirty は無視されるファイルを見ず、
+# git worktree remove も無視されるファイルごと消す)。
+scratch_case scratch-recheck-ignored
+printf '%s\t%s\n' wt-stack "$WT/docker" >"$T/docker-ps.tsv"
+printf 'echo .env >>%q\ntouch %q\n' "$T/r2/.git/info/exclude" "$WT/.env" >"$T/at-gh"
+scratch_gc
+check "判定は通った (前提)" logged "STALE $WT (scratch_worktrees: "
+scratch_kept "削除直前に、無視されるファイル: .env"
+check "台帳に行が無い" test ! -s "$LEDGER"
+check "compose を止めない" not_called wt-stack
+
+# glob が symlink を通っても (macOS の /tmp など)、物理パスにして linked worktree を見分け、判定もそのパスで行う。
+scratch_case scratch-glob-symlink
+ln -s "$T/tmp" "$T/tmplink"
+sha=$(git -C "$WT" rev-parse HEAD)
+run_gc RULE_scratch_worktrees=list SCRATCH_WT_GLOB="$T/tmplink/*/*/scratchpad/wt/*"
+check "物理パスで PLAN の行" logged "PLAN  $WT (scratch_worktrees: feat-s: PR #1 が MERGED)"
+check "鍵も物理パス" grep -qxF "scratch_worktrees $WT $sha" "$T/state/cleanup-ledger/planned"
+
+# symlink を通る glob でも、物理パスで書いた「触らない」リストと、物理パスで返る Orca のピン留めは当たり続ける。
+scratch_case scratch-glob-symlink-keep
+ln -s "$T/tmp" "$T/tmplink"
+echo "$WT" >"$KEEPLIST"
+scratch_gc SCRATCH_WT_GLOB="$T/tmplink/*/*/scratchpad/wt/*"
+scratch_kept "「触らない」リスト"
+
+scratch_case scratch-glob-symlink-pinned
+ln -s "$T/tmp" "$T/tmplink"
+ps_json "$WT" "$CREATED" done | jq '.result.worktrees[0].isPinned = true' >"$T/ps.json"
+scratch_gc SCRATCH_WT_GLOB="$T/tmplink/*/*/scratchpad/wt/*"
+scratch_kept "Orca でピン留め"
+
 # 同じ時点で lock されたら、compose を止めずに残す。
 scratch_case scratch-recheck-locked
 printf '%s\t%s\n' wt-stack "$WT/docker" >"$T/docker-ps.tsv"

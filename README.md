@@ -487,7 +487,7 @@ ps に居ない pid、`stat` の失敗、数字でない時刻、今より先の
 （別のリポへのコミットは `<scratchpad>/wt/<名前>` で行う。`agents/claude/rules/sibling-repo-commits.md`）、PR が閉じた後に消す。
 Claude Code が自分で掃除するのは自分が作った印の在る worktree だけで（https://code.claude.com/docs/en/worktrees.md ）、scratchpad が消えても
 git の登録とブランチの占有は残る（https://code.claude.com/docs/en/claude-directory.md ）。探すのは `SCRATCH_WT_GLOB`
-（既定 `/private/tmp/claude-<uid>/*/*/scratchpad/wt/*`。空白を含むパターンは使えない）に当たるディレクトリのうち linked worktree だけ
+（既定 `/private/tmp/claude-<uid>/*/*/scratchpad/wt/*`。空白を含むパターンは使えない。`/tmp/…` のように symlink を通るパスも書けるが、判定と台帳は symlink を解いた物理パスで行う）に当たるディレクトリのうち linked worktree だけ
 （`git rev-parse --absolute-git-dir` と `--git-common-dir` が違い、`--show-toplevel` がそのディレクトリ自身。ただのフォルダ・clone・submodule は見ず、ログにも出さない）。
 `$REPO` の worktree は上の `$REPO` の節が判定する。`off` では探さず、`ps` も `gh` も呼ばない。`REPO` が無い回は動かない。次を **全て** 満たすものだけを、その worktree の本体（`git worktree list --porcelain` の 1 行目）から `git worktree remove` する。
 
@@ -506,7 +506,7 @@ git の登録とブランチの占有は残る（https://code.claude.com/docs/en
 detached は PR の 2 行の代わりに「作成から `MIN_AGE_HOURS` 時間以上たち、`origin/HEAD` から辿れる」で見る。ブランチが `origin/HEAD` のブランチなら残す。
 ps が失敗した・空だった回と、記録を読めない claude が 1 本でも居る回は全部残し、`claude <n> 本のうち <m> 本の記録を読めない。scratchpad の worktree は全部残す` を出す
 （記録の形は公開されていない。この行が毎回出るなら、規則は発火していない）。作成時刻が数字でない・0 以下（作成時刻を持たないファイルシステム）なら残す。
-削除の直前に、未コミットの変更と cwd に加えて、lock と持ち主のセッションも取り直す。ほかのリポを fetch はしない（`origin/HEAD` が古ければ残す側に倒れる）。
+削除の直前に、未コミットの変更と cwd に加えて、lock・持ち主のセッション・無視されるファイルも取り直す。ほかのリポを fetch はしない（`origin/HEAD` が古ければ残す側に倒れる）。
 `list` では `PLAN  <パス> (<理由>)` と台帳の `plan-worktree`（鍵は `scratch_worktrees <パス> <HEAD の SHA>`）、`on` では台帳の規則の列が `scratch_worktrees: ` で始まる。
 
 ```bash

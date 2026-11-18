@@ -805,6 +805,9 @@ elif [ "$scratch_mode" != off ]; then
     # shellcheck disable=SC2086 # パターンを glob として展開する
     for wt in $SCRATCH_WT_GLOB; do
         [ -d "$wt" ] || continue
+        # glob が symlink を通っても (/tmp など)、git の --show-toplevel は物理パスを返すので、物理パスに直してから見分ける。
+        # 後ろの判定 (「触らない」リスト、ピン留め、lock、cwd、台帳、削除) も全部このパスで行う。直せなければ飛ばす。
+        wt=$(cd "$wt" 2>/dev/null && pwd -P) || continue
         # linked worktree だけを見る。ただのフォルダ・clone・submodule はここで外れ、ログにも出さない。
         gd=$(git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null) || continue
         common=$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || continue
@@ -926,10 +929,19 @@ for wt in ${removable[@]+"${removable[@]}"}; do
         continue
     fi
     # scratchpad の worktree を作ったエージェントの cwd は scratchpad の外に在り、上の取り直しでは見えないので、lock と持ち主のセッションも取り直す。
+    # 無視されるファイルも取り直す (上の is_dirty は見ず、git worktree remove は無視されるファイルごと消す)。
     if [ "${why#scratch_worktrees: }" != "$why" ]; then
         sid=$(scratch_sid "$wt") || sid=""
         if [ -z "$sid" ] || ! wt_unlocked "$main" "$wt" || ! scratch_owners || grep -qxF -- "$sid" <<<"$owners"; then
             log "keep  $wt (削除直前に、lock または持ち主のセッションを検出、または取れない)"
+            continue
+        fi
+        if ! ig=$(ignored_unknown "$wt"); then
+            log "keep  $wt (削除直前に git status --ignored 失敗)"
+            continue
+        fi
+        if [ -n "$ig" ]; then
+            log "keep  $wt (削除直前に、無視されるファイル: $ig が IGNORED_OK に無い)"
             continue
         fi
     fi
