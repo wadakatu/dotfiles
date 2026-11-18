@@ -46,8 +46,11 @@ case "$1" in
 esac
 exit 0
 EOF
+# gh は引数を gh-calls に控える。at-gh があれば、最初の呼び出しの時点でそれを 1 度だけ流す (判定の後に状態を変える継ぎ目)。
 cat >"$base/bin/gh" <<'EOF'
 #!/usr/bin/env bash
+echo "$*" >>"$FAKE/gh-calls"
+if [ -f "$FAKE/at-gh" ]; then bash "$FAKE/at-gh"; rm -f "$FAKE/at-gh"; fi
 cat "$FAKE/prs.json"
 EOF
 # worktree ps は呼ばれるたびに ps.<回数>.json を返す (無ければ ps.json、それも無ければ worktree 0 本)。ps-fail があれば失敗する。
@@ -103,7 +106,8 @@ EOF
 printf '#!/usr/bin/env bash\ncase " $* " in *" -d cwd "*) [ ! -f "$FAKE/lsof-cwd" ] || { cat "$FAKE/lsof-cwd"; exit 0; } ;; esac\nexec %q "$@"\n' \
     "$(command -v lsof)" >"$base/bin/lsof"
 # ps・stat・sysctl は呼ばれた引数を <名前>-calls に控え、<名前>-fail があれば失敗し、無ければ置いた値を返す
-# (CI の ubuntu には BSD の stat -f と kern.waketime が無い)。stat は stat-times の「<パス> <atime> <mtime>」の行から引く。
+# (CI の ubuntu には BSD の stat -f と kern.waketime が無い)。stat は stat-times の「<パス> <atime> <mtime>」の行から引く
+# (「<パス> <作成時刻>」の 1 列の行は、-f %B の答えとしてその 1 つだけを返す)。
 cat >"$base/bin/ps" <<'EOF'
 #!/usr/bin/env bash
 echo "$*" >>"$FAKE/ps-calls"; [ ! -f "$FAKE/ps-fail" ] || exit 1; cat "$FAKE/ps-out"
@@ -111,7 +115,7 @@ EOF
 cat >"$base/bin/stat" <<'EOF'
 #!/usr/bin/env bash
 echo "$*" >>"$FAKE/stat-calls"; [ ! -f "$FAKE/stat-fail" ] || exit 1
-awk -v f="${!#}" '$1 == f { print $2, $3; n = 1 } END { exit !n }' "$FAKE/stat-times"
+awk -v f="${!#}" '$1 == f { print $2 (NF > 2 ? " " $3 : ""); n = 1 } END { exit !n }' "$FAKE/stat-times"
 EOF
 cat >"$base/bin/sysctl" <<'EOF'
 #!/usr/bin/env bash
@@ -125,6 +129,8 @@ setup() {
     T="$base/$CASE"
     # 台帳と会話記録の置き場所。run_gc を通らない呼び出しもあるので、関数の引数でなく export で全部に継がせる。
     export STATE_ROOT="$T/state" CLAUDE_CONFIG_DIR="$T/claude"
+    # scratchpad の worktree を探す場所。実機の scratchpad (このテストを流すセッションの作業ツリーも在る) を見ないよう、全部の呼び出しに継がせる。
+    export SCRATCH_WT_GLOB="$T/tmp/*/*/scratchpad/wt/*"
     LEDGER="$T/state/cleanup-ledger/ledger.tsv"
     mkdir -p "$T/orca"
     # 「触らない」リストが無い回は何も消さないので、既存のケースは空のリスト (守るものが無い) で流す。
@@ -1646,6 +1652,301 @@ run_gc RULE_idle_shell=on
 check "判定は通った (前提)" logged "STALE $WT ($RULE_COL"
 check "orca rm が呼ばれない" test ! -e "$T/rm-calls"
 check "理由がログに出る" logged "keep  $WT (削除直前に、cwd がこの中にあるプロセスを検出"
+
+# ---- scratch_worktrees: セッションが scratchpad に作って残した、別のリポの worktree を、PR が閉じた後に消す ----
+# 基準: 別のリポ (r2) の linked worktree が glob の下に在り、clean・cwd を持つプロセスなし・claude のプロセスなし・mtime は古い・
+# 自分の PR が作成 (管理ディレクトリの作成時刻。偽の stat) の後、48h 前に閉じている。残すケースは基準から 1 つだけ変え、keep の行の理由まで見る。
+# 偽の ps には claude でない行を 1 行置く (空の出力は「取れない」として残すので、claude が居ないことはこの形で作る)。
+SID=0a1b2c3d-0000-4000-8000-000000000001
+OTHER='"0a1b2c3d-0000-4000-8000-000000000002"'
+OLD=202601010000
+scratch_case() { # scratch_case <ケース名>: 基準の worktree を作り、パスを WT に
+    setup "$1"
+    git init -q --bare -b main "$T/o2.git"
+    git clone -q "$T/o2.git" "$T/r2" 2>/dev/null
+    git -C "$T/r2" commit -q --allow-empty -m init
+    git -C "$T/r2" push -q origin main
+    git -C "$T/r2" remote set-head origin main
+    WT="$T/tmp/proj/$SID/scratchpad/wt/s1"
+    mkdir -p "${WT%/*}"
+    git -C "$T/r2" worktree add -q -b feat-s "$WT" origin/main
+    echo s >"$WT/f.txt"
+    git -C "$WT" add f.txt && git -C "$WT" commit -q -m "change feat-s"
+    git -C "$WT" push -q -u origin feat-s 2>/dev/null
+    git -C "$WT" push -q origin "HEAD:refs/pull/1/head" 2>/dev/null
+    jq -n --arg c "$(ago $((48 * H)))" '[{number: 1, state: "MERGED", closedAt: $c}]' >"$T/prs.json"
+    birth $((72 * H))
+    printf '  800     1 ??       /usr/sbin/daemon\n' >"$T/ps-out"
+    touch -t "$OLD" "$WT"
+}
+birth() { printf '%s %s\n' "$T/r2/.git/worktrees/s1" $(($(date +%s) - $1)) >"$T/stat-times"; } # birth <秒前>: 管理ディレクトリの作成時刻
+scratch_gc() { run_gc RULE_scratch_worktrees=on "$@"; }
+scratch_kept() { # scratch_kept <keep の行の理由 (先頭から)>
+    check "残る" exists "$WT"
+    check "理由がログに出る" logged "keep  $WT ($1"
+}
+claude_proc() { # claude_proc <pid> <comm> [<sessionId の JSON の値>]: 偽の ps に claude を 1 本足し、値があれば記録を置く
+    printf '  %s     1 ttys001  %s\n' "$1" "$2" >>"$T/ps-out"
+    [ $# -gt 2 ] || return 0
+    mkdir -p "$CLAUDE_CONFIG_DIR/sessions"
+    printf '{"pid": %s, "sessionId": %s}\n' "$1" "$3" >"$CLAUDE_CONFIG_DIR/sessions/$1.json"
+}
+gh_call() { grep -F -- "--head $1 " "$T/gh-calls"; } # gh_call <ブランチ>: そのブランチの PR を引いた gh の呼び出し
+
+scratch_case scratch-off
+run_gc
+check "残る" exists "$WT"
+check "gh を呼ばない" test ! -e "$T/gh-calls"
+check "ps を呼ばない" test ! -e "$T/ps-calls"
+check "stat を呼ばない" test ! -e "$T/stat-calls"
+
+scratch_case scratch-on-removes
+sha=$(git -C "$WT" rev-parse HEAD)
+scratch_gc
+check "消える" gone "$WT"
+check "登録も外れる" test -z "$(git -C "$T/r2" worktree list --porcelain | grep -F "$WT")"
+check "台帳は 1 行" rows 1
+check "種類は worktree" col_has "$WT" 2 worktree
+check "規則の列の先頭に scratch_worktrees" col_starts "$WT" 4 "scratch_worktrees: feat-s: PR #1 が MERGED"
+check "戻し方の cd の先は、その worktree のリポの本体" col_has "$WT" 5 "cd $T/r2 && git worktree add -B feat-s $WT $sha"
+check "戻し方が貼って通る" restores_parse
+
+scratch_case scratch-list-plans
+sha=$(git -C "$WT" rev-parse HEAD)
+run_gc RULE_scratch_worktrees=list
+check "残る" exists "$WT"
+check "PLAN の行" logged "PLAN  $WT (scratch_worktrees: feat-s: PR #1 が MERGED)"
+check "台帳は plan-worktree の 1 行だけ" test "$(awk -F'\t' '$2 == "plan-worktree"' "$LEDGER" 2>/dev/null | grep -c .)" = 1
+check "台帳は 1 行" rows 1
+check "鍵は規則・パス・HEAD" grep -qxF "scratch_worktrees $WT $sha" "$T/state/cleanup-ledger/planned"
+check "予定の戻し方の cd の先も、その worktree のリポの本体" col_has "$WT" 5 "cd $T/r2 && git worktree add -B feat-s $WT $sha"
+check "通知が出ない" test ! -e "$T/notify-calls"
+run_gc RULE_scratch_worktrees=list
+check "もう 1 回流しても 1 行のまま" rows 1
+
+scratch_case scratch-session-alive
+claude_proc 700 claude "\"$SID\""
+scratch_gc
+scratch_kept "持ち主のセッション"
+
+scratch_case scratch-session-alive-path # comm がパス付きで出ても claude に数える
+claude_proc 700 /opt/claude/bin/claude "\"$SID\""
+scratch_gc
+scratch_kept "持ち主のセッション"
+
+scratch_case scratch-session-other
+claude_proc 700 claude "$OTHER"
+scratch_gc
+check "消える" gone "$WT"
+
+for v in missing number; do # 記録を読めない claude が 1 本: ファイルが無い・sessionId が文字列でない
+    scratch_case "scratch-claude-unreadable-$v"
+    claude_proc 700 claude "$OTHER"
+    if [ "$v" = missing ]; then claude_proc 701 claude; else claude_proc 701 claude 42; fi
+    scratch_gc
+    scratch_kept "持ち主のセッション"
+    check "本数の行がログに出る" logged "claude 2 本のうち 1 本の記録を読めない。scratchpad の worktree は全部残す"
+done
+
+scratch_case scratch-ps-fails # ps-fail は偽の orca worktree ps も落とすので、答えのファイルを消して偽の ps だけを失敗させる
+rm "$T/ps-out"
+scratch_gc
+scratch_kept "持ち主のセッション"
+
+scratch_case scratch-ps-empty
+: >"$T/ps-out"
+scratch_gc
+scratch_kept "持ち主のセッション"
+
+scratch_case scratch-locked
+git -C "$T/r2" worktree lock "$WT"
+scratch_gc
+scratch_kept "lock されている"
+
+scratch_case scratch-dirty
+touch "$WT/new.txt"
+touch -t "$OLD" "$WT"
+scratch_gc
+scratch_kept "未コミットの変更あり"
+
+scratch_case scratch-cwd
+printf 'p900\nfcwd\nn%s/sub\n' "$WT" >"$T/lsof-cwd"
+scratch_gc
+scratch_kept "cwd がこの中にあるプロセスが居る"
+
+scratch_case scratch-young
+touch "$WT"
+scratch_gc
+scratch_kept "24h 以内に更新"
+
+scratch_case scratch-no-pr
+echo '[]' >"$T/prs.json"
+scratch_gc
+scratch_kept "feat-s: PR 無し"
+
+scratch_case scratch-pr-open
+echo '[{"number": 1, "state": "OPEN", "closedAt": null}]' >"$T/prs.json"
+scratch_gc
+scratch_kept "feat-s: PR 進行中"
+
+scratch_case scratch-pr-closed-recently
+jq --arg c "$(ago $((2 * H)))" '.[0].closedAt = $c' "$T/prs.json" >"$T/prs.tmp" && mv "$T/prs.tmp" "$T/prs.json"
+scratch_gc
+scratch_kept "feat-s: PR #1 が MERGED だが、閉じてから 24h たっていない"
+
+scratch_case scratch-pr-before-create # 48h 前に閉じた PR と、30h 前に作った管理ディレクトリ
+birth $((30 * H))
+scratch_gc
+scratch_kept "feat-s: PR #1 が worktree の作成より前に閉じている"
+
+scratch_case scratch-birth-stat-fails
+touch "$T/stat-fail"
+scratch_gc
+scratch_kept "作成時刻を取れない"
+
+scratch_case scratch-birth-zero # 作成時刻を持たないファイルシステムは 0 を返す
+printf '%s 0\n' "$T/r2/.git/worktrees/s1" >"$T/stat-times"
+scratch_gc
+scratch_kept "作成時刻を取れない"
+
+scratch_case scratch-own-prs-only
+orca_wt "$T/orca/wt" feat-o "$AFTER" "$CREATED"
+scratch_gc
+check "scratch の呼び出しに --author @me" eval 'gh_call feat-s | grep -qF -- "--author @me"'
+check "Orca の呼び出しは在る (前提)" eval 'gh_call feat-o >/dev/null'
+check "Orca の呼び出しに --author が無い" eval '! gh_call feat-o | grep -qF -- "--author"'
+
+scratch_case scratch-commits-outside-pr
+echo x >"$WT/g.txt"
+git -C "$WT" add g.txt && git -C "$WT" commit -q -m local
+touch -t "$OLD" "$WT"
+scratch_gc
+scratch_kept "feat-s: PR #1 に無いコミットあり"
+
+scratch_case scratch-ignored-unknown
+printf '%s\n' .env node_modules/ >>"$T/r2/.git/info/exclude"
+mkdir -p "$WT/node_modules/x"
+touch "$WT/.env" "$WT/node_modules/x/a"
+touch -t "$OLD" "$WT"
+scratch_gc IGNORED_OK=node_modules
+scratch_kept "無視されるファイル: .env"
+check "IGNORED_OK の名前は理由に出さない" test -z "$(grep "keep  $WT (無視.*node_modules" "$T/log")"
+
+scratch_case scratch-ignored-ok
+echo node_modules/ >>"$T/r2/.git/info/exclude"
+mkdir -p "$WT/node_modules/x"
+touch "$WT/node_modules/x/a"
+touch -t "$OLD" "$WT"
+scratch_gc IGNORED_OK=node_modules
+check "消える" gone "$WT"
+
+scratch_case scratch-detached
+git -C "$WT" switch -q --detach origin/main
+touch -t "$OLD" "$WT"
+birth $((48 * H))
+scratch_gc
+check "消える" gone "$WT"
+check "規則" col_starts "$WT" 4 "scratch_worktrees: detached: origin/main に含まれる"
+
+scratch_case scratch-detached-young
+git -C "$WT" switch -q --detach origin/main
+touch -t "$OLD" "$WT"
+birth $((2 * H))
+scratch_gc
+scratch_kept "detached: 作成から 24h 以内"
+
+scratch_case scratch-detached-commit # origin/HEAD に無いコミットを持つ
+git -C "$WT" switch -q --detach
+touch -t "$OLD" "$WT"
+scratch_gc
+scratch_kept "detached: デフォルトブランチに無いコミットを持つ"
+
+scratch_case scratch-plain-dir # glob の下の、ただのフォルダ・clone・submodule は触らず、ログにも出さない
+d=${WT%/*}
+mkdir -p "$d/plain"
+git clone -q "$T/o2.git" "$d/clone" 2>/dev/null
+sup="$T/tmp/proj/0a1b2c3d-0000-4000-8000-000000000003/scratchpad/wt" # wt/ そのものを superproject にし、wt/sub を submodule に
+git clone -q "$T/o2.git" "$sup" 2>/dev/null
+git -C "$sup" -c protocol.file.allow=always submodule add -q "$T/o2.git" sub 2>/dev/null
+touch -t "$OLD" "$d/plain" "$d/clone" "$sup/sub"
+scratch_gc
+check "submodule が出来た (前提)" test -f "$sup/sub/.git"
+check "基準の worktree は消える (前提: 節は動いた)" gone "$WT"
+check "フォルダ・clone・submodule は残る" eval 'exists "$d/plain" && exists "$d/clone" && exists "$sup/sub"'
+check "ログに出さない" test -z "$(grep -F -e "$d/plain" -e "$d/clone" -e "$sup/sub" "$T/log")"
+
+scratch_case scratch-keep-list
+echo "$WT" >"$KEEPLIST"
+scratch_gc
+scratch_kept "「触らない」リスト"
+
+scratch_case scratch-orca-pinned
+ps_json "$WT" "$CREATED" done | jq '.result.worktrees[0].isPinned = true' >"$T/ps.json"
+scratch_gc
+scratch_kept "Orca でピン留め"
+
+scratch_case scratch-orca-unreachable
+touch "$T/orca-unreachable"
+scratch_gc
+scratch_kept "Orca に届かず"
+
+scratch_case scratch-path-odd # glob を変えてパスに scratchpad が無ければ、持ち主が分からないので残す
+mkdir -p "$T/elsewhere"
+git -C "$T/r2" worktree move "$WT" "$T/elsewhere/s1"
+WT=$T/elsewhere/s1
+touch -t "$OLD" "$WT"
+scratch_gc SCRATCH_WT_GLOB="$T/elsewhere/*"
+scratch_kept "パスから持ち主のセッションを読めない"
+
+# $REPO の worktree が glob の下に在れば、$REPO の節だけが判定する ($REPO の節が残すものを、scratch の節の条件で消さない)。
+# REPO は symlink を通して渡す (パスの綴りで比べると、ここで二重に判定する)。
+setup scratch-repo-wt-once
+W="$T/tmp/proj/$SID/scratchpad/wt/r"
+mkdir -p "${W%/*}"
+merged_repo_wt "$W" feat-a
+git -C "$W" push -q origin "HEAD:refs/pull/1/head" 2>/dev/null
+jq -n --arg c "$(ago $((48 * H)))" '[{number: 1, state: "MERGED", closedAt: $c}]' >"$T/prs.json"
+printf '%s %s\n' "$T/repo/.git/worktrees/r" $(($(date +%s) - 72 * H)) >"$T/stat-times"
+printf '  800     1 ??       /usr/sbin/daemon\n' >"$T/ps-out"
+ln -s "$T/repo" "$T/repo-link"
+scratch_gc REPO="$T/repo-link"
+check "消える" gone "$W"
+check "scratch の節は gh を呼ばない" test ! -e "$T/gh-calls"
+check "台帳は 1 行" rows 1
+check "規則は \$REPO の節のもの" col_starts "$W" 4 "feat-a: upstream が remote から消滅"
+
+# 別のリポの worktree で remove が拒否されたら、その本体の一覧で登録を確かめ、登録が残っていれば台帳に書かない
+# ($REPO の一覧で見ると、登録が無いので「登録だけ外れた」と読み、偽の worktree-remove-failed を書く)。
+scratch_case scratch-remove-fails
+mkdir -p "$T/bin"
+printf '#!/usr/bin/env bash\ncase " $* " in *" worktree remove "*) exit 1 ;; esac\nexec %q "$@"\n' "$(command -v git)" >"$T/bin/git"
+chmod +x "$T/bin/git"
+scratch_gc PATH="$T/bin:$base/bin:$PATH"
+check "残る" exists "$WT"
+check "WARN が出る" logged "WARN: remove 失敗 $WT"
+check "台帳に行が無い" test ! -s "$LEDGER"
+
+# 判定の後 (偽の gh が呼ばれた時点) に持ち主の記録と claude のプロセスが現れたら、compose を止めずに残す。
+scratch_case scratch-recheck-session
+printf '%s\t%s\n' wt-stack "$WT/docker" >"$T/docker-ps.tsv"
+cat >"$T/at-gh" <<EOF
+mkdir -p "$CLAUDE_CONFIG_DIR/sessions"
+printf '{"sessionId": "%s"}\n' "$SID" >"$CLAUDE_CONFIG_DIR/sessions/700.json"
+printf '  700     1 ttys001  claude\n' >>"$T/ps-out"
+EOF
+scratch_gc
+check "判定は通った (前提)" logged "STALE $WT (scratch_worktrees: "
+scratch_kept "削除直前に、lock または持ち主のセッションを検出"
+check "compose を止めない" not_called wt-stack
+
+# 同じ時点で lock されたら、compose を止めずに残す。
+scratch_case scratch-recheck-locked
+printf '%s\t%s\n' wt-stack "$WT/docker" >"$T/docker-ps.tsv"
+printf 'git -C %q worktree lock %q\n' "$T/r2" "$WT" >"$T/at-gh"
+scratch_gc
+check "判定は通った (前提)" logged "STALE $WT (scratch_worktrees: "
+scratch_kept "削除直前に、lock または持ち主のセッションを検出"
+check "compose を止めない" not_called wt-stack
 
 for f in "$base"/*/log; do grep -q '^exit=0$' "$f" || { echo "FAIL [$(basename "$(dirname "$f")")] exit が 0 でない"; fail=1; }; done
 [ "$fail" = 0 ] && echo "ok: worktree-gc"
