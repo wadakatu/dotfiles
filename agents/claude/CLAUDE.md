@@ -69,6 +69,7 @@
 - Codex は `~/.codex/config.toml` の既定（Astra）。Bash の `run_in_background: true` で流し、stdin を閉じる（閉じないと待ち続ける）。
   - 設計レビュー: `codex exec -C <worktree> -s read-only -o <out.md> - < <prompt.md>`。設計書のパスを渡し、記述を鵜呑みにせずコードで確かめるよう書く。
   - 実装レビュー: 組み込みのレビュー（`/review` と同じ）。`codex exec -C <worktree> -s read-only -o <out.md> review --base <base> < /dev/null`。`--base` と観点は併用できないので観点は足さない。
+  - Codex が利用上限・疎通なしで使えないときは、回復を待つ予定を立てずに、別セッションのレビューへ切り替える（設計レビューも実装レビューも）。モデルはユーザーが直近に指定したもの、指定が無ければ Agent ツールの `model: "fable"`（新しい文脈・読み取りだけ）。結論でなく差分・設計書・issue を渡し、記述を鵜呑みにせずコードで確かめるよう書く。切り替えたことを報告に書く。Codex が使えるときの既定は変わらない。**Why:** Codex の回復まで待つと報告するたびに「待たず別セッションでレビューを進めて」と 3 回言われた。
 - PR を draft で出したら、報告に理由と ready にする条件を書く。
 - 途中を見たいと言われたら `orca agent launch --agent claude --model claude-fable-5-2 --prompt "<依頼>" --json` で Orca のタブに出す。
 
