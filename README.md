@@ -572,7 +572,7 @@ tail -50 ~/Library/Logs/agent-gc.log
 
 入力欄に書きかけがあるもの、Orca の端末が分からないもの、cwd が分からないもの、cwd が「触らない」リスト（上の `~/.config/cleanup-keep`）か
 `EXCLUDE_RE` に当たるものは止めない。裏で動くものも止めない: 子孫にシェルが居るもの（`bg-shell`。裏の Bash コマンド）と、
-会話記録に予約を作る呼び出し（`CronCreate`・`ScheduleWakeup`）が在る Claude（`scheduled`。済んだ予約でも残る。
+会話記録に予約を作る呼び出し（`CronCreate`・`ScheduleWakeup`）か `/clear` で引き継いだ予約（`session_cron_carry`）が在る Claude（`scheduled`。済んだ予約でも残る。
 会話記録が引けなければ `sched-unknown`）。止めたいときは、そのタブで `/exit` を打つ。入力欄と記録は、送る直前に確かめ直す。リストは cwd が行そのものか行の下のときだけ当たる（worktree-gc と違い、行が cwd の中を指しても守らない）。
 **リストが無い・読めない回の `stop` は 1 本も止めず**、通知を 1 日 1 回出す。
 止めたセッションは、残ったタブに表示される `claude --resume <id>` / `codex resume <id>` で戻れる。タブを閉じた後は、

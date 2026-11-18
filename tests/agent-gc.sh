@@ -435,6 +435,51 @@ tx SID-1 '{"type":"assistant","message":{"role":"assistant","content":[{"type":"
 bash "$script" stop 101 >/dev/null 2>&1
 check "/exit を送る" sent 101
 
+# /clear の後の会話記録には tool_use が無く、生きている予約は session_cron_carry の 1 行にだけ出る (実物の形)。
+carry_kept() { # carry_kept <attachment の中身>: carry の行だけの記録で、list と stop が scheduled で残す
+    proc 101 claude /w/a "" SID-1
+    tx SID-1 "{\"type\":\"attachment\",\"attachment\":{\"type\":\"session_cron_carry\",$1},\"entrypoint\":\"cli\"}"
+    check "list の残すものに scheduled" grep -qF "$(printf '101\tclaude\t100h\tscheduled')" <<<"$(bash "$script" list 2>/dev/null)"
+    bash "$script" stop 101 >/dev/null 2>&1
+    check "/exit を送らない" sent_none
+    check "ログに scheduled" grep -qF 'pid=101: scheduled' "$LOG"
+}
+
+reset "sched-carry-cron: carry の otherArmed に予約が在れば送らない"
+carry_kept '"tasks":[],"otherArmed":[{"id":"c1","cron":"0 9 1 1 *","prompt":"p","createdAt":1,"recurring":false}]'
+
+reset "sched-carry-tasks: carry の tasks に予約が在れば送らない"
+carry_kept '"tasks":[{"id":"c1","cron":"*/5 * * * *","prompt":"p","createdAt":1,"recurring":true}]'
+
+reset "sched-carry-wakeup: carry に wakeup が在れば送らない"
+carry_kept '"tasks":[],"wakeup":{"prompt":"/loop p","scheduledFor":1,"reason":"r"}'
+
+reset "sched-carry-empty: 中身が空の carry なら送る"
+proc 101 claude /w/a "" SID-1
+tx SID-1 '{"type":"attachment","attachment":{"type":"session_cron_carry","tasks":[]},"entrypoint":"cli"}'
+bash "$script" stop 101 >/dev/null 2>&1
+check "/exit を送る" sent 101
+
+reset "sched-carry-text-only: 本文に carry の名前が在るだけなら送る"
+proc 101 claude /w/a "" SID-1
+tx SID-1 '{"type":"user","message":{"content":[{"type":"text","text":"{\"type\":\"session_cron_carry\",\"tasks\":[1]} と書いた"}]}}'
+bash "$script" stop 101 >/dev/null 2>&1
+check "/exit を送る" sent 101
+
+reset "sched-carry-malformed: carry の tasks が配列でなければ送らない"
+proc 101 claude /w/a "" SID-1
+tx SID-1 '{"type":"attachment","attachment":{"type":"session_cron_carry","tasks":"c1"},"entrypoint":"cli"}'
+bash "$script" stop 101 >/dev/null 2>&1
+check "/exit を送らない" sent_none
+check "ログに sched-unknown" grep -qF 'pid=101: sched-unknown' "$LOG"
+
+reset "sched-carry-no-tasks: carry に tasks が無ければ (形が変わった) 送らない"
+proc 101 claude /w/a "" SID-1
+tx SID-1 '{"type":"attachment","attachment":{"type":"session_cron_carry","crons":[{"id":"c1"}]},"entrypoint":"cli"}'
+bash "$script" stop 101 >/dev/null 2>&1
+check "/exit を送らない" sent_none
+check "ログに sched-unknown" grep -qF 'pid=101: sched-unknown' "$LOG"
+
 reset "stop-sched-unknown: 会話記録が無ければ送らない"
 proc 101 claude /w/a "" SID-1
 rm -f "$CLAUDE_CONFIG_DIR/projects/x/SID-1.jsonl"

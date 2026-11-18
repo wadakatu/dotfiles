@@ -201,11 +201,12 @@ collect() {
     done
 }
 
-# judge の後ろの 1 段。候補の Claude のうち、会話記録に予約を作る呼び出し (CronCreate・ScheduleWakeup の tool_use) が
-# 在るものを scheduled、会話記録が引けないものを sched-unknown にする (どちらも keep)。未発火の予約は記録の status に
-# 出ず、止めると自分で間隔を決める /loop は戻らない。jq だけの judge に置かないのは、ファイルを読むため。
-# 道具の名前は道具の一覧や本文にも出るので、文字列の一致では決めない。数十 MB になるので grep で行を絞り、
-# 当たった行を jq で tool_use の要素か確かめる。当たった行が JSON として読めなければ、分からないとして残す。
+# judge の後ろの 1 段。候補の Claude のうち、会話記録に予約を作る呼び出し (CronCreate・ScheduleWakeup の tool_use) か
+# /clear で引き継いだ予約 (中身の在る session_cron_carry) が在るものを scheduled、会話記録が引けないものを
+# sched-unknown にする (どちらも keep)。未発火の予約は記録の status に出ず、止めると自分で間隔を決める /loop は戻らない。
+# jq だけの judge に置かないのは、ファイルを読むため。名前は道具の一覧や本文にも出るので、文字列の一致では決めない。
+# 数十 MB になるので grep で行を絞り、当たった行を jq で tool_use・carry の要素か確かめる。当たった行が JSON として
+# 読めない、carry の形が読めなければ、分からないとして残す。
 # ponytail: 済んだ予約・消した予約でも残る。未発火だけを見分けるなら、CronDelete と発火を突き合わせる。
 sched() {
     local row sid f got ok err
@@ -228,9 +229,13 @@ sched() {
                     [ -f "$f" ] || continue
                     # "<0 予約なし / 1 読めない行 / 2 予約あり> <grep の終了コード> <jq の終了コード>"。grep は 1 が当たらない、2 が読めない。
                     # -a: NUL を含む会話記録でも行を出す (GNU grep は行の代わりに binary file matches を出す)。
-                    got=$(grep -a -h -F -e CronCreate -e ScheduleWakeup -- "$f" 2>/dev/null |
+                    got=$(grep -a -h -F -e CronCreate -e ScheduleWakeup -e session_cron_carry -- "$f" 2>/dev/null |
                         jq -njR 'reduce (inputs | try (fromjson
-                                | if any(.. | objects; .type == "tool_use" and (.name == "CronCreate" or .name == "ScheduleWakeup"))
+                                | if any(.. | objects; (.type == "tool_use" and (.name == "CronCreate" or .name == "ScheduleWakeup"))
+                                        or (.type == "session_cron_carry"
+                                            and if (.tasks | type == "array") and (.otherArmed | type == "array" or type == "null")
+                                                then (.tasks | length) + (.otherArmed | length) > 0 or .wakeup != null
+                                                else error end))
                                   then 2 else 0 end) catch 1) as $s (0; if $s > . then $s else . end)' 2>/dev/null
                         printf ' %s %s' "${PIPESTATUS[0]}" "${PIPESTATUS[1]}")
                     case $got in
