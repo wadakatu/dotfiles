@@ -308,6 +308,10 @@ restart_stacks() { # restart_stacks <worktree>
     record compose-stop "${names//$'\n'/ }" "$1 を消す前に止めたが、削除が拒否され、docker start も失敗" "$cmd" ""
 }
 
+# git の操作 (merge・cherry-pick・revert・bisect・rebase・sequencer) の途中にだけ在る印の名前。本体では .git の下、
+# linked worktree では管理ディレクトリ (<共通の .git>/worktrees/<名前>) の下に在る。ff_checkouts と wt_admin_hold が使う。
+GIT_OP_MARKS="MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD BISECT_LOG rebase-merge rebase-apply sequencer"
+
 # $FF_CHECKOUTS を origin のデフォルトブランチへ fast-forward する。人が使っている途中かもしれないので、
 # ブランチの切り替え・stash・依存の入れ直しはしない。条件に合わなければ何も変えず、理由を 1 行出して次へ。
 ff_checkouts() {
@@ -318,7 +322,7 @@ ff_checkouts() {
             log "ff-skip $dir (.git がディレクトリでない: linked worktree か、存在しない)"
             continue
         fi
-        for f in MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD BISECT_LOG rebase-merge rebase-apply sequencer; do
+        for f in $GIT_OP_MARKS; do
             if [ -e "$dir/.git/$f" ]; then op=$f; break; fi
         done
         if [ -n "$op" ]; then
@@ -976,15 +980,29 @@ prune_line() {
     pl_name=${pl_name%%: *}
 }
 
+# 管理ディレクトリ <dir> に、prune で消えると戻らないものの印が在れば、その名前を出して 0 を返す。サブモジュールの Git ディレクトリ
+# (linked worktree で submodule update すると modules/ にでき、そこにだけ在るコミットは git worktree add では戻らない) と、操作の途中の印
+# (merge --autostash や rebase の autostash で退避した変更への参照は、そこにしか無い)。
+wt_admin_hold() { # wt_admin_hold <管理ディレクトリ>
+    local f
+    for f in modules $GIT_OP_MARKS; do
+        if [ -e "$1/$f" ]; then
+            printf '%s' "$f"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # git worktree prune は、外す登録を、その worktree の HEAD と reflog ごと消す。登録を選べない (リポ単位)。
 # 外す登録は prune --dry-run -v の「Removing worktrees/<名前>: <理由>」で見る。worktree list --porcelain の prunable は、
 # gitdir が無い・空の登録と、同じパスの重複を出さない。detached の HEAD がどのブランチ・リモート追跡ブランチ・タグからも
 # 辿れない登録が 1 つでも在れば、そのコミットへの最後の参照を消しうるので、リポごと見送って 1 を返す (残すなら
 # git branch <名前> <SHA>、要らなければ手で prune)。人が決めるまで毎時見送り続けるので、黙って止まらないよう 1 日 1 回知らせる。
-# 管理ディレクトリにサブモジュールの Git ディレクトリ (modules) を持つ登録も同じく見送る (ブランチの登録でも)。
+# 管理ディレクトリにサブモジュールの Git ディレクトリか操作の途中の印を持つ登録も同じく見送る (ブランチの登録でも。wt_admin_hold)。
 # 一覧・dry-run が失敗した回、読めない行や HEAD が在った回も、何が外れるか分からないので見送る。
 prune_safe() { # prune_safe <本体>
-    local main="$1" dry common line name head wt out hit=0
+    local main="$1" dry common line name head wt out mark hit=0
     if ! git -C "$main" worktree list --porcelain >/dev/null 2>&1; then
         log "keep  $main (prune 見送り: git worktree list が失敗)"
         return 1
@@ -1000,11 +1018,10 @@ prune_safe() { # prune_safe <本体>
         head=""
         if prune_line "$line"; then
             name=$pl_name
-            # linked worktree で submodule update すると、サブモジュールの Git ディレクトリは worktrees/<名前>/modules/ にでき、
-            # そこにだけ在るコミットは prune で管理ディレクトリごと消える (git worktree add では戻らない)。ブランチの登録でも見送る。
-            if [ -e "$common/worktrees/$name/modules" ]; then
+            # サブモジュールの Git ディレクトリか操作の途中の印が在れば、ブランチの登録でも見送る (wt_admin_hold)。
+            if mark=$(wt_admin_hold "$common/worktrees/$name"); then
                 wt=$(sed 's#/\.git$##' "$common/worktrees/$name/gitdir" 2>/dev/null) || wt=""
-                log "keep  $main (prune 見送り: ${wt:-worktrees/$name} にサブモジュールの Git ディレクトリ (modules) が在る)"
+                log "keep  $main (prune 見送り: ${wt:-worktrees/$name} の管理ディレクトリに $mark が在る (サブモジュールの Git ディレクトリか、操作の途中))"
                 hit=1
                 continue
             fi
@@ -1026,7 +1043,7 @@ prune_safe() { # prune_safe <本体>
     done <<<"$dry"
     [ "$hit" = 1 ] || return 0
     notify_daily "$STATE_ROOT/worktree-gc/prune-skipped-warned" \
-        "$main の git worktree prune を見送っています。detached の HEAD にだけ在るコミットか、サブモジュールの Git ディレクトリか、読めない登録がある (ログに)"
+        "$main の git worktree prune を見送っています。detached の HEAD にだけ在るコミットか、サブモジュールの Git ディレクトリや操作の途中の印か、読めない登録がある (ログに)"
     return 1
 }
 if prune_safe "$REPO"; then run git -C "$REPO" worktree prune; fi
@@ -1047,7 +1064,7 @@ if prune_safe "$REPO"; then run git -C "$REPO" worktree prune; fi
 # git が「無い」を確かめ直すので、フォルダが戻った登録は外さない)。防げないので、prune の前後の管理ディレクトリを比べ、控えに無いものが
 # 消えたら WARN と 1 日 1 回の通知で知らせる。1 つずつ外す git worktree remove は、フォルダが戻っていると中身ごと消すので使わない。
 all_repos_prune() { # all_repos_prune <本体> <共通の .git>
-    local main="$1" common="$2" dry line why wt ref how i exp out n before planned hit=0 lost="その worktree の reflog・index・refs/worktree/"
+    local main="$1" common="$2" dry line why wt ref how i exp out mark n before planned hit=0 lost="その worktree の reflog・index・refs/worktree/"
     # 先頭ゼロを八進数に読まない (is_uint を通っているので数字だけ)。
     exp="@$(($(date +%s) - 10#$MIN_AGE_HOURS * 3600)) +0000"
     # 外す登録の名前・パス・戻し方。パスにタブや改行が在っても割れないよう、添字を揃えた配列で持つ (bash 3.2 には連想配列が無い)。
@@ -1066,11 +1083,17 @@ all_repos_prune() { # all_repos_prune <本体> <共通の .git>
             why="worktrees/$pl_name: $pl_why"
         elif [ ! -e "$common/worktrees/$pl_name/index" ]; then
             why="worktrees/$pl_name に index が無い (古さを git が確かめていない)"
+        elif mark=$(wt_admin_hold "$common/worktrees/$pl_name"); then
+            # prune_safe の後で候補になった登録 (間にフォルダが消えた) も、最終の候補として見る。
+            why="worktrees/$pl_name の管理ディレクトリに $mark が在る (サブモジュールの Git ディレクトリか、操作の途中)"
         elif ! wt=$(cat "$common/worktrees/$pl_name/gitdir" 2>/dev/null) || [ "${wt%/.git}" = "$wt" ]; then
             # <パス>/.git の形でない壊れた gitdir (…/.git.old など) を、そのファイルが無いだけで「フォルダが無い」と読まない。
             why="worktrees/$pl_name の gitdir の形が違う (/.git で終わらない)"
         elif wt=${wt%/.git}; [ "${wt#/}" = "$wt" ]; then
             why="worktrees/$pl_name の gitdir が絶対パスでない"
+        elif [ "${wt%%$'\n'*}" != "$wt" ]; then
+            # 改行区切りで読む Orca の一覧からは、改行入りのパスを落としているので、「Orca に在る」の守りが効かない。
+            why="worktrees/$pl_name のパスに改行が在る"
         elif out=$(LC_ALL=C ls -d -- "$wt" 2>&1); then
             # 理由が言うのは「<パス>/.git が無い」だけ。フォルダが残っていれば、直すのに要る index と reflog を消さない
             # (台帳の git worktree add も、空でないフォルダには通らない)。
@@ -1209,6 +1232,11 @@ else
         seen+="$common"$'\n'
         if ! list=$(git -C "$p" worktree list --porcelain 2>/dev/null) || ! main=$(sed -n '1s/^worktree //p' <<<"$list") || [ -z "$main" ]; then
             log "WARN: all_repos: $p の git worktree list を取れない。飛ばす"
+            continue
+        fi
+        # 本体のパスに改行が在ると --porcelain の 1 行目が途中で切れ、後ろの git -C "$main" が別の場所を指しうる。
+        if [ "$(git -C "$main" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" != "$common" ]; then
+            log "WARN: all_repos: $p の本体 ($main) が同じリポを指さない (本体のパスに改行が在る、など)。飛ばす"
             continue
         fi
         # 本体・Orca の一覧に在るもの・scratch の節が見たもの・フォルダの無い登録 (下の prune が見る) のほかを出す。何も消さない。

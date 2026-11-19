@@ -1471,8 +1471,17 @@ mv "$T/mw" "$T/mw.moved"
 mkdir -p "$T/repo/.git/worktrees/mw/modules/x"
 run_gc
 check "登録が残る" held mw
-check "理由がログに出る" logged "keep  $T/repo (prune 見送り: $T/mw にサブモジュールの Git ディレクトリ (modules) が在る)"
+check "理由がログに出る" logged "keep  $T/repo (prune 見送り: $T/mw の管理ディレクトリに modules が在る"
 check "通知が 1 本" notified_once "prune"
+
+# merge --autostash などが途中で止まった worktree の管理ディレクトリには MERGE_HEAD などが残り、退避した変更への参照はそこにしか無い。
+setup repo-prune-op-in-progress
+git -C "$T/repo" worktree add -q -b feat-op "$T/ow" origin/main
+mv "$T/ow" "$T/ow.moved"
+echo x >"$T/repo/.git/worktrees/ow/MERGE_HEAD"
+run_gc
+check "登録が残る" held ow
+check "理由がログに出る" logged "keep  $T/repo (prune 見送り: $T/ow の管理ディレクトリに MERGE_HEAD が在る"
 
 # ---- $REPO の prune: dry-run が失敗した回・読めない行が在った回は、何が外れるか分からないので prune しない ----
 fake_dry_run() { # fake_dry_run <fail|odd>: git worktree prune --dry-run だけを失敗させる / 読めない行を足す偽の git を前に差し込む
@@ -2388,7 +2397,40 @@ ar_case all-repos-submodule-gitdir # 管理ディレクトリにサブモジュ�
 mkdir -p "$T/r2/.git/worktrees/g/modules/x"
 ar_gc on
 check "外れない" held2 g
-check "理由がログに出る" logged "keep  $T/r2 (prune 見送り: $T/g にサブモジュールの Git ディレクトリ (modules) が在る)"
+check "理由がログに出る" logged "keep  $T/r2 (prune 見送り: $T/g の管理ディレクトリに modules が在る"
+
+ar_case all-repos-op-in-progress # 管理ディレクトリに操作の途中の印 (rebase の autostash は rebase-merge/autostash)
+mkdir -p "$T/r2/.git/worktrees/g/rebase-merge"
+echo x >"$T/r2/.git/worktrees/g/rebase-merge/autostash"
+ar_gc on
+check "外れない" held2 g
+check "理由がログに出る" logged "keep  $T/r2 (prune 見送り: $T/g の管理ディレクトリに rebase-merge が在る"
+
+ar_case all-repos-path-newline # 登録のパスに改行 (Orca の一覧の照合が効かない)
+nlp="$T/n"$'\n'"l"
+if git -C "$T/r2" worktree add -q -b nl "$nlp" origin/main 2>/dev/null; then
+    nln=$(ls -A "$T/r2/.git/worktrees" | grep -vx g | head -1)
+    mv "$nlp" "$T/nl.moved"
+    touch -t "$OLD" "$T/r2/.git/worktrees/$nln/index"
+    ar_gc on
+    check "外れない" test -d "$T/r2/.git/worktrees/$nln"
+    check "同じリポの基準の登録も外れない" held2 g
+    check "理由がログに出る" logged "keep  $T/r2 (all_repos: prune 見送り: worktrees/$nln のパスに改行が在る)"
+else
+    echo "skip [$CASE] 改行を含むパスに worktree を作れない"
+fi
+
+setup all-repos-main-newline # 本体のパスに改行。git worktree list の 1 行目が切れ、別のリポ ($T/m) を指す
+new_repo "$T/m"
+gone_wt "$T/m" "$T/mg"
+if new_repo "$T/m"$'\n'"x" 2>/dev/null && git -C "$T/m"$'\n'"x" worktree add -q -b lw "$T/lw" origin/main 2>/dev/null; then
+    orca_mains
+    ar_gc on GC_REPOS="$T/lw"
+    check "切れたパスのリポは回らない" test -d "$T/m/.git/worktrees/mg"
+    check "WARN が出る" logged "WARN: all_repos: $T/lw の本体"
+else
+    echo "skip [$CASE] 改行を含むパスにリポを作れない"
+fi
 
 ar_case all-repos-keep-list-case # 大文字小文字だけ違う行が、消えた登録を守る
 echo "$T/G" >"$KEEPLIST"
