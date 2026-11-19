@@ -257,39 +257,42 @@ sched() {
     done
 }
 
-# 規則 session_autostop の値 (off / list / on)。設定ファイル (worktree-gc と共有) はサブシェルで source し、規則の値だけを
-# 持ち出す (DRY_RUN や REPO を持ち込まない)。ファイルが無ければ環境変数を読む。構文エラーの在るファイルは、bash がエラーの
-# 前の行を読み込んだまま source を続ける (終了コードは最後のコマンドのもの) ので、-n で先に見る。読めない回と、共有ファイルを
-# 読めない回は off。
+# 規則 session_autostop の値 (off / list / on)。設定ファイル (worktree-gc と共有) は別の bash で source し、規則の値だけを
+# 持ち出す (DRY_RUN や REPO を持ち込まない)。ファイルが無ければ環境変数を読む。worktree-gc と同じ set -euo pipefail で読み、
+# 途中で失敗する設定 (構文エラー・失敗する行・未設定の変数・最後が偽で終わる行) は off にする (bash の source は失敗した行の
+# 後も、その前の行を読み込んだまま続く。worktree-gc が止まる設定で、こちらだけ on で動かないように)。共有ファイルを読めない回も off。
 autostop_mode() {
-    local cfg=${WORKTREE_GC_CONFIG:-$HOME/.config/worktree-gc.env} m
+    local cfg=${WORKTREE_GC_CONFIG:-$HOME/.config/worktree-gc.env} RULE_session_autostop=${RULE_session_autostop-}
     [ "$ledger_ok" = 1 ] || { echo off; return 0; }
-    # shellcheck source=/dev/null
-    m=$(if [ -f "$cfg" ]; then "$BASH" -n "$cfg" 2>/dev/null || exit 1; . "$cfg" >/dev/null 2>&1; fi; rule_mode session_autostop)
-    case $m in
-        off | list | on) echo "$m" ;;
-        *) log "WARN: $cfg を読めない。session_autostop は off として扱う"; echo off ;;
-    esac
+    if [ -f "$cfg" ] && ! RULE_session_autostop=$("$BASH" -euo pipefail -c \
+        '. "$1" >/dev/null 2>&1; printf %s "${RULE_session_autostop-}"' _ "$cfg" 2>/dev/null); then
+        log "WARN: $cfg を読めない。session_autostop は off として扱う"
+        echo off
+        return 0
+    fi
+    rule_mode session_autostop
 }
 
 scan() {
-    local rows cands n new seen alive mode auto=0 stopped=0 unconfirmed=0 sent k l m
+    local rows cands n new seen alive mode auto=0 stopped=0 unconfirmed=0 ledger_failed=0 quiet=0 k m
     mkdir -p "$STATE_DIR"
     touch "$STATE_DIR/notified.tsv"
     mode=$(autostop_mode)
     # 送る・台帳に書くのは、LaunchAgent の巡回 (--auto) だけ。手で打つ scan と DRY_RUN=1 は would stop で止まる。
     [ "${1:-}" = --auto ] && [ "${DRY_RUN:-0}" != 1 ] && auto=1
+    # on の巡回は自分で止めるので、候補の通知の代わりに、止めた本数の通知を出す (下)。
+    [ "$mode" = on ] && [ "$auto" = 1 ] && quiet=1
     rows=$(collect | judge | sched)
     cands=$(jq -r 'select(.reason == null) | .key' <<<"$rows")
     n=$(grep -c . <<<"$cands")
     new=$(grep -vxF -f "$STATE_DIR/notified.tsv" <<<"$cands" | grep -c .)
     # 鍵はプロセスが終わるまで残す。一時的に候補から外れても、同じ放置を 2 回知らせない。
+    # 通知を出さない回 (on の巡回) は新しい鍵を足さない。止めなかった候補を、規則を戻した後に知らせるため。
     alive=$(jq -r '.key | split(":")[:2] | join(":")' <<<"$rows")
-    seen=$({ cat "$STATE_DIR/notified.tsv"; printf '%s\n' "$cands"; } | grep . | sort -u |
+    seen=$({ cat "$STATE_DIR/notified.tsv"; [ "$quiet" = 1 ] || printf '%s\n' "$cands"; } | grep . | sort -u |
         while IFS= read -r k; do grep -qxF "$(cut -d: -f1-2 <<<"$k")" <<<"$alive" && echo "$k"; done)
     printf '%s\n' "$seen" | grep . >"$STATE_DIR/notified.tsv"
-    # on の巡回は自分で止めるので、候補の通知の代わりに、止めた本数の通知を出す (下)。
-    if [ "$new" -gt 0 ] && ! { [ "$mode" = on ] && [ "$auto" = 1 ]; }; then
+    if [ "$new" -gt 0 ] && [ "$quiet" = 0 ]; then
         notify "止める候補 $n 本（新規 $new）。agent-gc list で確かめて agent-gc stop --listed"
     fi
 
@@ -305,15 +308,6 @@ scan() {
         "sched_unknown=$(jq -s 'map(select(.reason == "sched-unknown")) | length' <<<"$rows")"
 
     [ "$mode" != off ] || return 0
-    if [ "$mode" = on ] && [ "$auto" = 1 ] && [ -f "$STATE_DIR/autostop-sent.tsv" ]; then
-        # 控えは生きているプロセスの分だけ残す。生死は ps で 1 本ずつ見る (collect の行は一時的に欠けることがあり、
-        # 欠けた回に消すと、次の回に同じプロセスへもう一度送る)。書けなければ、下の追記も通らないので送らない。
-        sent=$(while IFS= read -r k; do
-            l=$(lstart_of "${k%%:*}")
-            [ "${k%%:*}:${l// /_}" != "$k" ] || echo "$k"
-        done <"$STATE_DIR/autostop-sent.tsv")
-        printf '%s\n' "$sent" | grep . >"$STATE_DIR/autostop-sent.tsv" 2>/dev/null
-    fi
     cands=$(jq -r 'select(.reason == null) | "\(.pid)\t\(.key)"' <<<"$rows")
     [ -n "$cands" ] || return 0
     # 手で打つ scan と DRY_RUN=1 は、stop の DRY_RUN と同じ所 (would stop) で止まる。
@@ -322,7 +316,8 @@ scan() {
     if [ "$auto" = 1 ] && [ "$mode" = on ] && [ $((stopped + unconfirmed)) -gt 0 ]; then
         m=""
         [ "$unconfirmed" = 0 ] || m="。終了を確認できない $unconfirmed 本"
-        notify "放置セッション $stopped 本を止めた$m。戻し方は cleanup-ledger"
+        if [ "$ledger_failed" = 1 ]; then m="$m。台帳に書けなかった。戻し方はログ $LOG"; else m="$m。戻し方は cleanup-ledger"; fi
+        notify "放置セッション $stopped 本を止めた$m"
     fi
 }
 
@@ -406,7 +401,7 @@ resume_args() {
 }
 
 stop() {
-    local targets stopped=0 unconfirmed=0
+    local targets stopped=0 unconfirmed=0 ledger_failed=0
     if [ "${1:-}" = --listed ]; then
         targets=$(cat "$STATE_DIR/listed.tsv" 2>/dev/null)
         [ -n "$targets" ] || { echo "listed.tsv が空です。先に agent-gc list を打ってください" >&2; return 1; }
@@ -423,7 +418,10 @@ stop() {
 #   list:   送らずに、止める予定を台帳に書く (ledger_plan)。
 #   on:     始めに台帳に追記できるかを確かめ、自分が送ったプロセス (autostop-sent.tsv) には 2 度送らない。
 #           止めた後に台帳に書けなければ、戻し方をログに書いて、その回の残りは止めない。
-# 止めた本数は呼び側の stopped と unconfirmed (終了を確認できない) に足す。
+# 止めた本数は呼び側の stopped と unconfirmed (終了を確認できない) に足し、台帳に書けなかった回は ledger_failed を 1 にする。
+# 控えは pid:開始時刻 の追記だけで、間引かない (間引く回に読み損ねると印が消え、同じプロセスへ送り直す入口になる)。
+# pid が使い回されても開始時刻が違うので当たらない。
+# ponytail: 控えは止めた 1 本につき 1 行増える (年に数千行)。大きくなったら、生きているプロセスの分だけ残す。
 stop_each() { # stop_each <manual|list|on> <行>
     local mode=$1 targets=$2 row pid want reason term agent terms path sid restore lost key rule warned msg
     local sent_log="$STATE_DIR/autostop-sent.tsv"
@@ -477,7 +475,15 @@ stop_each() { # stop_each <manual|list|on> <行>
         if [ -n "$want" ] && [ "$want" != "$(jq -r .key <<<"$row")" ]; then log "skip $agent pid=$pid: changed since list"; continue; fi
         key=$(jq -r .key <<<"$row")
         # 鍵から状態の時刻 (最後の欄) を落とした pid:開始時刻 が、同じプロセスの印。手で打つ stop は控えを見ない。
-        if [ "$mode" = on ] && grep -qxF -- "${key%:*}" "$sent_log" 2>/dev/null; then log "skip $agent pid=$pid: exit-sent"; continue; fi
+        if [ "$mode" = on ] && [ -e "$sent_log" ]; then
+            grep -qxF -- "${key%:*}" "$sent_log" 2>/dev/null
+            case $? in
+                0) log "skip $agent pid=$pid: exit-sent"; continue ;;
+                1) ;;
+                # 在るのに読めない回は、送ったかが分からないので送らない。
+                *) log "skip $agent pid=$pid: 控えを読めない $sent_log"; continue ;;
+            esac
+        fi
         path=$(jq -r .path <<<"$row")
         # cwd が取れない (記録に cwd が無い、Codex の lsof が失敗した) と、リストに当たるか判定できない。
         # 材料が欠けたら止めない側に倒す (空の cwd は keep_match のどの行にも当たらず、そのまま止まってしまう)。
@@ -554,7 +560,7 @@ stop_each() { # stop_each <manual|list|on> <行>
         # 手で打つ stop は、書けなくても次の 1 本は続ける (打った人が画面で見る)。巡回は、戻し方をログに残して残りを止めない。
         if ! ledger_add session "$agent $path" "$rule" "$restore" "$lost"; then
             log "WARN: 台帳に書けない $CLEANUP_LEDGER"
-            if [ "$mode" = on ]; then log "WARN: 戻し方 $restore。この回の残りは止めない"; break; fi
+            if [ "$mode" = on ]; then log "WARN: 戻し方 $restore。この回の残りは止めない"; ledger_failed=1; break; fi
         fi
     done <<<"$targets"
 }

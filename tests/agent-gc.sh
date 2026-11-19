@@ -705,8 +705,6 @@ check "通知が 1 本" notified_n 1
 check "通知に「止めた」" grep -qF '止めた' "$FAKE/notified"
 check "通知に stop --listed が無い" no grep -qF 'stop --listed' "$FAKE/notified"
 check "控えに 1 行" [ "$(grep -c . "$sentlog")" = 1 ]
-auto on
-check "終わったプロセスの控えは次の回に消える" [ ! -s "$sentlog" ]
 
 reset "auto-manual-scan: --auto の無い scan は、on でも list でも would stop で止まる"
 proc 101 claude /w/a "" SID-1
@@ -740,6 +738,14 @@ check "/exit を送らない" sent_none
 check "台帳に書かない" ledger_lines 0
 check "ログに理由" grep -qF 'pid=101: 控え' "$LOG"
 
+reset "auto-on-sent-unreadable: 控えが在るのに読めなければ送らない"
+proc 101 claude /w/a "" SID-1
+mkdir -p "$STATE_ROOT/agent-gc" && echo "101:${lstart// /_}" >"$sentlog" && chmod 200 "$sentlog"
+auto on
+check "/exit を送らない" sent_none
+check "台帳に書かない" ledger_lines 0
+check "ログに理由" grep -qF 'pid=101: 控えを読めない' "$LOG"
+
 reset "auto-on-ledger-unwritable: 台帳に追記できない回は 1 本も送らない"
 proc 101 claude /w/a "" SID-1
 mkdir -p "$STATE_ROOT" && : >"$STATE_ROOT/cleanup-ledger" # 置き場所がファイルなので、mkdir -p も追記も通らない
@@ -758,6 +764,8 @@ auto on
 check "1 本目だけ送る" sent_n 1
 check "1 本目の戻し方がログに出る" grep -qF -- '--resume SID-1' "$LOG"
 check "2 本目には送らない" not_sent 102
+check "通知はログを案内する" grep -qF "戻し方はログ $LOG" "$FAKE/notified"
+check "通知は cleanup-ledger を案内しない" no grep -qF '戻し方は cleanup-ledger' "$FAKE/notified"
 
 reset "auto-on-keep-missing: 「触らない」リストが無ければ送らない"
 proc 101 claude /w/a "" SID-1
@@ -775,6 +783,8 @@ echo '["❯ あとでこれを", "────"]' >"$FAKE/procs/101/tail"
 auto on
 check "/exit を送らない" sent_none
 check "ログに input not empty" grep -qF 'pid=101: input not empty' "$LOG"
+bash "$script" scan --auto >/dev/null 2>&1
+check "規則を外した次の巡回で、止めなかった候補を知らせる" grep -qF '止める候補 1 本（新規 1）' "$FAKE/notified"
 
 auto_kept() { # auto_kept <理由>: 101 は残し、並べた候補の 102 は止める
     proc 102 claude /w/b "" SID-2
@@ -816,20 +826,36 @@ check "ログに WARN" grep -qF 'RULE_session_autostop=yes' "$LOG"
 reset "auto-config-file: 設定ファイルの規則だけを読み、ほかの変数は持ち込まない"
 proc 101 claude /w/a "" SID-1
 mkdir -p "$base/cfg"
-printf '%s\n' 'RULE_session_autostop=list' 'DRY_RUN=1' 'REPO=/x' >"$base/cfg/worktree-gc.env"
+printf '%s\n' 'echo noise' 'RULE_session_autostop=list' 'DRY_RUN=1' 'REPO=/x' >"$base/cfg/worktree-gc.env"
 WORKTREE_GC_CONFIG="$base/cfg/worktree-gc.env" bash "$script" scan --auto >/dev/null 2>&1
 check "/exit を送らない" sent_none
 check "台帳に plan-session が 1 行 (DRY_RUN を持ち込まない)" [ "$(col 2)" = plan-session ]
 
-reset "auto-config-error: 設定ファイルに構文エラーがあれば off と同じ"
+reset "auto-config-and-list: 途中の [ … ] && X=1 は失敗にならない (worktree-gc の set -e と同じ)"
 proc 101 claude /w/a "" SID-1
 mkdir -p "$base/cfg"
-# 規則の行をエラーの前に置く (bash は構文エラーの前の行を読み込んだまま、source を続ける)。
-printf '%s\n' 'RULE_session_autostop=on' 'if then fi' >"$base/cfg/worktree-gc.env"
+printf '%s\n' 'RULE_session_autostop=on' "[ -f $base/none/x ] && X=1" 'Z=1' >"$base/cfg/worktree-gc.env"
 WORKTREE_GC_CONFIG="$base/cfg/worktree-gc.env" bash "$script" scan --auto >/dev/null 2>&1
-check "/exit を送らない" sent_none
-check "台帳に書かない" ledger_lines 0
-check "候補の通知が出る (off の経路)" grep -qF '止める候補 1 本' "$FAKE/notified"
+check "on として送る" sent 101
+
+# 規則の行は失敗の前に置く (bash の source は失敗した行の後も、その前の行を読み込んだまま続く)。
+# worktree-gc は set -euo pipefail の下で同じファイルを読むので、そこで止まる設定はここでも off にする。
+config_off() { # config_off <説明> <2 行目以降 (1 行 1 引数)...>
+    reset "auto-config-error: $1 は off と同じ"
+    proc 101 claude /w/a "" SID-1
+    mkdir -p "$base/cfg"
+    printf '%s\n' 'RULE_session_autostop=on' "${@:2}" >"$base/cfg/worktree-gc.env"
+    WORKTREE_GC_CONFIG="$base/cfg/worktree-gc.env" bash "$script" scan --auto >/dev/null 2>&1
+    check "/exit を送らない" sent_none
+    check "台帳に書かない" ledger_lines 0
+    check "候補の通知が出る (off の経路)" grep -qF '止める候補 1 本' "$FAKE/notified"
+    check "ログに WARN" grep -qF '読めない。session_autostop は off' "$LOG"
+}
+config_off "途中で失敗する行" false 'X=1'
+config_off "読めない別ファイルの source" ". $base/none/extra.env"
+config_off "最後が偽で終わる行" "[ -f $base/none/x ] && X=1"
+config_off "未設定の変数" 'Y=$UNSET_VAR_X'
+config_off "構文エラー" 'if then fi'
 
 reset "auto-dry-run: DRY_RUN=1 の scan --auto は would stop で止まる"
 proc 101 claude /w/a "" SID-1
