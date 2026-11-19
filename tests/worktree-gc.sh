@@ -1223,6 +1223,8 @@ mg() { HOME="$T/home" CLEANUP_KEEP="$T/gone-keep" bash -c "$pre"'keep_load >/dev
 check "symlink の祖先を通る無いパスの行が、実体パスの無い対象を守る" mg "$T/real/gone-a/x"
 check "symlink の祖先を通る無い対象も、実体パスで書いた無いパスの行に当たる" mg "$T/link/gone-b"
 check "無いパス同士で、別の名前には当たらない" eval '! mg "$T/real/gone-c"'
+# 絶対パスでない入力 (Orca の一覧の行など) で止まらない。上限つきで呼び、そのまま返ることを見る。
+check "相対パスはそのまま返す (止まらない)" test "$(perl -e 'alarm shift; exec @ARGV' 10 bash -c '. "$0"; real_path /bin/pwd zz-no-such-rel' "$lib")" = zz-no-such-rel
 check "名前は前後の空白を除いて完全一致" m name-a
 check "名前は接頭辞では当たらない" nm name-ab
 check "末尾に改行の無い最後の行も読む" m last-name
@@ -2335,6 +2337,33 @@ if [ "$(id -u)" != 0 ]; then # root は権限を無視する
     check "同じリポの基準の登録も外れない" held2 g
     check "理由がログに出る" logged "keep  $T/r2 (all_repos: prune 見送り: $T/np/w が無いと確かめられない"
 fi
+
+ar_case all-repos-keep-list-main # 本体だけを「触らない」リストに書き、worktree は本体の外。prune が消すのは本体の .git の中の管理ディレクトリ
+echo "$T/r2" >"$KEEPLIST"
+ar_gc on
+check "外れない" held2 g
+check "理由がログに出る" logged "keep  $T/r2 (all_repos: prune 見送り: $T/r2/.git/worktrees/g (管理ディレクトリ) が「触らない」リスト)"
+
+ar_case all-repos-gitdir-shape # gitdir が <在るフォルダ>/.git.old を指す (壊れた登録。git は「無い」と読んで外す)
+git -C "$T/r2" worktree add -q -b old "$T/old" origin/main
+echo "$T/old/.git.old" >"$T/r2/.git/worktrees/old/gitdir"
+touch -t "$OLD" "$T/r2/.git/worktrees/old/index"
+ar_gc on
+check "外れない" held2 old
+check "同じリポの基準の登録も外れない" held2 g
+check "理由がログに出る" logged "keep  $T/r2 (all_repos: prune 見送り: worktrees/old の gitdir の形が違う"
+
+ar_case all-repos-min-age-huge # 期限が 1970 年より前になる MIN_AGE_HOURS。git は負の時刻を今に近く読む
+ar_gc on MIN_AGE_HOURS=1000000
+check "外れない" held2 g
+check "理由がログに出る" logged "WARN: all_repos: MIN_AGE_HOURS が整数でない"
+
+ar_case all-repos-branch-tag-same-name # ブランチ g と同じ名前のタグ。戻し方で detached にならない
+git -C "$T/r2" tag g origin/main
+ar_gc on
+check "外れる (前提)" eval '! held2 g'
+(eval "$(row "$T/g" | cut -f5)") >/dev/null 2>&1
+check "台帳の戻し方で、元のブランチに付いて戻る" test "$(git -C "$T/g" symbolic-ref HEAD 2>/dev/null)" = refs/heads/g
 
 # 確認 (dry-run) の後、prune の前にフォルダが消えた、index の古い登録は、確認なしで外れる。防げないので、WARN と通知で知らせる。
 # 本番の prune (--dry-run の付かない呼び出し) の直前にだけ、そのフォルダを退ける偽の git を前に差し込む。

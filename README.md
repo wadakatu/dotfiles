@@ -518,7 +518,7 @@ IGNORED_OK="node_modules"             # 一緒に消えてよい無視される�
 
 規則 `all_repos`（`RULE_all_repos`）は、上の節が見ない worktree を一覧に出し、フォルダの無い登録を外す。回るのは Orca の一覧の本体（`orca worktree list` の `isMainWorktree` で、`hostId` が `local` の行だけ。
 `orca` コマンドが無ければこの分は無い）と `GC_REPOS` のリポ。同じリポ（`git rev-parse --path-format=absolute --git-common-dir` が同じ。symlink・末尾の `/`・linked worktree のパスで書いても同じ）は 1 回だけ回り、
-`$REPO` と同じリポは回らない。読めないパスと、リポの根でないパス（リポの中のフォルダ。`git rev-parse --show-cdup` が空でない）は `WARN: all_repos: <パス> …` を出して飛ばす。`GC_REPOS` は空白で割り、`*` も `~` も展開しない（空白を含むパスは書けない。`$HOME/…` で書く）。
+`$REPO` と同じリポは回らない。読めないパスと、作業ツリーの中のフォルダ（`git rev-parse --show-cdup` が空でない。`.git` の中のフォルダはそのリポとして回る）は `WARN: all_repos: <パス> …` を出して飛ばす。`GC_REPOS` は空白で割り、`*` も `~` も展開しない（空白を含むパスは書けない。`$HOME/…` で書く）。
 Orca に届かない回と、`orca worktree list` が取れない・打ち切られた（`ok` でない、`truncated`）回は節ごと見送る。「Orca の一覧に在る」は、行のパスとその実体パスの両方で比べる。どちらも空なら `all_repos: 回るリポが無い` を出す。`off` では回らない。`REPO` が無い回も動かない。リポを自動では探さない。
 
 - 一覧（`list` と `on`）: 本体・Orca の一覧に在るもの・規則 `scratch_worktrees` が見たもの・フォルダの無い登録を除いた linked worktree（`.claude/worktrees/` の下も）を
@@ -527,13 +527,16 @@ Orca に届かない回と、`orca worktree list` が取れない・打ち切ら
   期限はリポごとに 1 回だけ絶対時刻で決め、dry-run と prune に同じ値を渡す（`N.hours.ago` は git を呼ぶたびに計算し直される）。
   `--expire` が比べるのは `worktrees/<名前>/index` の mtime で、フォルダが消えてからの時間ではない。lock された登録は git が外さない（https://git-scm.com/docs/git-worktree ）。
   次のどれかが 1 つでも在るリポは、`list` でも `on` でも外さず、`keep  <本体> (… prune 見送り: …)` を出す（prune は登録を選べない）。
-  - `$REPO` の prune と同じ確認（detached の HEAD がどの ref にも無い、など）に当たる。
+  - `$REPO` の prune と同じ確認（detached の HEAD がどの ref にも無い、など）に当たる。外す候補の detached も、同じ `for-each-ref --contains` で確かめ直す。
   - 理由が `gitdir file points to non-existent location` でない（`gitdir` が無い・空の登録や重複は `--expire` に関係なく外れ、パスが読めない）。
   - `index` が無い（`git worktree add --no-checkout` など。git は古さを確かめずに外す）。
-  - `gitdir` が相対パス（`git worktree add --relative-paths`。フォルダが無いと実体のパスに直せない）。
+  - `gitdir` が `/.git` で終わらない（壊れた登録）か、相対パス（`git worktree add --relative-paths`。フォルダが無いと実体のパスに直せない）。
+  - HEAD のブランチが `refs/heads/` の下でない、または読めない。
   - フォルダが残っている（理由が言うのは `<パス>/.git` が無いことだけ。直すのに要る index と reflog を消さない）か、無いと確かめられない
     （`LC_ALL=C ls -d` の失敗が `No such file or directory` でない。親を検索できないときなど）。
-  - パスが「触らない」リストか、Orca の一覧に当たる（Orca がまだ持つ登録は Orca で消す）。
+  - パスか、prune が消す管理ディレクトリ（`<共通の .git>/worktrees/<名前>`。本体を書いた行も当たる）が「触らない」リストに当たる。パスが Orca の一覧に当たる（Orca がまだ持つ登録は Orca で消す）。
+
+  `MIN_AGE_HOURS` が整数でない・9 桁を超える・期限が 1970 年より前（git は負の時刻を今に近く読む）なら、節ごと見送る。
 - `list` では `PLAN  <パス> (all_repos: フォルダが無い)` と台帳の `plan-prune`（鍵は `all_repos <本体> <パス>`）。`on` では `git worktree prune --expire …` を流し、
   管理ディレクトリ（`<共通の .git>/worktrees/<名前>`）が消えた登録ごとに台帳の `worktree-prune` を書く。戻し方は `cd <本体> && git worktree add <パス> <ブランチ>`
   （detached は `git worktree add --detach <パス> <SHA>`）、戻らないものは reflog・index・`refs/worktree/`。

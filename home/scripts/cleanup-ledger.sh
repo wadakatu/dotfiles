@@ -73,6 +73,8 @@ keep_ancestors=1
 # まだ無いパス (消えた worktree の登録など) も、symlink を通る祖先 (/tmp → /private/tmp) を実体の形で比べるため。/ は空を出す。
 real_path() { # real_path <pwd のコマンド> <絶対パス>
     local p=$2 rest="" r
+    # 絶対パスでなければそのまま返す (スラッシュの無い相対パスでは、下のループの p が短くならず終わらない)。
+    case "$p" in /*) ;; *) printf '%s' "$p"; return 0 ;; esac
     while [ "${p%/}" != "$p" ]; do p=${p%/}; done
     while [ -n "$p" ]; do
         if r=$(cd "$p" 2>/dev/null && "$1" -P); then

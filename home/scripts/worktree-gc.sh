@@ -1057,7 +1057,10 @@ all_repos_prune() { # all_repos_prune <本体> <共通の .git>
             why="worktrees/$pl_name: $pl_why"
         elif [ ! -e "$common/worktrees/$pl_name/index" ]; then
             why="worktrees/$pl_name に index が無い (古さを git が確かめていない)"
-        elif ! wt=$(sed 's#/\.git$##' "$common/worktrees/$pl_name/gitdir" 2>/dev/null) || [ "${wt#/}" = "$wt" ]; then
+        elif ! wt=$(cat "$common/worktrees/$pl_name/gitdir" 2>/dev/null) || [ "${wt%/.git}" = "$wt" ]; then
+            # <パス>/.git の形でない壊れた gitdir (…/.git.old など) を、そのファイルが無いだけで「フォルダが無い」と読まない。
+            why="worktrees/$pl_name の gitdir の形が違う (/.git で終わらない)"
+        elif wt=${wt%/.git}; [ "${wt#/}" = "$wt" ]; then
             why="worktrees/$pl_name の gitdir が絶対パスでない"
         elif out=$(LC_ALL=C ls -d -- "$wt" 2>&1); then
             # 理由が言うのは「<パス>/.git が無い」だけ。フォルダが残っていれば、直すのに要る index と reflog を消さない
@@ -1068,13 +1071,26 @@ all_repos_prune() { # all_repos_prune <本体> <共通の .git>
             why="$wt が無いと確かめられない ($out)"
         elif keep_match "$wt"; then
             why="$wt が「触らない」リスト"
+        elif keep_match "$common/worktrees/$pl_name"; then
+            # prune が実際に消すのは本体の .git の中の管理ディレクトリ。本体をリストに書いた場合も、本体の外の worktree の登録を外さない。
+            why="$common/worktrees/$pl_name (管理ディレクトリ) が「触らない」リスト"
         elif in_orca "$wt"; then
             # Orca がまだ持っている登録を git の側だけ外すと、Orca のカードがどうなるか分からない。
             why="$wt が Orca の一覧に在る: Orca で消す"
-        elif ref=$(git -C "$main" symbolic-ref -q --short "worktrees/$pl_name/HEAD" 2>/dev/null); then
-            how="cd $(printf %q "$main") && git worktree add $(printf %q "$wt") $(printf %q "$ref")"
+        elif ref=$(git -C "$main" symbolic-ref -q "worktrees/$pl_name/HEAD" 2>/dev/null); then
+            # --short は同名のタグが在ると heads/<名前> を返し、戻し方が detached で戻るので、完全な ref から作る。
+            case "$ref" in
+                refs/heads/?*) how="cd $(printf %q "$main") && git worktree add $(printf %q "$wt") $(printf %q "${ref#refs/heads/}")" ;;
+                *) why="worktrees/$pl_name の HEAD を読めない ($ref)" ;;
+            esac
         elif ref=$(git -C "$main" rev-parse --verify -q "worktrees/$pl_name/HEAD" 2>/dev/null); then
-            how="cd $(printf %q "$main") && git worktree add --detach $(printf %q "$wt") $ref"
+            # prune_safe の後で候補になった detached (間にフォルダが消えた) も、固有のコミットを持てば外さない (失敗も「辿れない」)。
+            out=$(git -C "$main" for-each-ref --contains "$ref" refs/heads refs/remotes refs/tags 2>/dev/null) || out=""
+            if [ -z "$out" ]; then
+                why="$wt の detached HEAD $ref がどの ref にも無い"
+            else
+                how="cd $(printf %q "$main") && git worktree add --detach $(printf %q "$wt") $ref"
+            fi
         else
             why="worktrees/$pl_name の HEAD を読めない"
         fi
@@ -1137,15 +1153,17 @@ elif [ "$orca_state" = ok ] && ! orca_list=$(orca worktree list --json 2>/dev/nu
     jq -ce 'select(.ok == true and .result.truncated == false) | .result.worktrees | arrays'); then
     # 打ち切られた一覧を読むと、返らなかった Orca の登録を「一覧に無い」と読む (orca_ps と同じ条件)。
     log "WARN: all_repos: orca worktree list を取れない、または打ち切られた。この節は見送る (次回に拾う)"
-elif ! is_uint "$MIN_AGE_HOURS" || ! repo_common=$(git -C "$REPO" rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
-    log "WARN: all_repos: MIN_AGE_HOURS が整数でない、または $REPO の .git を引けない。この節は見送る"
+# 期限 (今 - MIN_AGE_HOURS 時間) が計算できない値も見送る: 桁が多いと算術があふれ、1970 年より前の負の時刻は git が今に近く読む。
+elif ! is_uint "$MIN_AGE_HOURS" || [ ${#MIN_AGE_HOURS} -gt 9 ] || [ $(($(date +%s) - 10#$MIN_AGE_HOURS * 3600)) -le 0 ] ||
+    ! repo_common=$(git -C "$REPO" rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
+    log "WARN: all_repos: MIN_AGE_HOURS が整数でない・9 桁を超える・期限が 1970 年より前、または $REPO の .git を引けない。この節は見送る"
 else
     # 回るリポの候補 (改行区切り): Orca の一覧の本体と GC_REPOS。orca コマンドが無ければ GC_REPOS だけ。
     # 本体はこのマシンの行 (hostId が local) だけ。別のホストの行のパスを git -C に渡すと、同じパスの無関係なリポを回る。
     cands=$(jq -r '.[] | select(.isMainWorktree == true and .hostId == "local") | .path' <<<"${orca_list:-[]}") || cands=""
     # Orca の一覧の全部の行のパスと、その実体の形 (改行区切り)。LIST から除く所と prune の見送りで使う (in_orca)。
     while IFS= read -r p; do
-        [ -n "$p" ] || continue
+        case "$p" in /*) ;; *) continue ;; esac
         orca_paths+="$p"$'\n'"$(real_path /bin/pwd "$p")"$'\n'
     done < <(jq -r '.[].path // empty' <<<"${orca_list:-[]}")
     # 値の * などを展開させない (~ はもともと展開されない)。後ろの処理は glob を使うので、割ったらすぐ戻す。
