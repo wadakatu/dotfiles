@@ -395,13 +395,14 @@ REPO="$HOME/path/to/repo"          # 掃除する本体の checkout
 BASE=origin/main                   # detached の判定の基準（既定 origin/main）
 PROJECT_PREFIXES="repo-wt- repo-"  # 孤児の compose プロジェクトを落とす名前の接頭辞
 FF_CHECKOUTS="$HOME/src/some-tool" # origin のデフォルトブランチに追従させる checkout（空白区切り）
+GC_REPOS="$HOME/src/some-repo"     # 規則 all_repos が Orca の一覧の本体に加えて回るリポ（空白か改行で区切る。~ は展開されない）
 ```
 
 `FF_CHECKOUTS` は、checkout のまま使っていて誰も pull しない道具などを毎時 fast-forward する（`REPO` が無くても動く）。
 進めるのは、`.git` がディレクトリ（linked worktree ではない）、merge・rebase などの途中でない、fetch が通る、
 `origin/HEAD` がある、そのブランチに居る、未コミットの変更も untracked も無い、origin に無いローカルコミットが無い、を
 全て満たすときだけ。1 つでも欠ければ何も変えず、理由を `ff-skip` の 1 行で出す。ブランチの切り替え・stash・
-依存の入れ直しはしない（lockfile が変わっても）。進めたことの知らせは `ff` のログ 1 行だけ。環境変数で渡した `FF_CHECKOUTS` と `DRY_RUN` は
+依存の入れ直しはしない（lockfile が変わっても）。進めたことの知らせは `ff` のログ 1 行だけ。環境変数で渡した `FF_CHECKOUTS`・`GC_REPOS`・`DRY_RUN` は
 設定ファイルより優先する。
 
 削除は次を **全て** 満たす worktree だけ。1 つでも欠ければ残す。
@@ -420,6 +421,9 @@ FF_CHECKOUTS="$HOME/src/some-tool" # origin のデフォルトブランチに追
 git が解決する `worktrees/<名前>/HEAD` がブランチでなく（detached）、その SHA がどのブランチ・リモート追跡ブランチ・タグからも辿れない（`git for-each-ref --contains`。
 失敗も辿れないとみなす）ものが 1 つでも在れば、そのリポは prune せず、`keep  <本体> (prune 見送り: <パス> の detached HEAD <SHA> がどの ref にも無い)`
 （`gitdir` が読めなければ `<パス>` は `worktrees/<名前>`）をログに出し、通知を 1 日 1 回出す（`DRY_RUN=1` では出さない）。
+管理ディレクトリにサブモジュールの Git ディレクトリ（`worktrees/<名前>/modules/`。linked worktree で `submodule update` するとできる）か、
+操作の途中の印（`MERGE_HEAD` `CHERRY_PICK_HEAD` `REVERT_HEAD` `BISECT_LOG` `rebase-merge` `rebase-apply` `sequencer`。`FF_CHECKOUTS` が見るものと同じ）を持つ登録も、
+ブランチの登録でも同じく見送る（そこにだけ在るコミットや autostash は、管理ディレクトリごと消え、`git worktree add` では戻らない）。
 一覧・dry-run が失敗した回と、読めない行や HEAD が在った回も見送る。人が決めるまで見送り続けるので、残すなら `git branch <名前> <SHA>`、
 要らなければ手で `git worktree prune` する。
 git 2.54 では fetch や merge の後の自動メンテナンスが `git worktree prune --expire 3.months.ago` を流し、この確認より先に登録を外すので、
@@ -449,8 +453,8 @@ workspace 状態を持っており `git worktree remove` を直接叩くと食�
 ログに出すだけに留める（削除は `herdr worktree remove --workspace <ID> --force`）。
 
 止めない・消さないものは、手元の「触らない」リスト `~/.config/cleanup-keep`（追跡しない。場所は `CLEANUP_KEEP` で変えられる）に 1 行 1 つで書く。
-`/` で始まる行と `~`・`~/…` の行はパスの接頭辞（区切りで比べるので `/a/pr-12` は `/a/pr-123` に当たらない。symlink を辿った実体パスでも、
-大文字小文字を区別しないファイルシステムでは実際の綴りでも比べる）、それ以外は compose project の名前の完全一致。
+`/` で始まる行と `~`・`~/…` の行はパスの接頭辞（区切りで比べるので `/a/pr-12` は `/a/pr-123` に当たらない。symlink を辿った実体パスでも（まだ無いパスは、実在する最も近い祖先を実体パスに直して）、
+大文字小文字を区別しないファイルシステムでは実際の綴りでも比べる。無い対象は、行も対象も ASCII の小文字に揃えて比べる）、それ以外は compose project の名前の完全一致。
 名前の行が当たるのは compose project の名前だけで、worktree のディレクトリ名やブランチ名には当たらない（worktree を守るならパスで書く）。
 正規表現・glob は使わず、`#` で始まる行と空行は読み飛ばす。コメントは行頭の `#` だけで、行の途中の `#` や `$HOME`・引用符は使えない。
 読めない行（`/`・`\` を含むか `~` で始まる名前の行、`$`・`"`・`'` で始まる行、空白 + `#` を含む行、行の途中の CR、2 行目以降の BOM。1 行目の BOM は落とす）が 1 つでもあると
@@ -515,12 +519,47 @@ IGNORED_OK="node_modules"             # 一緒に消えてよい無視される�
 # SCRATCH_WT_GLOB="/private/tmp/claude-$(id -u)/*/*/scratchpad/wt/*"  # CLAUDE_CODE_TMPDIR で scratchpad を動かしたときだけ
 ```
 
+規則 `all_repos`（`RULE_all_repos`）は、上の節が見ない worktree を一覧に出し、フォルダの無い登録を外す。回るのは Orca の一覧の本体（`orca worktree list` の `isMainWorktree` で、`hostId` が `local` の行だけ。
+`orca` コマンドが無ければこの分は無い）と `GC_REPOS` のリポ。同じリポ（`git rev-parse --path-format=absolute --git-common-dir` が同じ。symlink・末尾の `/`・linked worktree のパスで書いても同じ）は 1 回だけ回り、
+`$REPO` と同じリポは回らない。読めないパスと、作業ツリーの中のフォルダ（`git rev-parse --show-cdup` が空でない。`.git` の中のフォルダはそのリポとして回る）は `WARN: all_repos: <パス> …` を出して飛ばす。`GC_REPOS` は空白で割り、`*` も `~` も展開しない（空白を含むパスは書けない。`$HOME/…` で書く）。
+Orca に届かない回と、`orca worktree list` が取れない・打ち切られた（`ok` でない、`truncated`、`worktrees` に object でない要素が在る）回は節ごと見送る。「Orca の一覧に在る」は、行のパスとその実体パスの両方で、大文字小文字を区別せずに比べる。パスが文字列でない・改行を含む行は使わない。どちらも空なら `all_repos: 回るリポが無い` を出す。`off` では回らない。`REPO` が無い回も動かない。リポを自動では探さない。
+`git worktree list --porcelain` の 1 行目の本体が、候補と同じ共通の `.git` を指さないリポ（本体のパスに改行が在る、など）は `WARN` を出して飛ばす。
+
+- 一覧（`list` と `on`）: 本体・Orca の一覧に在るもの・規則 `scratch_worktrees` が見たもの・フォルダの無い登録を除いた linked worktree（`.claude/worktrees/` の下も）を
+  `LIST  <パス> (どの判定にも掛からない: 自動では消さない)` の行で出す。何も消さない。
+- フォルダの無い登録: `LC_ALL=C git worktree prune --dry-run -v --expire "@<今 - MIN_AGE_HOURS 時間の epoch 秒> +0000"` の `Removing worktrees/<名前>: …` の登録を外す（prune が実際に外すものと同じ集合）。
+  期限はリポごとに 1 回だけ絶対時刻で決め、dry-run と prune に同じ値を渡す（`N.hours.ago` は git を呼ぶたびに計算し直される）。
+  `--expire` が比べるのは `worktrees/<名前>/index` の mtime で、フォルダが消えてからの時間ではない。lock された登録は git が外さない（https://git-scm.com/docs/git-worktree ）。
+  次のどれかが 1 つでも在るリポは、`list` でも `on` でも外さず、`keep  <本体> (… prune 見送り: …)` を出す（prune は登録を選べない）。
+  - `$REPO` の prune と同じ確認（detached の HEAD がどの ref にも無い、管理ディレクトリに `modules/` か操作の途中の印が在る、など）に当たる。
+    外す候補も、detached は同じ `for-each-ref --contains`、管理ディレクトリは同じ印で確かめ直す（確認の後でフォルダが消えた登録のため）。
+  - ブランチがコミットに解決できない（`git worktree add --orphan`。台帳の `git worktree add` が通らない）。
+  - 理由が `gitdir file points to non-existent location` でない（`gitdir` が無い・空の登録や重複は `--expire` に関係なく外れ、パスが読めない）。
+  - `index` が無い（`git worktree add --no-checkout` など。git は古さを確かめずに外す）。
+  - `gitdir` が `/.git` で終わらない（壊れた登録）か、相対パス（`git worktree add --relative-paths`。フォルダが無いと実体のパスに直せない）か、
+    改行を含む（改行を含む Orca の行は使わないので、「Orca の一覧に在る」で守れない）。
+  - HEAD のブランチが `refs/heads/` の下でない、または読めない。
+  - フォルダが残っている（理由が言うのは `<パス>/.git` が無いことだけ。直すのに要る index と reflog を消さない）か、無いと確かめられない
+    （`LC_ALL=C ls -d` の失敗が `No such file or directory` でない。親を検索できないときなど）。
+  - パスか、prune が消す管理ディレクトリ（`<共通の .git>/worktrees/<名前>`。本体を書いた行も当たる）が「触らない」リストに当たる。パスが Orca の一覧に当たる（Orca がまだ持つ登録は Orca で消す）。パスが `~/.herdr/worktrees/` の下（herdr で消す。上の自動削除しない決まりと同じ）。
+
+  `MIN_AGE_HOURS` が整数でない・9 桁を超える・期限が 1970 年より前（git は負の時刻を今に近く読む）なら、節ごと見送る。
+- `list` では `PLAN  <パス> (all_repos: フォルダが無い)` と台帳の `plan-prune`（鍵は `all_repos <本体> <パス>`）。`on` では `git worktree prune --expire …` を流し、
+  管理ディレクトリ（`<共通の .git>/worktrees/<名前>`）が消えた登録ごとに台帳の `worktree-prune` を書く。戻し方は `cd <本体> && git worktree add <パス> <ブランチ>`
+  （detached は `git worktree add --detach <パス> <SHA>`）、戻らないものは reflog・index・`refs/worktree/`・worktree 固有の設定（`config.worktree`）・sparse-checkout の定義。
+  dry-run の後にフォルダが消えた、`index` の古い登録は、確認なしで prune に外される（防げない。1 つずつ外す `git worktree remove` は、フォルダが戻っていると中身ごと消すので使わない）。
+  prune の前後の管理ディレクトリを比べ、確かめていない登録が消えたら `WARN: all_repos: 確かめていない登録が prune で外れた: …` を出し、通知を 1 日 1 回出す。
+
+```bash
+RULE_all_repos=list                   # off / list / on
+```
+
 `git worktree remove` はブランチを消さないので、コミットは常に残る。ただし ignore された
 ファイル（`.env` など）は worktree と一緒に消える。判定には使わず、件数を STALE のログに出す。
 
 消した worktree と、止めた・落とした compose プロジェクトは、ログとは別に台帳
 `~/Library/Application Support/cleanup-ledger/ledger.tsv`（タブ区切り・追記のみ）に 1 件 1 行で残す。
-列は時刻・種類（worktree-gc が書くのは `worktree` / `compose-down` / `worktree-remove-failed` / `compose-stop`、agent-gc は `session`）・対象・当たった規則・戻し方・戻らないもの。
+列は時刻・種類（worktree-gc が書くのは `worktree` / `compose-down` / `worktree-remove-failed` / `compose-stop` / `worktree-prune`、agent-gc は `session`）・対象・当たった規則・戻し方・戻らないもの。
 worktree の戻し方は `git worktree add -B <ブランチ> <パス> <SHA>`（detached は `--detach`）と、そこに居た
 セッションの `claude --resume <ID>`。戻し方の列は端末にそのまま貼って通るコマンドだけで、注記は先頭の
 `: <注記>; ` に置く（HEAD を取れなかった worktree は `: HEAD を取れなかったので戻し方なし` だけ）。戻らないものは ignore されたファイルの件数とパス（先頭 20 件）と、

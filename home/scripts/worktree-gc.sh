@@ -3,6 +3,7 @@
 # worktree と、それに紐づく docker compose プロジェクトを掃除する。
 # 対象は $REPO の worktree と、Orca が管理する全リポの worktree ($ORCA_ROOT 配下)。
 # $FF_CHECKOUTS の checkout は、origin のデフォルトブランチへ fast-forward だけで追従させる。
+# 規則 all_repos では、Orca の一覧の本体と $GC_REPOS のリポの、どの判定にも掛からない worktree をログに出し、フォルダの無い登録を外す。
 # launchd から毎時 0 分に実行される。定義は home/worktree-gc.nix。
 #
 # 手で確認するとき:
@@ -24,7 +25,7 @@ export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=maintenance.auto GIT_CONFIG_VALUE_0=f
 # 環境変数で渡した値はそちらが勝つ。REPO が無ければ掃除はしない (FF_CHECKOUTS の追従だけ動く)。
 CONFIG="${WORKTREE_GC_CONFIG:-$HOME/.config/worktree-gc.env}"
 # 空文字も「渡した」とみなすので、値ではなく宣言ごと控えて読み込み後に戻す。
-_env="$(declare -p REPO BASE PROJECT_PREFIXES FF_CHECKOUTS DRY_RUN 2>/dev/null || true)"
+_env="$(declare -p REPO BASE PROJECT_PREFIXES FF_CHECKOUTS GC_REPOS DRY_RUN 2>/dev/null || true)"
 # shellcheck source=/dev/null
 [ -f "$CONFIG" ] && . "$CONFIG"
 eval "$_env"
@@ -47,6 +48,9 @@ BUILDER_CACHE_MAX_AGE="${BUILDER_CACHE_MAX_AGE:-168h}"
 # checkout のまま使う道具など、誰も pull しないリポの絶対パス (空白区切り)。空なら何もしない。
 # ponytail: 空白区切りなので空白を含むパスは扱えない。要るなら設定ファイルで配列にする。
 FF_CHECKOUTS="${FF_CHECKOUTS-}"
+# 規則 all_repos が Orca の一覧の本体に加えて回るリポのパス (空白か改行で区切る)。~ は展開されないので $HOME/… で書く。空なら Orca の分だけ。
+# ponytail: 空白で割るので空白を含むパスは書けない (FF_CHECKOUTS と同じ)。要るなら設定ファイルで配列にする。
+GC_REPOS="${GC_REPOS-}"
 # 規則 scratch_worktrees が探す、セッションの scratchpad の下の worktree。
 # ponytail: 空白で割ってから glob を展開するので、パターンに空白を含められない (既定のパスには無い)。要るようになったら配列にする。
 SCRATCH_WT_GLOB="${SCRATCH_WT_GLOB:-/private/tmp/claude-$(id -u)/*/*/scratchpad/wt/*}"
@@ -172,15 +176,14 @@ stack_volumes() {
 # ただし ~/.herdr/worktrees/ 配下は herdr が自前で workspace 状態を持っており、
 # `git worktree remove` を直接叩くとその状態と食い違う。herdr は Nix 管理外で
 # 自己更新するため launchd から CLI を叩くのも壊れやすい。ここは候補として
-# ログに出すだけに留め、削除はユーザーが herdr 経由で行う。
+# ログに出すだけに留め、削除はユーザーが herdr 経由で行う。all_repos の prune も同じ理由で見送る。
+in_herdr() { case "$1" in "$HOME/.herdr/worktrees/"*) return 0 ;; esac; return 1; }
 mark_stale() { # mark_stale <worktree> <理由> [<本体> (既定は $REPO)]
     local wt="$1" why="$2"
-    case "$wt" in
-        "$HOME/.herdr/worktrees/"*)
-            log "keep  $wt ($why / herdr 管理下のため自動削除しない → herdr worktree remove --workspace <ID> --force)"
-            return 0
-            ;;
-    esac
+    if in_herdr "$wt"; then
+        log "keep  $wt ($why / herdr 管理下のため自動削除しない → herdr worktree remove --workspace <ID> --force)"
+        return 0
+    fi
     log "STALE $wt ($why$(ignored_note "$wt"))"
     # 規則は台帳に書くので、同じ添字で並べて持つ (bash 3.2 には連想配列が無い)。
     removable+=("$wt")
@@ -304,6 +307,10 @@ restart_stacks() { # restart_stacks <worktree>
     record compose-stop "${names//$'\n'/ }" "$1 を消す前に止めたが、削除が拒否され、docker start も失敗" "$cmd" ""
 }
 
+# git の操作 (merge・cherry-pick・revert・bisect・rebase・sequencer) の途中にだけ在る印の名前。本体では .git の下、
+# linked worktree では管理ディレクトリ (<共通の .git>/worktrees/<名前>) の下に在る。ff_checkouts と wt_admin_hold が使う。
+GIT_OP_MARKS="MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD BISECT_LOG rebase-merge rebase-apply sequencer"
+
 # $FF_CHECKOUTS を origin のデフォルトブランチへ fast-forward する。人が使っている途中かもしれないので、
 # ブランチの切り替え・stash・依存の入れ直しはしない。条件に合わなければ何も変えず、理由を 1 行出して次へ。
 ff_checkouts() {
@@ -314,7 +321,7 @@ ff_checkouts() {
             log "ff-skip $dir (.git がディレクトリでない: linked worktree か、存在しない)"
             continue
         fi
-        for f in MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD BISECT_LOG rebase-merge rebase-apply sequencer; do
+        for f in $GIT_OP_MARKS; do
             if [ -e "$dir/.git/$f" ]; then op=$f; break; fi
         done
         if [ -n "$op" ]; then
@@ -795,6 +802,7 @@ ignored_unknown() {
 }
 
 scratch_mode=$(rule_mode scratch_worktrees)
+scratch_seen=""
 # off では探しもしない (ps も gh も呼ばない)。$REPO の worktree は上の $REPO の節で判定したので、本体の .git で見分けて飛ばす
 # ($REPO の節が残すと決めたもの (upstream が健在など) を、この節の別の条件で消さない。パスの綴りでなく .git で比べる)。
 if [ "$scratch_mode" != off ] && ! repo_common=$(git -C "$REPO" rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
@@ -814,6 +822,8 @@ elif [ "$scratch_mode" != off ]; then
         top=$(git -C "$wt" rev-parse --show-toplevel 2>/dev/null) || continue
         [ "$gd" != "$common" ] && [ "$top" = "$wt" ] || continue
         [ "$common" != "$repo_common" ] || continue
+        # 規則 all_repos の LIST に重ねて出さないよう、この節が見たものを控える。
+        scratch_seen+="$wt"$'\n'
         main=$(git -C "$wt" worktree list --porcelain 2>/dev/null | sed -n '1s/^worktree //p') || main=""
         if [ -z "$main" ]; then
             log "keep  $wt (scratchpad: 本体を引けない)"
@@ -961,14 +971,37 @@ for wt in ${removable[@]+"${removable[@]}"}; do
     fi
 done
 
+# prune --dry-run -v の 1 行「Removing worktrees/<名前>: <理由>」の名前を pl_name に、理由を pl_why に置く。形が違えば 1。
+prune_line() {
+    case "$1" in "Removing worktrees/"?*": "*) ;; *) return 1 ;; esac
+    pl_name=${1#Removing worktrees/}
+    pl_why=${pl_name#*: }
+    pl_name=${pl_name%%: *}
+}
+
+# 管理ディレクトリ <dir> に、prune で消えると戻らないものの印が在れば、その名前を出して 0 を返す。サブモジュールの Git ディレクトリ
+# (linked worktree で submodule update すると modules/ にでき、そこにだけ在るコミットは git worktree add では戻らない) と、操作の途中の印
+# (merge --autostash や rebase の autostash で退避した変更への参照は、そこにしか無い)。
+wt_admin_hold() { # wt_admin_hold <管理ディレクトリ>
+    local f
+    for f in modules $GIT_OP_MARKS; do
+        if [ -e "$1/$f" ]; then
+            printf '%s' "$f"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # git worktree prune は、外す登録を、その worktree の HEAD と reflog ごと消す。登録を選べない (リポ単位)。
 # 外す登録は prune --dry-run -v の「Removing worktrees/<名前>: <理由>」で見る。worktree list --porcelain の prunable は、
 # gitdir が無い・空の登録と、同じパスの重複を出さない。detached の HEAD がどのブランチ・リモート追跡ブランチ・タグからも
 # 辿れない登録が 1 つでも在れば、そのコミットへの最後の参照を消しうるので、リポごと見送って 1 を返す (残すなら
 # git branch <名前> <SHA>、要らなければ手で prune)。人が決めるまで毎時見送り続けるので、黙って止まらないよう 1 日 1 回知らせる。
+# 管理ディレクトリにサブモジュールの Git ディレクトリか操作の途中の印を持つ登録も同じく見送る (ブランチの登録でも。wt_admin_hold)。
 # 一覧・dry-run が失敗した回、読めない行や HEAD が在った回も、何が外れるか分からないので見送る。
 prune_safe() { # prune_safe <本体>
-    local main="$1" dry common line name head wt out hit=0
+    local main="$1" dry common line name head wt out mark hit=0
     if ! git -C "$main" worktree list --porcelain >/dev/null 2>&1; then
         log "keep  $main (prune 見送り: git worktree list が失敗)"
         return 1
@@ -982,14 +1015,19 @@ prune_safe() { # prune_safe <本体>
     while IFS= read -r line; do
         [ -n "$line" ] || continue
         head=""
-        case "$line" in
-            "Removing worktrees/"?*": "*)
-                name=${line#Removing worktrees/}
-                name=${name%%: *}
-                # HEAD のファイルは reftable では置き石 (ref: refs/heads/.invalid) なので、git に解決させる。ブランチは対象外。
-                if git -C "$main" symbolic-ref -q "worktrees/$name/HEAD" >/dev/null 2>&1; then continue; fi
-                head=$(git -C "$main" rev-parse --verify -q "worktrees/$name/HEAD" 2>/dev/null) || head="" ;;
-        esac
+        if prune_line "$line"; then
+            name=$pl_name
+            # サブモジュールの Git ディレクトリか操作の途中の印が在れば、ブランチの登録でも見送る (wt_admin_hold)。
+            if mark=$(wt_admin_hold "$common/worktrees/$name"); then
+                wt=$(sed 's#/\.git$##' "$common/worktrees/$name/gitdir" 2>/dev/null) || wt=""
+                log "keep  $main (prune 見送り: ${wt:-worktrees/$name} の管理ディレクトリに $mark が在る (サブモジュールの Git ディレクトリか、操作の途中))"
+                hit=1
+                continue
+            fi
+            # HEAD のファイルは reftable では置き石 (ref: refs/heads/.invalid) なので、git に解決させる。ブランチは対象外。
+            if git -C "$main" symbolic-ref -q "worktrees/$name/HEAD" >/dev/null 2>&1; then continue; fi
+            head=$(git -C "$main" rev-parse --verify -q "worktrees/$name/HEAD" 2>/dev/null) || head=""
+        fi
         if [ -z "$head" ]; then
             log "keep  $main (prune 見送り: 読めない行か HEAD: $line)"
             hit=1
@@ -1004,10 +1042,215 @@ prune_safe() { # prune_safe <本体>
     done <<<"$dry"
     [ "$hit" = 1 ] || return 0
     notify_daily "$STATE_ROOT/worktree-gc/prune-skipped-warned" \
-        "$main の git worktree prune を見送っています。detached の HEAD にだけ在るコミットか、読めない登録がある (ログに)"
+        "$main の git worktree prune を見送っています。detached の HEAD にだけ在るコミットか、サブモジュールの Git ディレクトリや操作の途中の印か、読めない登録がある (ログに)"
     return 1
 }
 if prune_safe "$REPO"; then run git -C "$REPO" worktree prune; fi
+
+# ---- Orca の一覧の本体と GC_REPOS のリポ (規則 all_repos) ----
+# 上の節が見るのは、$REPO と、Orca の一覧の $ORCA_ROOT の下と、scratchpad の下だけ。ほかの worktree (手で作ったもの、ほかの道具や
+# サブエージェントが作ったもの) は LIST の行に出すだけで消さない。フォルダの無い登録は、git の gc と同じ git worktree prune --expire で外す
+# (gc は gc.worktreePruneExpire の 3 か月。ここは MIN_AGE_HOURS)。
+
+# <本体> のフォルダの無い登録を外す (list は予定を書くだけ)。外すのは prune --dry-run -v --expire の行の登録で、prune が実際に外すものと
+# 同じ集合。--expire が比べるのは worktrees/<名前>/index の mtime で、index の無い登録と、gitdir が無い・読めない・空の登録は
+# --expire に関係なく外れる (https://github.com/git/git/blob/v2.54.0/worktree.c#L1001-L1008)。そういう登録 (古さを git が
+# 確かめていない、パスが読めず「触らない」リストに照らせない)、フォルダが残っている登録、パスが「触らない」リストか Orca の一覧に
+# 当たる登録、読めない行が 1 つでも在るリポは、list でも on でも外さない (prune は登録を選べない)。パスと HEAD は prune の前に控え、
+# 外れたかは管理ディレクトリが消えたかで見る。
+# 期限は git を呼ぶたびに計算し直されない絶対時刻 (@<epoch 秒> +0000) にして、dry-run と prune に同じ値を渡す。
+# ponytail: dry-run の後にフォルダが消えた、index の古い登録は、同じ期限でも確認なしで prune に外される (prune は実行の時点で
+# git が「無い」を確かめ直すので、フォルダが戻った登録は外さない)。防げないので、prune の前後の管理ディレクトリを比べ、控えに無いものが
+# 消えたら WARN と 1 日 1 回の通知で知らせる。1 つずつ外す git worktree remove は、フォルダが戻っていると中身ごと消すので使わない。
+all_repos_prune() { # all_repos_prune <本体> <共通の .git>
+    local main="$1" common="$2" dry line why wt ref how i exp out mark n before planned hit=0 lost="その worktree の reflog・index・refs/worktree/・worktree 固有の設定 (config.worktree)・sparse-checkout の定義"
+    # 先頭ゼロを八進数に読まない (is_uint を通っているので数字だけ)。
+    exp="@$(($(date +%s) - 10#$MIN_AGE_HOURS * 3600)) +0000"
+    # 外す登録の名前・パス・戻し方。パスにタブや改行が在っても割れないよう、添字を揃えた配列で持つ (bash 3.2 には連想配列が無い)。
+    ar_names=() ar_wts=() ar_hows=()
+    prune_safe "$main" || return 0
+    if ! dry=$(LC_ALL=C git -C "$main" worktree prune --dry-run -v --expire "$exp" 2>&1); then
+        log "keep  $main (all_repos: prune 見送り: git worktree prune --dry-run --expire が失敗)"
+        return 0
+    fi
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        why=""
+        if ! prune_line "$line"; then
+            why="読めない行: $line"
+        elif [ "$pl_why" != "gitdir file points to non-existent location" ]; then
+            why="worktrees/$pl_name: $pl_why"
+        elif [ ! -e "$common/worktrees/$pl_name/index" ]; then
+            why="worktrees/$pl_name に index が無い (古さを git が確かめていない)"
+        elif mark=$(wt_admin_hold "$common/worktrees/$pl_name"); then
+            # prune_safe の後で候補になった登録 (間にフォルダが消えた) も、最終の候補として見る。
+            why="worktrees/$pl_name の管理ディレクトリに $mark が在る (サブモジュールの Git ディレクトリか、操作の途中)"
+        elif ! wt=$(cat "$common/worktrees/$pl_name/gitdir" 2>/dev/null) || [ "${wt%/.git}" = "$wt" ]; then
+            # <パス>/.git の形でない壊れた gitdir (…/.git.old など) を、そのファイルが無いだけで「フォルダが無い」と読まない。
+            why="worktrees/$pl_name の gitdir の形が違う (/.git で終わらない)"
+        elif wt=${wt%/.git}; [ "${wt#/}" = "$wt" ]; then
+            why="worktrees/$pl_name の gitdir が絶対パスでない"
+        elif [ "${wt%%$'\n'*}" != "$wt" ]; then
+            # 改行区切りで読む Orca の一覧からは、改行入りのパスを落としているので、「Orca に在る」の守りが効かない。
+            why="worktrees/$pl_name のパスに改行が在る"
+        elif out=$(LC_ALL=C ls -d -- "$wt" 2>&1); then
+            # 理由が言うのは「<パス>/.git が無い」だけ。フォルダが残っていれば、直すのに要る index と reflog を消さない
+            # (台帳の git worktree add も、空でないフォルダには通らない)。
+            why="$wt が在る (.git だけが無い)"
+        elif [ "${out%No such file or directory}" = "$out" ]; then
+            # 親を検索できない (Permission denied) なども [ -e ] は偽で、git も「無い」と読む。無いと確かめられたものだけ外す。
+            why="$wt が無いと確かめられない ($out)"
+        elif keep_match "$wt"; then
+            why="$wt が「触らない」リスト"
+        elif keep_match "$common/worktrees/$pl_name"; then
+            # prune が実際に消すのは本体の .git の中の管理ディレクトリ。本体をリストに書いた場合も、本体の外の worktree の登録を外さない。
+            why="$common/worktrees/$pl_name (管理ディレクトリ) が「触らない」リスト"
+        elif in_orca "$wt"; then
+            # Orca がまだ持っている登録を git の側だけ外すと、Orca のカードがどうなるか分からない。
+            why="$wt が Orca の一覧に在る: Orca で消す"
+        elif in_herdr "$wt"; then
+            why="$wt が herdr の下: herdr で消す"
+        elif ref=$(git -C "$main" symbolic-ref -q "worktrees/$pl_name/HEAD" 2>/dev/null); then
+            # --short は同名のタグが在ると heads/<名前> を返し、戻し方が detached で戻るので、完全な ref から作る。
+            # コミットの無いブランチ (git worktree add --orphan) は、台帳の git worktree add <パス> <ブランチ> が通らない。
+            case "$ref" in
+                refs/heads/?*)
+                    if git -C "$main" rev-parse --verify -q "$ref^{commit}" >/dev/null 2>&1; then
+                        how="cd $(printf %q "$main") && git worktree add $(printf %q "$wt") $(printf %q "${ref#refs/heads/}")"
+                    else
+                        why="worktrees/$pl_name のブランチ ${ref#refs/heads/} にコミットが無い"
+                    fi
+                    ;;
+                *) why="worktrees/$pl_name の HEAD を読めない ($ref)" ;;
+            esac
+        elif ref=$(git -C "$main" rev-parse --verify -q "worktrees/$pl_name/HEAD" 2>/dev/null); then
+            # prune_safe の後で候補になった detached (間にフォルダが消えた) も、固有のコミットを持てば外さない (失敗も「辿れない」)。
+            out=$(git -C "$main" for-each-ref --contains "$ref" refs/heads refs/remotes refs/tags 2>/dev/null) || out=""
+            if [ -z "$out" ]; then
+                why="$wt の detached HEAD $ref がどの ref にも無い"
+            else
+                how="cd $(printf %q "$main") && git worktree add --detach $(printf %q "$wt") $ref"
+            fi
+        else
+            why="worktrees/$pl_name の HEAD を読めない"
+        fi
+        if [ -n "$why" ]; then
+            log "keep  $main (all_repos: prune 見送り: $why)"
+            return 0
+        fi
+        ar_names+=("$pl_name")
+        ar_wts+=("$wt")
+        ar_hows+=("$how")
+    done <<<"$dry"
+    # 空の配列の展開は bash 3.2 の set -u で落ちるので、空なら先に戻る。
+    [ ${#ar_names[@]} -gt 0 ] || return 0
+    if [ "$all_mode" = on ]; then
+        before=$(ls -A "$common/worktrees" 2>/dev/null || true)
+        # 失敗しても途中まで外れているかもしれないので、戻らずに、外れた分の台帳と検知へ進む。
+        run git -C "$main" worktree prune --expire "$exp" || log "WARN: all_repos: prune 失敗 $main"
+    fi
+    i=0
+    while [ "$i" -lt ${#ar_names[@]} ]; do
+        wt=${ar_wts[$i]} how=${ar_hows[$i]}
+        if [ "$all_mode" = list ]; then
+            ledger_plan "all_repos $main $wt" prune "$wt" "all_repos: フォルダが無い" "$how" "$lost" || log "WARN: 台帳に予定を書けない $CLEANUP_LEDGER"
+            log "PLAN  $wt (all_repos: フォルダが無い)"
+        elif [ ! -e "$common/worktrees/${ar_names[$i]}" ]; then
+            log "pruned $wt"
+            record worktree-prune "$wt" "all_repos: フォルダが無い" "$how" "$lost"
+        fi
+        i=$((i + 1))
+    done
+    [ "$all_mode" = on ] && [ "$DRY_RUN" != 1 ] || return 0
+    planned=$(printf '%s\n' "${ar_names[@]}")
+    while IFS= read -r n; do
+        [ -n "$n" ] && [ ! -e "$common/worktrees/$n" ] || continue
+        if grep -qxF -- "$n" <<<"$planned"; then continue; fi
+        log "WARN: all_repos: 確かめていない登録が prune で外れた: $main の worktrees/$n (dry-run の後にフォルダが消えた。台帳に無い)"
+        hit=1
+    done <<<"$before"
+    [ "$hit" = 1 ] || return 0
+    notify_daily "$STATE_ROOT/worktree-gc/all-repos-unchecked-warned" "$main の git worktree prune で、確かめていない登録が外れた (ログに)"
+}
+
+# <パス> か、その実体の形が Orca の一覧 (orca_paths。下の節で作る) に在れば 0。
+in_orca() {
+    local r
+    r=$(real_path /bin/pwd "$1")
+    # 大文字小文字は区別しない (区別しないファイルシステムで、Orca の行と git の登録の綴りが違いうる。残す側に広げるだけ)。
+    grep -qxiF -e "$1" -e "${r:-$1}" <<<"$orca_paths"
+}
+
+all_mode=$(rule_mode all_repos)
+orca_paths=""
+# Orca に届かない回は、Orca の一覧の worktree を LIST から除けないので、この節ごと見送る。
+if [ "$all_mode" = off ]; then
+    :
+elif [ "$orca_state" = unknown ]; then
+    log "WARN: all_repos: Orca に届かず、Orca の一覧のリポと worktree が分からない。この節は見送る (次回に拾う)"
+elif [ "$orca_state" = ok ] && ! orca_list=$(orca worktree list --json 2>/dev/null |
+    jq -ce 'select(.ok == true and .result.truncated == false) | .result.worktrees | arrays | select(all(.[]; type == "object"))'); then
+    # 打ち切られた一覧を読むと、返らなかった Orca の登録を「一覧に無い」と読む (orca_ps と同じ条件)。
+    # object でない要素が在ると、後ろの jq の .[].path がそこで止まり、残りの行が出ない (process substitution なので失敗も見えない)。
+    log "WARN: all_repos: orca worktree list を取れない、または打ち切られた。この節は見送る (次回に拾う)"
+# 期限 (今 - MIN_AGE_HOURS 時間) が計算できない値も見送る: 桁が多いと算術があふれ、1970 年より前の負の時刻は git が今に近く読む。
+elif ! is_uint "$MIN_AGE_HOURS" || [ ${#MIN_AGE_HOURS} -gt 9 ] || [ $(($(date +%s) - 10#$MIN_AGE_HOURS * 3600)) -le 0 ] ||
+    ! repo_common=$(git -C "$REPO" rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
+    log "WARN: all_repos: MIN_AGE_HOURS が整数でない・9 桁を超える・期限が 1970 年より前、または $REPO の .git を引けない。この節は見送る"
+else
+    # 回るリポの候補 (改行区切り): Orca の一覧の本体と GC_REPOS。orca コマンドが無ければ GC_REPOS だけ。
+    # 本体はこのマシンの行 (hostId が local) だけ。別のホストの行のパスを git -C に渡すと、同じパスの無関係なリポを回る。
+    # 改行区切りで読むので、文字列でない・改行を含むパスの行は使わない (割れると、前半が別のリポの根として回りうる)。
+    cands=$(jq -r '.[] | select(.isMainWorktree == true and .hostId == "local") | .path
+        | select(type == "string" and (contains("\n") | not))' <<<"${orca_list:-[]}") || cands=""
+    # Orca の一覧の全部の行のパスと、その実体の形 (改行区切り)。LIST から除く所と prune の見送りで使う (in_orca)。
+    while IFS= read -r p; do
+        case "$p" in /*) ;; *) continue ;; esac
+        orca_paths+="$p"$'\n'"$(real_path /bin/pwd "$p")"$'\n'
+    done < <(jq -r '.[].path | select(type == "string" and (contains("\n") | not))' <<<"${orca_list:-[]}")
+    # 値の * などを展開させない (~ はもともと展開されない)。後ろの処理は glob を使うので、割ったらすぐ戻す。
+    set -f
+    # shellcheck disable=SC2086
+    for p in $GC_REPOS; do cands+=$'\n'"$p"; done
+    set +f
+    if [ -z "${cands//$'\n'/}" ]; then log "all_repos: 回るリポが無い (Orca の一覧に本体が無く、GC_REPOS も空)"; fi
+    seen=""
+    while IFS= read -r p; do
+        [ -n "$p" ] || continue
+        # 同じリポかは共通の .git で比べる (symlink・末尾の /・linked worktree のパスも同じ値になる)。失敗を「worktree 0 本」と読まない。
+        if ! common=$(git -C "$p" rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
+            log "WARN: all_repos: $p を git のリポとして読めない (存在しない、またはリポでない)。飛ばす"
+            continue
+        fi
+        # リポの中のフォルダも git -C は親を探して成功するので、指定していない親を回さないよう、リポの根でなければ飛ばす
+        # (--show-cdup は、本体の根・linked worktree の根・bare リポで空)。
+        if [ -n "$(git -C "$p" rev-parse --show-cdup 2>/dev/null)" ]; then
+            log "WARN: all_repos: $p はリポの根でない (リポの中のフォルダ)。飛ばす"
+            continue
+        fi
+        # $REPO は上の $REPO の節と prune が見ている。
+        [ "$common" != "$repo_common" ] || continue
+        case $'\n'"$seen" in *$'\n'"$common"$'\n'*) continue ;; esac
+        seen+="$common"$'\n'
+        if ! list=$(git -C "$p" worktree list --porcelain 2>/dev/null) || ! main=$(sed -n '1s/^worktree //p' <<<"$list") || [ -z "$main" ]; then
+            log "WARN: all_repos: $p の git worktree list を取れない。飛ばす"
+            continue
+        fi
+        # 本体のパスに改行が在ると --porcelain の 1 行目が途中で切れ、後ろの git -C "$main" が別の場所を指しうる。
+        if [ "$(git -C "$main" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" != "$common" ]; then
+            log "WARN: all_repos: $p の本体 ($main) が同じリポを指さない (本体のパスに改行が在る、など)。飛ばす"
+            continue
+        fi
+        # 本体・Orca の一覧に在るもの・scratch の節が見たもの・フォルダの無い登録 (下の prune が見る) のほかを出す。何も消さない。
+        while IFS= read -r wt; do
+            [ "$wt" != "$main" ] && [ -d "$wt" ] || continue
+            if in_orca "$wt"; then continue; fi
+            case $'\n'"$scratch_seen" in *$'\n'"$wt"$'\n'*) continue ;; esac
+            log "LIST  $wt (どの判定にも掛からない: 自動では消さない)"
+        done < <(sed -n 's/^worktree //p' <<<"$list")
+        all_repos_prune "$main" "$common"
+    done <<<"$cands"
+fi
 
 # ---- Orca の worktree を消す ----
 # 判定から削除までに fetch や gh で数分空くので、直前に状態を取り直す。

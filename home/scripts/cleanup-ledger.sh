@@ -69,6 +69,24 @@ keep_entries="" keep_loaded=0 keep_error=""
 # agent-gc はセッションを止めるだけで中身は消えないので、source した後で 0 にする。
 keep_ancestors=1
 
+# <絶対パス> の、実在する最も近い祖先を <pwd のコマンド> -P (/bin/pwd か組み込みの pwd) で実体パスに直し、残りの要素をそのまま繋いで出す。
+# まだ無いパス (消えた worktree の登録など) も、symlink を通る祖先 (/tmp → /private/tmp) を実体の形で比べるため。/ は空を出す。
+real_path() { # real_path <pwd のコマンド> <絶対パス>
+    local p=$2 rest="" r
+    # 絶対パスでなければそのまま返す (スラッシュの無い相対パスでは、下のループの p が短くならず終わらない)。
+    case "$p" in /*) ;; *) printf '%s' "$p"; return 0 ;; esac
+    while [ "${p%/}" != "$p" ]; do p=${p%/}; done
+    while [ -n "$p" ]; do
+        if r=$(cd "$p" 2>/dev/null && "$1" -P); then
+            printf '%s%s' "${r%/}" "$rest"
+            return 0
+        fi
+        rest="/${p##*/}$rest"
+        p=${p%/*}
+    done
+    printf '%s' "$rest"
+}
+
 # リストを読む。読めなければ 1。途中でファイルが消えても判定が変わらないよう、1 回の実行で 1 度だけ呼ぶ。
 # 読めた回は行数を、読めない行がある回はその行番号を (中身は出さない) 呼び側の log に出す。
 # 実体パスは /bin/pwd -P で取る。bash 組み込みの pwd -P は打った綴りのまま返すので、大文字小文字を区別しない
@@ -104,10 +122,9 @@ keep_load() {
                 while [ "${l%/}" != "$l" ]; do l=${l%/}; done
                 keep_entries+="p:$l"$'\n'
                 # /tmp と /private/tmp のように、同じ場所を別の名前で書いても当たるよう実体パスでも持つ。
-                # まだ無いパスは実体に直せないので、文字どおりの形だけで比べる。
+                # まだ無いパスは、実在する最も近い祖先を実体に直し、残りを繋いだ形で持つ。
                 for f in /bin/pwd pwd; do
-                    r=$(cd "${l:-/}" 2>/dev/null && "$f" -P) || r=""
-                    while [ "${r%/}" != "$r" ]; do r=${r%/}; done
+                    r=$(real_path "$f" "$l")
                     # 3 つの形のうち同じものは 1 つにする。
                     case $'\n'"$keep_entries" in *$'\n'"p:$r"$'\n'*) continue ;; esac
                     if [ -n "$r" ]; then keep_entries+="p:$r"$'\n'; fi
@@ -133,20 +150,31 @@ keep_load() {
 # keep_ancestors=1 なら、行が対象の中を指すとき (/a/wt/data の行と /a/wt) も当てる。対象を消すと、守りたい中身も一緒に消えるため。
 # 呼び側は `if keep_match …` で受ける (当たらないときの 1 で set -e が落ちないように)。
 keep_match() {
-    local t r e l x
+    local t r e l x u ents
     # keep_load を通っていなければ、何を守るか分からないので守る側に倒す。
     [ "$keep_loaded" = 1 ] || return 0
     for t in "$@"; do
         case "$t" in
             /*)
-                r=$(cd "$t" 2>/dev/null && /bin/pwd -P) || r=$t
+                # まだ無い対象も、実在する祖先を実体パスに直した形で比べる (/ は空になるので、そのときは文字どおり)。
+                r=$(real_path /bin/pwd "$t")
+                [ -n "$r" ] || r=$t
+                u=$t ents=$keep_entries
+                # 無い対象は、対象の 2 つの形と行を ASCII の小文字に揃えて比べる。大文字小文字を区別しないファイルシステムでは、
+                # 在る間は実体の綴りで当たった行が、消えた後に綴りの違いで当たらなくなるため (残す側に広げるだけ)。
+                # shopt -s nocasematch は、return の経路で戻し忘れると後ろの [[ ]] と case に効くので使わない。
+                if [ ! -e "$t" ]; then
+                    u=$(printf '%s' "$t" | LC_ALL=C tr 'A-Z' 'a-z')
+                    r=$(printf '%s' "$r" | LC_ALL=C tr 'A-Z' 'a-z')
+                    ents=$(printf '%s' "$keep_entries" | LC_ALL=C tr 'A-Z' 'a-z')
+                fi
                 while IFS= read -r e; do
                     case "$e" in p:*) l=${e#p:} ;; *) continue ;; esac
-                    for x in "$t" "$r"; do
+                    for x in "$u" "$r"; do
                         if [[ "$x" == "$l" || "$x" == "$l"/* ]]; then return 0; fi
                         if [ "$keep_ancestors" = 1 ] && [[ "$l" == "$x"/* ]]; then return 0; fi
                     done
-                done <<<"$keep_entries"
+                done <<<"$ents"
                 ;;
             ?*) if grep -qxF -- "n:$t" <<<"$keep_entries"; then return 0; fi ;;
         esac

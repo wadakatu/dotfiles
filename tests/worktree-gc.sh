@@ -9,6 +9,10 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 script="$root/home/scripts/worktree-gc.sh"
 # 呼び出し元の FF_CHECKOUTS は引き継がない (本物の git を使うので、export されていると一時ディレクトリの外の checkout が進む)。
 unset FF_CHECKOUTS
+# GC_REPOS と規則のスイッチ (RULE_*) も継がない (export されていると、規則 all_repos の on のケースが一時ディレクトリの外のリポを prune する)。
+# 各ケースは run_gc に明示した値だけで流れる。
+unset GC_REPOS
+for v in $(compgen -v RULE_); do unset "$v"; done
 base=$(mktemp -d)
 base=$(cd "$base" && pwd -P) # macOS の /var → /private/var。lsof は実パスで返す
 export GIT_CONFIG_GLOBAL="$base/gitconfig" GIT_CONFIG_NOSYSTEM=1 # 手元の hook や署名の設定を巻き込まない
@@ -1213,6 +1217,22 @@ check "~other/x は名前の行で / を含むので読めない" env CLEANUP_KE
 check "~ は HOME に展開する" m "$T/home/w/sub"
 check "実体パスの対象に、symlink を通る行が当たる" m "$T/real/x"
 check "無いパスの行は文字どおりで比べる" m "$T/gone/y"
+# まだ無いパスも、実在する最も近い祖先を実体パスに直して比べる (消えた worktree の登録は /private/tmp/… でも、行は /tmp/… と書きうる)。
+printf '%s\n' "$T/link/gone-a" "$T/real/gone-b" >"$T/gone-keep"
+mg() { HOME="$T/home" CLEANUP_KEEP="$T/gone-keep" bash -c "$pre"'keep_load >/dev/null; keep_match "$@"' "$lib" "$@"; }
+check "symlink の祖先を通る無いパスの行が、実体パスの無い対象を守る" mg "$T/real/gone-a/x"
+check "symlink の祖先を通る無い対象も、実体パスで書いた無いパスの行に当たる" mg "$T/link/gone-b"
+check "無いパス同士で、別の名前には当たらない" eval '! mg "$T/real/gone-c"'
+# 絶対パスでない入力 (Orca の一覧の行など) で止まらない。上限つきで呼び、そのまま返ることを見る。
+check "相対パスはそのまま返す (止まらない)" test "$(perl -e 'alarm shift; exec @ARGV' 10 bash -c '. "$0"; real_path /bin/pwd zz-no-such-rel' "$lib")" = zz-no-such-rel
+# 無い対象は、大文字小文字を区別しないファイルシステムで綴りの違う行にも当てる (在る間は実体の綴りで当たるので、消えた後も守る)。
+printf '%s\n' "$T/real/Gone-D" "$T/real/X" >"$T/case-gone-keep"
+mc() { HOME="$T/home" CLEANUP_KEEP="$T/case-gone-keep" bash -c "$pre"'keep_load >/dev/null; keep_match "$@"' "$lib" "$@"; }
+check "無い対象は、大文字小文字だけ違う無いパスの行に当たる" mc "$T/real/gone-d/x"
+check "無い対象でも、別の名前には当たらない" eval '! mc "$T/real/gone-e"'
+if [ ! -d "$T/caseprobe" ]; then # 区別するファイルシステムでだけ: 在る対象の比べ方は変えない
+    check "在る対象は、大文字小文字の違う行に当たらない" eval '! mc "$T/real/x"'
+fi
 check "名前は前後の空白を除いて完全一致" m name-a
 check "名前は接頭辞では当たらない" nm name-ab
 check "末尾に改行の無い最後の行も読む" m last-name
@@ -1442,6 +1462,26 @@ touch -t 202001010000 "$T/repo/.git/worktrees/det/index"
 run_gc
 check "登録が残る" registered "$T/det"
 check "見送りと SHA がログに出る" logged "keep  $T/repo (prune 見送り: $T/det の detached HEAD $u がどの ref にも無い)"
+
+# linked worktree の中で submodule update すると、サブモジュールの Git ディレクトリは worktrees/<名前>/modules/ にでき、
+# そこにだけ在るコミットは prune で管理ディレクトリごと消える (git worktree add では戻らない)。ブランチの登録でも見送る。
+setup repo-prune-submodule-gitdir
+git -C "$T/repo" worktree add -q -b feat-m "$T/mw" origin/main
+mv "$T/mw" "$T/mw.moved"
+mkdir -p "$T/repo/.git/worktrees/mw/modules/x"
+run_gc
+check "登録が残る" held mw
+check "理由がログに出る" logged "keep  $T/repo (prune 見送り: $T/mw の管理ディレクトリに modules が在る"
+check "通知が 1 本" notified_once "prune"
+
+# merge --autostash などが途中で止まった worktree の管理ディレクトリには MERGE_HEAD などが残り、退避した変更への参照はそこにしか無い。
+setup repo-prune-op-in-progress
+git -C "$T/repo" worktree add -q -b feat-op "$T/ow" origin/main
+mv "$T/ow" "$T/ow.moved"
+echo x >"$T/repo/.git/worktrees/ow/MERGE_HEAD"
+run_gc
+check "登録が残る" held ow
+check "理由がログに出る" logged "keep  $T/repo (prune 見送り: $T/ow の管理ディレクトリに MERGE_HEAD が在る"
 
 # ---- $REPO の prune: dry-run が失敗した回・読めない行が在った回は、何が外れるか分からないので prune しない ----
 fake_dry_run() { # fake_dry_run <fail|odd>: git worktree prune --dry-run だけを失敗させる / 読めない行を足す偽の git を前に差し込む
@@ -1979,6 +2019,485 @@ scratch_gc
 check "判定は通った (前提)" logged "STALE $WT (scratch_worktrees: "
 scratch_kept "削除直前に、lock または持ち主のセッションを検出"
 check "compose を止めない" not_called wt-stack
+
+# ---- all_repos: Orca の一覧の本体と GC_REPOS のリポの、どの判定にも掛からない worktree を LIST に出し、フォルダの無い古い登録を外す ----
+# 基準: 偽の Orca が本体として返す別のリポ r2 に、フォルダの無いブランチの登録 g が 1 つ。--expire が比べる index の mtime は古い。
+# 残すケースは基準に 1 つ足し、理由のログまで見る (基準の登録も残ることを見ないと、条件を外した変異で落ちない)。
+# GC_REPOS の値は全部 $T の下の絶対パスにする (相対パスはテストを流す cwd、つまり作業ツリーから引かれる)。
+# index を古くした後でテストの側の git (commit など) が自動メンテナンスを起こすと、その worktree prune が登録を先に外すので、
+# ここから先のテストの git でも切る (スクリプトは自分で切っているので、判定は変わらない)。
+export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=maintenance.auto GIT_CONFIG_VALUE_0=false
+new_repo() { # new_repo <パス>: origin の付いた別のリポを作る
+    git init -q --bare -b main "$1.origin.git"
+    git clone -q "$1.origin.git" "$1" 2>/dev/null
+    git -C "$1" commit -q --allow-empty -m init
+    git -C "$1" push -q origin main
+    git -C "$1" remote set-head origin main
+}
+gone_wt() { # gone_wt <本体> <パス> [<worktree add の引数>...]: 登録を作ってフォルダを退け、index を古くする (既定はブランチ <パスの名前>)
+    local r=$1 p=$2
+    shift 2
+    if [ $# = 0 ]; then set -- -b "${p##*/}"; fi
+    git -C "$r" worktree add -q "$@" "$p" origin/main
+    mv "$p" "$p.moved"
+    touch -t "$OLD" "$r/.git/worktrees/${p##*/}/index"
+}
+# orca worktree list --json の答えの形 (ok・truncated・各行の hostId)。orca_mains <本体>... は本体だけの一覧を作り、orca_add <パス> は本体でない行を足す。
+orca_mains() { jq -n '{ok: true, result: {hostScope: "local", truncated: false, totalCount: ($ARGS.positional | length), worktrees: [$ARGS.positional[] | {path: ., hostId: "local", isMainWorktree: true}]}}' --args "$@" >"$T/list.json"; }
+orca_add() { jq --arg p "$1" '.result.worktrees += [{path: $p, hostId: "local", isMainWorktree: false}]' "$T/list.json" >"$T/list.tmp" && mv "$T/list.tmp" "$T/list.json"; }
+ar_case() { setup "$1"; new_repo "$T/r2"; gone_wt "$T/r2" "$T/g"; orca_mains "$T/r2"; }
+ar_gc() { run_gc RULE_all_repos="$1" "${@:2}"; } # ar_gc <off|list|on> [NAME=VALUE...]
+held2() { [ -d "$T/r2/.git/worktrees/$1" ]; }                                     # held2 <名前>: r2 に登録が残っている
+lists() { [ "$(grep -c ' LIST  ' "$T/log")" = "$1" ]; }                            # lists <本数>: LIST の行の数
+list_line() { logged "LIST  $1 (どの判定にも掛からない: 自動では消さない)"; }
+kind_rows() { [ "$(awk -F'\t' -v k="$1" '$2 == k' "$LEDGER" 2>/dev/null | grep -c .)" = "$2" ]; } # kind_rows <種類> <行数>
+# orca の無い PATH で流す。本物の orca がスクリプトの足す PATH (/usr/local/bin など) に在る環境では、本物の Orca と実物のリポに
+# 触れないよう流さず 1 を返す (keep-repo-no-orca と同じ)。
+run_gc_noorca() {
+    local c p
+    mkdir -p "$T/bin"
+    for c in "$base"/bin/*; do [ "${c##*/}" = orca ] || ln -sf "$c" "$T/bin/"; done
+    p=$(printf '%s' "$PATH" | tr ':' '\n' | while IFS= read -r d; do [ -x "$d/orca" ] || printf '%s:' "$d"; done)
+    if (PATH="$T/bin:${p}/etc/profiles/per-user/${USER:-}/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"; command -v orca >/dev/null 2>&1); then
+        echo "skip [$CASE] 本物の orca が PATH の後ろに在る"
+        return 1
+    fi
+    run_gc PATH="$T/bin:${p%:}" "$@"
+}
+
+ar_case all-repos-off
+git -C "$T/r2" worktree add -q -b manual "$T/manual" origin/main
+run_gc GC_REPOS="$T/r2 $T/nope"
+check "登録は残る" held2 g
+check "LIST が出ない" lists 0
+check "GC_REPOS を読まない (WARN も出ない)" test -z "$(grep all_repos "$T/log")"
+
+ar_case all-repos-list
+git -C "$T/r2" worktree add -q -b manual "$T/manual" origin/main
+ar_gc list
+check "登録は残る" held2 g
+check "plan-prune が 1 行" kind_rows plan-prune 1
+check "台帳はその 1 行だけ" rows 1
+check "戻し方は git worktree add とブランチ名" col_has "$T/g" 5 "cd $T/r2 && git worktree add $T/g g"
+check "戻らないものに reflog" col_has "$T/g" 6 reflog
+check "鍵は規則・本体・パス" grep -qxF "all_repos $T/r2 $T/g" "$T/state/cleanup-ledger/planned"
+check "PLAN の行" logged "PLAN  $T/g (all_repos: フォルダが無い)"
+check "手で作った worktree が LIST に出る" list_line "$T/manual"
+check "LIST は 1 行 (フォルダの無い登録は出さない)" lists 1
+check "手で作った worktree は残る" exists "$T/manual"
+check "通知が出ない" test ! -e "$T/notify-calls"
+check "戻し方が貼って通る" restores_parse
+ar_gc list
+check "2 回流しても plan-prune は 1 行" kind_rows plan-prune 1
+
+ar_case all-repos-on-prunes
+ar_gc on
+check "登録が外れる" eval '! held2 g'
+check "台帳は worktree-prune の 1 行" eval 'rows 1 && kind_rows worktree-prune 1'
+check "規則" col_has "$T/g" 4 "all_repos: フォルダが無い"
+check "戻らないものに worktree 固有の設定" col_has "$T/g" 6 "worktree 固有の設定 (config.worktree)・sparse-checkout の定義"
+check "ログに pruned の行" logged "pruned $T/g"
+check "通知に 1 件" notified_once "worktree-prune 1 件"
+check "戻し方が貼って通る" restores_parse
+(eval "$(row "$T/g" | cut -f5)") >/dev/null 2>&1
+check "台帳の戻し方で worktree が戻る" test "$(git -C "$T/g" symbolic-ref --short HEAD 2>/dev/null)" = g
+
+ar_case all-repos-young # index が 2 時間前
+touch -t "$(jq -nr --argjson s $(($(date +%s) - 2 * H)) '$s | strflocaltime("%Y%m%d%H%M.%S")')" "$T/r2/.git/worktrees/g/index"
+ar_gc on
+check "on でも外れない" held2 g
+check "台帳に何も書かない" test ! -e "$LEDGER"
+ar_gc list
+check "list でも plan-prune を書かない" kind_rows plan-prune 0
+
+ar_case all-repos-detached-unique
+git -C "$T/r2" worktree add -q --detach "$T/d" origin/main
+git -C "$T/d" commit -q --allow-empty -m unique
+u=$(git -C "$T/d" rev-parse HEAD)
+mv "$T/d" "$T/d.moved"
+touch -t "$OLD" "$T/r2/.git/worktrees/d/index"
+ar_gc on
+check "on でも登録が残る" held2 d
+check "同じリポの基準の登録も残る" held2 g
+check "台帳に worktree-prune が無い" kind_rows worktree-prune 0
+check "理由がログに出る" logged "keep  $T/r2 (prune 見送り: $T/d の detached HEAD $u がどの ref にも無い)"
+ar_gc list
+check "list でも plan-prune が無い" kind_rows plan-prune 0
+check "list でも理由がログに出る" logged "keep  $T/r2 (prune 見送り: $T/d の detached HEAD $u"
+
+ar_case all-repos-detached-merged
+gone_wt "$T/r2" "$T/d" --detach
+sha=$(git -C "$T/r2" rev-parse origin/main)
+ar_gc on
+check "登録が外れる" eval '! held2 d'
+check "戻し方は --detach と SHA" col_has "$T/d" 5 "cd $T/r2 && git worktree add --detach $T/d $sha"
+
+ar_case all-repos-keep-list
+echo "$T/g" >"$KEEPLIST"
+ar_gc on
+check "そのリポは prune しない" held2 g
+check "理由がログに出る" logged "keep  $T/r2 (all_repos: prune 見送り: $T/g が「触らない」リスト)"
+check "台帳に worktree-prune が無い" kind_rows worktree-prune 0
+
+ar_case all-repos-keep-list-live # 当たるのがフォルダの在る worktree だけなら prune する
+git -C "$T/r2" worktree add -q -b live "$T/live" origin/main
+echo "$T/live" >"$KEEPLIST"
+ar_gc on
+check "登録が外れる" eval '! held2 g'
+check "フォルダの在る worktree は残る" exists "$T/live"
+
+ar_case all-repos-locked # git worktree lock は管理ディレクトリの locked を書く (フォルダが無いと git からは lock できない)
+echo external >"$T/r2/.git/worktrees/g/locked"
+ar_gc on
+check "lock された登録は外れない" held2 g
+check "台帳に書かない" test ! -e "$LEDGER"
+
+setup all-repos-gc-repos-list # Orca の一覧に本体が無い
+new_repo "$T/r2"
+git -C "$T/r2" worktree add -q -b agent-x "$T/r2/.claude/worktrees/agent-x" origin/main
+orca_mains
+ar_gc list GC_REPOS="$T/r2"
+check "LIST にその 1 行" list_line "$T/r2/.claude/worktrees/agent-x"
+check "LIST は 1 行" lists 1
+check "消えない" exists "$T/r2/.claude/worktrees/agent-x"
+if run_gc_noorca RULE_all_repos=list GC_REPOS="$T/r2"; then
+    check "orca が無い枝を通った (前提)" logged "orca コマンドが無い"
+    check "orca が無くても LIST にその 1 行" list_line "$T/r2/.claude/worktrees/agent-x"
+fi
+
+setup all-repos-gc-repos-missing
+new_repo "$T/r2"
+gone_wt "$T/r2" "$T/g"
+mkdir "$T/plain"
+orca_mains
+ar_gc on GC_REPOS="$T/nope $T/plain $T/r2"
+check "存在しないパスは WARN が 1 行" test "$(grep -cF "WARN: all_repos: $T/nope " "$T/log")" = 1
+check "git のリポでないフォルダも WARN が 1 行" test "$(grep -cF "WARN: all_repos: $T/plain " "$T/log")" = 1
+check "3 つ目は回る" eval '! held2 g'
+
+setup all-repos-gc-repos-unsupported # 空白を含むパス・* を含む値・~/… の値。どれも展開されると回れるリポを置く
+i=0
+for r in "sp ace" glob-repo tilde-repo; do
+    i=$((i + 1))
+    new_repo "$T/$r"
+    gone_wt "$T/$r" "$T/w$i"
+done
+orca_mains
+(cd "$T" && ar_gc on HOME="$T" GC_REPOS="$T/sp ace $T/glob-re* ~/tilde-repo")
+check "空白で割れた前の側は WARN" logged "WARN: all_repos: $T/sp "
+check "後ろの側も WARN" logged "WARN: all_repos: ace "
+check "* は展開されず、そのままの文字で WARN" logged "WARN: all_repos: $T/glob-re* "
+check "~ は展開されず WARN" logged "WARN: all_repos: ~/tilde-repo "
+check "どのリポの登録も外れない" eval '[ -d "$T/sp ace/.git/worktrees/w1" ] && [ -d "$T/glob-repo/.git/worktrees/w2" ] && [ -d "$T/tilde-repo/.git/worktrees/w3" ]'
+
+ar_case all-repos-dedup # Orca の本体と同じリポを、symlink・末尾の /・linked worktree のパスで GC_REPOS にも書く
+git -C "$T/r2" worktree add -q -b manual "$T/manual" origin/main
+ln -s "$T/r2" "$T/r2-link"
+ar_gc list GC_REPOS="$T/r2-link $T/r2/ $T/manual"
+check "LIST は 1 行" lists 1
+check "PLAN も 1 行" test "$(grep -c "PLAN  $T/g " "$T/log")" = 1
+
+setup all-repos-skips-repo # $REPO は Orca の一覧にも GC_REPOS にも在る
+gone_wt "$T/repo" "$T/rg"
+git -C "$T/repo" worktree add -q -b live "$T/repo-live" origin/main
+orca_mains "$T/repo"
+ar_gc on GC_REPOS="$T/repo"
+check "\$REPO の節が判定した (前提)" logged "keep  $T/repo-live ("
+check "\$REPO の worktree は LIST に出ない" lists 0
+check "台帳に worktree-prune が無い" kind_rows worktree-prune 0
+
+setup all-repos-empty-set
+orca_mains
+ar_gc on
+check "ログに 1 行" logged "all_repos: 回るリポが無い"
+if run_gc_noorca RULE_all_repos=on; then
+    check "orca が無い枝を通った (前提)" logged "orca コマンドが無い"
+    check "orca が無くてもログに 1 行" logged "all_repos: 回るリポが無い"
+fi
+
+setup all-repos-orca-unknown
+new_repo "$T/r2"
+gone_wt "$T/r2" "$T/g"
+git -C "$T/r2" worktree add -q -b manual "$T/manual" origin/main
+touch "$T/orca-unreachable"
+ar_gc on GC_REPOS="$T/r2"
+check "登録は残る" held2 g
+check "LIST が出ない" lists 0
+check "理由がログに出る" logged "all_repos: Orca に届かず"
+
+ar_case all-repos-list-excludes # Orca の一覧の worktree ($ORCA_ROOT の外)、本体、scratch の節が見た worktree は出さない
+git -C "$T/r2" worktree add -q -b in-orca "$T/in-orca" origin/main
+git -C "$T/r2" worktree add -q -b manual "$T/manual" origin/main
+S="$T/tmp/proj/$SID/scratchpad/wt/s1"
+mkdir -p "${S%/*}"
+git -C "$T/r2" worktree add -q -b feat-s "$S" origin/main
+orca_mains "$T/r2"
+orca_add "$T/in-orca"
+ar_gc list RULE_scratch_worktrees=list
+check "scratch の節が見た (前提)" logged "keep  $S ("
+check "LIST は手で作った 1 行だけ" eval 'lists 1 && list_line "$T/manual"'
+
+ar_case all-repos-no-index # index の無い登録 (git worktree add --no-checkout)。git は新しくても外す
+git -C "$T/r2" worktree add -q --no-checkout -b ni "$T/ni" origin/main
+mv "$T/ni" "$T/ni.moved"
+check "index が無い (前提)" test ! -e "$T/r2/.git/worktrees/ni/index"
+ar_gc on
+check "on でも外れない" held2 ni
+check "同じリポの基準の登録も外れない" held2 g
+check "理由がログに出る" logged "keep  $T/r2 (all_repos: prune 見送り: worktrees/ni に index が無い"
+ar_gc list
+check "list でも plan-prune を書かない" kind_rows plan-prune 0
+check "list でも理由がログに出る" logged "keep  $T/r2 (all_repos: prune 見送り: worktrees/ni に index が無い"
+
+ar_case all-repos-broken-gitdir # gitdir が空の登録。git は --expire に関係なく外す
+git -C "$T/r2" worktree add -q -b bro "$T/bro" origin/main
+: >"$T/r2/.git/worktrees/bro/gitdir"
+touch -t "$OLD" "$T/r2/.git/worktrees/bro/index"
+check "git の prune が外す (前提)" eval 'LC_ALL=C git -C "$T/r2" worktree prune --dry-run -v 2>&1 | grep -qF "Removing worktrees/bro: "'
+ar_gc on
+check "on でも外れない" held2 bro
+check "同じリポの基準の登録も外れない" held2 g
+check "理由がログに出る" logged "keep  $T/r2 (all_repos: prune 見送り: worktrees/bro: invalid gitdir file)"
+
+setup all-repos-gc-repos-subdir # リポの中のフォルダを書いても、親のリポは回らない (git -C は親を探して成功する)
+new_repo "$T/r2"
+gone_wt "$T/r2" "$T/g"
+mkdir "$T/r2/sub"
+orca_mains
+ar_gc on GC_REPOS="$T/r2/sub"
+check "WARN が 1 行" test "$(grep -cF "WARN: all_repos: $T/r2/sub " "$T/log")" = 1
+check "そのリポの登録は外れない" held2 g
+
+ar_case all-repos-folder-left # フォルダは残り、.git だけが無い登録。git の理由は「フォルダが無い」と同じ
+git -C "$T/r2" worktree add -q -b left "$T/left" origin/main
+rm "$T/left/.git"
+touch -t "$OLD" "$T/r2/.git/worktrees/left/index"
+check "git の prune が同じ理由で外す (前提)" eval 'LC_ALL=C git -C "$T/r2" worktree prune --dry-run -v 2>&1 | grep -qxF "Removing worktrees/left: gitdir file points to non-existent location"'
+ar_gc on
+check "on でも外れない" held2 left
+check "同じリポの基準の登録も外れない" held2 g
+check "理由がログに出る" logged "keep  $T/r2 (all_repos: prune 見送り: $T/left が在る"
+
+ar_case all-repos-keep-list-symlink # 「触らない」リストの行が symlink を通り、消えた登録は親のフォルダごと無い
+mkdir -p "$T/sp/sub"
+gone_wt "$T/r2" "$T/sp/sub/k"
+mv "$T/sp" "$T/sp.moved"
+ln -s "$T" "$T/tl"
+echo "$T/tl/sp/sub/k" >"$KEEPLIST"
+ar_gc on
+check "そのリポは prune しない" held2 k
+check "同じリポの基準の登録も外れない" held2 g
+check "理由がログに出る" logged "keep  $T/r2 (all_repos: prune 見送り: $T/sp/sub/k が「触らない」リスト)"
+
+ar_case all-repos-tab-path # 親のフォルダ名にタブ。台帳の対象と戻し方がずれない
+tp="$T/t	b"
+mkdir "$tp"
+gone_wt "$T/r2" "$tp/tw"
+ar_gc on
+check "登録が外れる" eval '! held2 tw'
+check "対象の列 (タブは空白に) と規則" col_has "$T/t b/tw" 4 "all_repos: フォルダが無い"
+check "戻し方はそのパスとブランチ" col_has "$T/t b/tw" 5 "cd $T/r2 && git worktree add $(printf %q "$tp/tw") tw"
+check "基準の登録の行もずれない" col_has "$T/g" 5 "cd $T/r2 && git worktree add $T/g g"
+check "戻し方が貼って通る" restores_parse
+
+ar_case all-repos-orca-listed # フォルダの無い登録が Orca の一覧に在る ($ORCA_ROOT の外なので Orca の節は見ない)
+orca_add "$T/g"
+ar_gc on
+check "外れない" held2 g
+check "理由がログに出る" logged "keep  $T/r2 (all_repos: prune 見送り: $T/g が Orca の一覧に在る"
+ar_gc list
+check "list でも plan-prune を書かない" kind_rows plan-prune 0
+
+ar_case all-repos-relative-gitdir # git worktree add --relative-paths (git 2.48 から) の登録は、フォルダが無いと実体のパスに直せない
+if git -C "$T/r2" worktree add -q --relative-paths -b rel "$T/rel" origin/main 2>/dev/null; then
+    mv "$T/rel" "$T/rel.moved"
+    touch -t "$OLD" "$T/r2/.git/worktrees/rel/index"
+    check "gitdir が相対パス (前提)" eval '! grep -q "^/" "$T/r2/.git/worktrees/rel/gitdir"'
+    ar_gc on
+    check "外れない" held2 rel
+    check "同じリポの基準の登録も外れない" held2 g
+    check "理由がログに出る" logged "keep  $T/r2 (all_repos: prune 見送り: worktrees/rel の gitdir が絶対パスでない)"
+else
+    echo "skip [$CASE] git が --relative-paths に対応していない"
+fi
+
+ar_case all-repos-min-age-not-int
+ar_gc on MIN_AGE_HOURS=abc
+check "外れない" held2 g
+check "理由がログに出る" logged "WARN: all_repos: MIN_AGE_HOURS が整数でない"
+
+ar_case all-repos-min-age-leading-zero # 024 を八進数 (20) に読むと、index が 22 時間前の登録が外れる
+touch -t "$(jq -nr --argjson s $(($(date +%s) - 22 * H)) '$s | strflocaltime("%Y%m%d%H%M.%S")')" "$T/r2/.git/worktrees/g/index"
+ar_gc on MIN_AGE_HOURS=024
+check "外れない" held2 g
+
+ar_case all-repos-orca-truncated # Orca の一覧が打ち切られた回は、返らなかった行を「一覧に無い」と読まない
+git -C "$T/r2" worktree add -q -b manual "$T/manual" origin/main
+jq '.result.truncated = true' "$T/list.json" >"$T/list.tmp" && mv "$T/list.tmp" "$T/list.json"
+ar_gc on
+check "外れない" held2 g
+check "LIST が出ない" lists 0
+check "理由がログに出る" logged "WARN: all_repos: orca worktree list を取れない、または打ち切られた"
+
+ar_case all-repos-orca-non-object # 一覧の途中に object でない要素が在ると、jq の .[].path はそこで止まり、後ろの行を「一覧に無い」と読む
+git -C "$T/r2" worktree add -q -b manual "$T/manual" origin/main
+orca_add "$T/g"
+jq '.result.worktrees |= [.[0], "broken", .[1:][]]' "$T/list.json" >"$T/list.tmp" && mv "$T/list.tmp" "$T/list.json"
+ar_gc on GC_REPOS="$T/r2" # 本体の候補の jq も止まるので、GC_REPOS で回らせる
+check "外れない" held2 g
+check "LIST が出ない" lists 0
+check "理由がログに出る" logged "WARN: all_repos: orca worktree list を取れない、または打ち切られた"
+
+ar_case all-repos-herdr # herdr の下の登録は herdr が workspace の状態を持つので、フォルダが無くても git の側だけ外さない (mark_stale と同じ)
+mkdir -p "$T/.herdr/worktrees"
+gone_wt "$T/r2" "$T/.herdr/worktrees/hw"
+ar_gc on HOME="$T"
+check "外れない" held2 hw
+check "同じリポの基準の登録も外れない" held2 g
+check "理由がログに出る" logged "keep  $T/r2 (all_repos: prune 見送り: $T/.herdr/worktrees/hw が herdr の下: herdr で消す)"
+
+ar_case all-repos-orca-other-host # 別のホストの本体の行は、同じパスのローカルのリポを回る根拠にしない
+git -C "$T/r2" worktree add -q -b manual "$T/manual" origin/main
+jq '.result.worktrees[0].hostId = "other"' "$T/list.json" >"$T/list.tmp" && mv "$T/list.tmp" "$T/list.json"
+ar_gc on
+check "外れない" held2 g
+check "LIST が出ない" lists 0
+
+ar_case all-repos-orca-listed-symlink # Orca の行は symlink を通るパス、git の登録は実体のパス
+ln -s "$T" "$T/ol"
+orca_add "$T/ol/g"
+ar_gc on
+check "外れない" held2 g
+check "理由がログに出る" logged "keep  $T/r2 (all_repos: prune 見送り: $T/g が Orca の一覧に在る"
+
+ar_case all-repos-parent-unreadable # 親のフォルダが読めず、在るか確かめられない登録 (git は「無い」と読んで外す)
+if [ "$(id -u)" != 0 ]; then # root は権限を無視する
+    mkdir "$T/np"
+    git -C "$T/r2" worktree add -q -b np "$T/np/w" origin/main
+    touch -t "$OLD" "$T/r2/.git/worktrees/w/index"
+    chmod 000 "$T/np"
+    check "git の prune が外す (前提)" eval 'LC_ALL=C git -C "$T/r2" worktree prune --dry-run -v 2>&1 | grep -qF "Removing worktrees/w: "'
+    ar_gc on
+    chmod 755 "$T/np"
+    check "外れない" held2 w
+    check "同じリポの基準の登録も外れない" held2 g
+    check "理由がログに出る" logged "keep  $T/r2 (all_repos: prune 見送り: $T/np/w が無いと確かめられない"
+fi
+
+ar_case all-repos-keep-list-main # 本体だけを「触らない」リストに書き、worktree は本体の外。prune が消すのは本体の .git の中の管理ディレクトリ
+echo "$T/r2" >"$KEEPLIST"
+ar_gc on
+check "外れない" held2 g
+check "理由がログに出る" logged "keep  $T/r2 (all_repos: prune 見送り: $T/r2/.git/worktrees/g (管理ディレクトリ) が「触らない」リスト)"
+
+ar_case all-repos-gitdir-shape # gitdir が <在るフォルダ>/.git.old を指す (壊れた登録。git は「無い」と読んで外す)
+git -C "$T/r2" worktree add -q -b old "$T/old" origin/main
+echo "$T/old/.git.old" >"$T/r2/.git/worktrees/old/gitdir"
+touch -t "$OLD" "$T/r2/.git/worktrees/old/index"
+ar_gc on
+check "外れない" held2 old
+check "同じリポの基準の登録も外れない" held2 g
+check "理由がログに出る" logged "keep  $T/r2 (all_repos: prune 見送り: worktrees/old の gitdir の形が違う"
+
+ar_case all-repos-min-age-huge # 期限が 1970 年より前になる MIN_AGE_HOURS。git は負の時刻を今に近く読む
+ar_gc on MIN_AGE_HOURS=1000000
+check "外れない" held2 g
+check "理由がログに出る" logged "WARN: all_repos: MIN_AGE_HOURS が整数でない"
+
+ar_case all-repos-branch-tag-same-name # ブランチ g と同じ名前のタグ。戻し方で detached にならない
+git -C "$T/r2" tag g origin/main
+ar_gc on
+check "外れる (前提)" eval '! held2 g'
+(eval "$(row "$T/g" | cut -f5)") >/dev/null 2>&1
+check "台帳の戻し方で、元のブランチに付いて戻る" test "$(git -C "$T/g" symbolic-ref HEAD 2>/dev/null)" = refs/heads/g
+
+ar_case all-repos-submodule-gitdir # 管理ディレクトリにサブモジュールの Git ディレクトリが在る (prune_safe が見送る)
+mkdir -p "$T/r2/.git/worktrees/g/modules/x"
+ar_gc on
+check "外れない" held2 g
+check "理由がログに出る" logged "keep  $T/r2 (prune 見送り: $T/g の管理ディレクトリに modules が在る"
+
+ar_case all-repos-op-in-progress # 管理ディレクトリに操作の途中の印 (rebase の autostash は rebase-merge/autostash)
+mkdir -p "$T/r2/.git/worktrees/g/rebase-merge"
+echo x >"$T/r2/.git/worktrees/g/rebase-merge/autostash"
+ar_gc on
+check "外れない" held2 g
+check "理由がログに出る" logged "keep  $T/r2 (prune 見送り: $T/g の管理ディレクトリに rebase-merge が在る"
+
+ar_case all-repos-path-newline # 登録のパスに改行 (Orca の一覧の照合が効かない)
+nlp="$T/n"$'\n'"l"
+if git -C "$T/r2" worktree add -q -b nl "$nlp" origin/main 2>/dev/null; then
+    nln=$(ls -A "$T/r2/.git/worktrees" | grep -vx g | head -1)
+    mv "$nlp" "$T/nl.moved"
+    touch -t "$OLD" "$T/r2/.git/worktrees/$nln/index"
+    ar_gc on
+    check "外れない" test -d "$T/r2/.git/worktrees/$nln"
+    check "同じリポの基準の登録も外れない" held2 g
+    check "理由がログに出る" logged "keep  $T/r2 (all_repos: prune 見送り: worktrees/$nln のパスに改行が在る)"
+else
+    echo "skip [$CASE] 改行を含むパスに worktree を作れない"
+fi
+
+setup all-repos-main-newline # 本体のパスに改行。git worktree list の 1 行目が切れ、別のリポ ($T/m) を指す
+new_repo "$T/m"
+gone_wt "$T/m" "$T/mg"
+if new_repo "$T/m"$'\n'"x" 2>/dev/null && git -C "$T/m"$'\n'"x" worktree add -q -b lw "$T/lw" origin/main 2>/dev/null; then
+    orca_mains
+    ar_gc on GC_REPOS="$T/lw"
+    check "切れたパスのリポは回らない" test -d "$T/m/.git/worktrees/mg"
+    check "WARN が出る" logged "WARN: all_repos: $T/lw の本体"
+else
+    echo "skip [$CASE] 改行を含むパスにリポを作れない"
+fi
+
+ar_case all-repos-keep-list-case # 大文字小文字だけ違う行が、消えた登録を守る
+echo "$T/G" >"$KEEPLIST"
+ar_gc on
+check "外れない" held2 g
+check "理由がログに出る" logged "keep  $T/r2 (all_repos: prune 見送り: $T/g が「触らない」リスト)"
+
+ar_case all-repos-orca-path-newline # 改行を含む Orca のパスを割って、前半の別のリポを回らない
+new_repo "$T/r3"
+gone_wt "$T/r3" "$T/g3"
+jq --arg p "$T/r3"$'\n'"zz" '.result.worktrees += [{path: $p, hostId: "local", isMainWorktree: true}]' "$T/list.json" >"$T/list.tmp" && mv "$T/list.tmp" "$T/list.json"
+ar_gc on
+check "前半のリポは回らない" test -d "$T/r3/.git/worktrees/g3"
+check "基準のリポは回る (前提)" eval '! held2 g'
+
+ar_case all-repos-orphan-branch # --orphan のブランチはコミットに解決できず、台帳の git worktree add が通らない
+git -C "$T/r2" worktree add -q --orphan -b orph "$T/orph"
+mv "$T/orph" "$T/orph.moved"
+check "index が在る (前提: index の無い登録の見送りで残るのではない)" test -e "$T/r2/.git/worktrees/orph/index"
+touch -t "$OLD" "$T/r2/.git/worktrees/orph/index"
+ar_gc on
+check "外れない" held2 orph
+check "同じリポの基準の登録も外れない" held2 g
+check "理由がログに出る" logged "keep  $T/r2 (all_repos: prune 見送り: worktrees/orph のブランチ orph にコミットが無い"
+
+ar_case all-repos-prune-fails # 本番の prune が外した後に失敗を返しても、外れた分は台帳に書く
+mkdir -p "$T/bin"
+printf '#!/usr/bin/env bash\ncase " $* " in *" worktree prune --expire "*) %q "$@"; exit 1 ;; esac\nexec %q "$@"\n' "$(command -v git)" "$(command -v git)" >"$T/bin/git"
+chmod +x "$T/bin/git"
+ar_gc on PATH="$T/bin:$base/bin:$PATH"
+check "外れた (前提)" eval '! held2 g'
+check "台帳に worktree-prune" col_has "$T/g" 2 worktree-prune
+check "WARN が出る" logged "WARN: all_repos: prune 失敗 $T/r2"
+
+# 確認 (dry-run) の後、prune の前にフォルダが消えた、index の古い登録は、確認なしで外れる。防げないので、WARN と通知で知らせる。
+# 本番の prune (--dry-run の付かない呼び出し) の直前にだけ、そのフォルダを退ける偽の git を前に差し込む。
+ar_case all-repos-unchecked-pruned
+git -C "$T/r2" worktree add -q -b late "$T/late" origin/main
+touch -t "$OLD" "$T/r2/.git/worktrees/late/index"
+mkdir -p "$T/bin"
+printf '#!/usr/bin/env bash\ncase " $* " in *" worktree prune --expire "*) [ ! -d %q ] || mv %q %q ;; esac\nexec %q "$@"\n' \
+    "$T/late" "$T/late" "$T/late.moved" "$(command -v git)" >"$T/bin/git"
+chmod +x "$T/bin/git"
+ar_gc on PATH="$T/bin:$base/bin:$PATH"
+check "確かめた登録は外れて台帳に載る" eval '! held2 g && col_has "$T/g" 2 worktree-prune'
+check "確かめていない登録も外れた (前提)" eval '! held2 late'
+check "台帳には載らない" rows 1
+check "WARN が出る" logged "WARN: all_repos: 確かめていない登録が prune で外れた: $T/r2 の worktrees/late"
+check "通知が出る" grep -qF "確かめていない登録" "$T/notify-calls"
 
 for f in "$base"/*/log; do grep -q '^exit=0$' "$f" || { echo "FAIL [$(basename "$(dirname "$f")")] exit が 0 でない"; fail=1; }; done
 [ "$fail" = 0 ] && echo "ok: worktree-gc"

@@ -9,10 +9,11 @@ paths:
 
 「◯◯を消してほしくなかった」「何が消えた？」と言われたら、次の順に進める。
 
-- 台帳 `~/Library/Application Support/cleanup-ledger/ledger.tsv`（列は 時刻 / 種類 / 対象 / 規則 / 戻し方 / 戻らないもの）を直接読み、ジョブと規則を特定する。種類 `worktree`・`compose-down`・`worktree-remove-failed`・`compose-stop` は worktree-gc、`session` は agent-gc。
+- 台帳 `~/Library/Application Support/cleanup-ledger/ledger.tsv`（列は 時刻 / 種類 / 対象 / 規則 / 戻し方 / 戻らないもの）を直接読み、ジョブと規則を特定する。種類 `worktree`・`compose-down`・`worktree-remove-failed`・`compose-stop`・`worktree-prune` は worktree-gc、`session` は agent-gc。
 - 種類が `plan-` で始まる行は、規則が `list`（一覧だけ）のときの予定で、まだ何も止めても消してもいない。消してほしくなければ「触らない」リストに足す。
 - 戻し方の列を示し、流す前に何が起きるかを伝える。先頭の `: …;` は注記。
   - `worktree`: `git worktree add …`。`worktree-remove-failed` は残ったフォルダを退けてから。`: HEAD を取れなかった…` は戻せない。
+  - `worktree-prune`: フォルダの無い登録を外したもの。`git worktree add …` で登録とブランチの checkout が戻る（フォルダの中身は外す前から無い）。
   - `compose-stop`: `docker start <ID…>`。
   - `session`: `claude <引数> --resume <ID>`。`: 一覧から選ぶ;` は再開の一覧から。規則に「終了は未確認」とあれば、まだ動いていないか先に確かめる。
   - `claude --resume`・`codex resume` が入る行（`worktree` の行にも付く）は、その部分を自分では実行せず、ユーザーに端末で打ってもらう。`git worktree add` までは自分で流してよい。
