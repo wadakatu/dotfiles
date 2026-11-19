@@ -262,7 +262,8 @@ sched() {
 # 行を消したのに環境に残った on で動かないように)、ファイルが無ければ環境変数を読む。worktree-gc と同じ set -euo pipefail で読み、
 # 途中で失敗する設定 (構文エラー・失敗する行・未設定の変数・最後が偽で終わる行) は off にする (bash の source は失敗した行の
 # 後も、その前の行を読み込んだまま続く。worktree-gc が止まる設定で、こちらだけ on で動かないように)。共有ファイルを読めない回も off。
-# パスに何か在れば (リンク先の無い symlink・ディレクトリも) ファイルとして読み、読めなければ off (環境変数に戻らない)。
+# パスに何か在れば、環境変数に戻らない。通常ファイル (リンク先も含む) だけを読み、読めなければ off。リンク先の無い symlink・
+# ディレクトリ・FIFO などは読まずに off (FIFO を source すると書き手を待ち続け、巡回が止まる)。
 # 「触らない」リストの場所 (CLEANUP_KEEP) も持ち帰る。worktree-gc は設定ファイルを読んでから共有ファイルを読むので、
 # 子でも同じ順で両方を source し (共有ファイルは代入と関数の定義だけ)、worktree-gc が使うパスを決めさせる (既定の場所を
 # ここに書き写さない)。こちらが別のリストを読んでいるなら、守るものが食い違うので off にする (リストは合わせにいかない。
@@ -271,7 +272,7 @@ autostop_mode() {
     local cfg=${WORKTREE_GC_CONFIG:-$HOME/.config/worktree-gc.env} RULE_session_autostop=${RULE_session_autostop-} out keep
     [ "$ledger_ok" = 1 ] || { echo off; return 0; }
     if [ -e "$cfg" ] || [ -L "$cfg" ]; then
-        if ! out=$("$BASH" -euo pipefail -c 'unset RULE_session_autostop; . "$1" >/dev/null 2>&1; . "$2"
+        if [ ! -f "$cfg" ] || ! out=$("$BASH" -euo pipefail -c 'unset RULE_session_autostop; . "$1" >/dev/null 2>&1; . "$2"
             printf "%s\t%s" "${RULE_session_autostop-}" "$CLEANUP_KEEP"' _ "$cfg" "$(dirname "$self")/cleanup-ledger.sh" 2>/dev/null); then
             log "WARN: $cfg を読めない。session_autostop は off として扱う"
             echo off

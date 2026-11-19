@@ -920,6 +920,20 @@ config_unreadable() { # config_unreadable <説明> <設定のパスを作るコ�
 config_unreadable "リンク先の無い symlink" 'ln -s "$base/cfg/gone.env" "$base/cfg/worktree-gc.env"'
 config_unreadable "ディレクトリ" 'mkdir "$base/cfg/worktree-gc.env"'
 
+# FIFO を source すると書き手を待ち続けて巡回が止まるので、通常ファイルでないものは読まずに off にする。
+reset "auto-config-unreadable: 設定のパスが FIFO なら、読まずにすぐ off"
+proc 101 claude /w/a "" SID-1
+mkdir -p "$base/cfg"
+mkfifo "$base/cfg/worktree-gc.env"
+WORKTREE_GC_CONFIG="$base/cfg/worktree-gc.env" RULE_session_autostop=on perl -e 'alarm shift; exec @ARGV' 20 bash "$script" scan --auto >/dev/null 2>&1
+rc=$?
+# 上限に掛かったときは、待ち続けている子を書き手として開いて解く (残すと次のケースに漏れる)。
+[ "$rc" != 142 ] || perl -e 'alarm 2; open my $f, ">", shift' "$base/cfg/worktree-gc.env" 2>/dev/null
+check "すぐ返る (上限に掛からない)" [ "$rc" != 142 ]
+check "/exit を送らない" sent_none
+check "ログに WARN" grep -qF '読めない。session_autostop は off' "$LOG"
+rm -rf "$base/cfg"
+
 reset "auto-config-and-list: 途中の [ … ] && X=1 は失敗にならない (worktree-gc の set -e と同じ)"
 proc 101 claude /w/a "" SID-1
 mkdir -p "$base/cfg"
