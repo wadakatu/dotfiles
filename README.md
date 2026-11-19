@@ -421,6 +421,8 @@ GC_REPOS="$HOME/src/some-repo"     # 規則 all_repos が Orca の一覧の本�
 git が解決する `worktrees/<名前>/HEAD` がブランチでなく（detached）、その SHA がどのブランチ・リモート追跡ブランチ・タグからも辿れない（`git for-each-ref --contains`。
 失敗も辿れないとみなす）ものが 1 つでも在れば、そのリポは prune せず、`keep  <本体> (prune 見送り: <パス> の detached HEAD <SHA> がどの ref にも無い)`
 （`gitdir` が読めなければ `<パス>` は `worktrees/<名前>`）をログに出し、通知を 1 日 1 回出す（`DRY_RUN=1` では出さない）。
+管理ディレクトリにサブモジュールの Git ディレクトリ（`worktrees/<名前>/modules/`。linked worktree で `submodule update` するとできる）を持つ登録も、
+ブランチの登録でも同じく見送る（そこにだけ在るコミットは、管理ディレクトリごと消え、`git worktree add` では戻らない）。
 一覧・dry-run が失敗した回と、読めない行や HEAD が在った回も見送る。人が決めるまで見送り続けるので、残すなら `git branch <名前> <SHA>`、
 要らなければ手で `git worktree prune` する。
 git 2.54 では fetch や merge の後の自動メンテナンスが `git worktree prune --expire 3.months.ago` を流し、この確認より先に登録を外すので、
@@ -451,7 +453,7 @@ workspace 状態を持っており `git worktree remove` を直接叩くと食�
 
 止めない・消さないものは、手元の「触らない」リスト `~/.config/cleanup-keep`（追跡しない。場所は `CLEANUP_KEEP` で変えられる）に 1 行 1 つで書く。
 `/` で始まる行と `~`・`~/…` の行はパスの接頭辞（区切りで比べるので `/a/pr-12` は `/a/pr-123` に当たらない。symlink を辿った実体パスでも（まだ無いパスは、実在する最も近い祖先を実体パスに直して）、
-大文字小文字を区別しないファイルシステムでは実際の綴りでも比べる）、それ以外は compose project の名前の完全一致。
+大文字小文字を区別しないファイルシステムでは実際の綴りでも比べる。無い対象は、行も対象も ASCII の小文字に揃えて比べる）、それ以外は compose project の名前の完全一致。
 名前の行が当たるのは compose project の名前だけで、worktree のディレクトリ名やブランチ名には当たらない（worktree を守るならパスで書く）。
 正規表現・glob は使わず、`#` で始まる行と空行は読み飛ばす。コメントは行頭の `#` だけで、行の途中の `#` や `$HOME`・引用符は使えない。
 読めない行（`/`・`\` を含むか `~` で始まる名前の行、`$`・`"`・`'` で始まる行、空白 + `#` を含む行、行の途中の CR、2 行目以降の BOM。1 行目の BOM は落とす）が 1 つでもあると
@@ -519,7 +521,7 @@ IGNORED_OK="node_modules"             # 一緒に消えてよい無視される�
 規則 `all_repos`（`RULE_all_repos`）は、上の節が見ない worktree を一覧に出し、フォルダの無い登録を外す。回るのは Orca の一覧の本体（`orca worktree list` の `isMainWorktree` で、`hostId` が `local` の行だけ。
 `orca` コマンドが無ければこの分は無い）と `GC_REPOS` のリポ。同じリポ（`git rev-parse --path-format=absolute --git-common-dir` が同じ。symlink・末尾の `/`・linked worktree のパスで書いても同じ）は 1 回だけ回り、
 `$REPO` と同じリポは回らない。読めないパスと、作業ツリーの中のフォルダ（`git rev-parse --show-cdup` が空でない。`.git` の中のフォルダはそのリポとして回る）は `WARN: all_repos: <パス> …` を出して飛ばす。`GC_REPOS` は空白で割り、`*` も `~` も展開しない（空白を含むパスは書けない。`$HOME/…` で書く）。
-Orca に届かない回と、`orca worktree list` が取れない・打ち切られた（`ok` でない、`truncated`）回は節ごと見送る。「Orca の一覧に在る」は、行のパスとその実体パスの両方で比べる。どちらも空なら `all_repos: 回るリポが無い` を出す。`off` では回らない。`REPO` が無い回も動かない。リポを自動では探さない。
+Orca に届かない回と、`orca worktree list` が取れない・打ち切られた（`ok` でない、`truncated`）回は節ごと見送る。「Orca の一覧に在る」は、行のパスとその実体パスの両方で、大文字小文字を区別せずに比べる。パスが文字列でない・改行を含む行は使わない。どちらも空なら `all_repos: 回るリポが無い` を出す。`off` では回らない。`REPO` が無い回も動かない。リポを自動では探さない。
 
 - 一覧（`list` と `on`）: 本体・Orca の一覧に在るもの・規則 `scratch_worktrees` が見たもの・フォルダの無い登録を除いた linked worktree（`.claude/worktrees/` の下も）を
   `LIST  <パス> (どの判定にも掛からない: 自動では消さない)` の行で出す。何も消さない。
@@ -527,7 +529,8 @@ Orca に届かない回と、`orca worktree list` が取れない・打ち切ら
   期限はリポごとに 1 回だけ絶対時刻で決め、dry-run と prune に同じ値を渡す（`N.hours.ago` は git を呼ぶたびに計算し直される）。
   `--expire` が比べるのは `worktrees/<名前>/index` の mtime で、フォルダが消えてからの時間ではない。lock された登録は git が外さない（https://git-scm.com/docs/git-worktree ）。
   次のどれかが 1 つでも在るリポは、`list` でも `on` でも外さず、`keep  <本体> (… prune 見送り: …)` を出す（prune は登録を選べない）。
-  - `$REPO` の prune と同じ確認（detached の HEAD がどの ref にも無い、など）に当たる。外す候補の detached も、同じ `for-each-ref --contains` で確かめ直す。
+  - `$REPO` の prune と同じ確認（detached の HEAD がどの ref にも無い、管理ディレクトリにサブモジュールの Git ディレクトリ `modules/` が在る、など）に当たる。外す候補の detached も、同じ `for-each-ref --contains` で確かめ直す。
+  - ブランチがコミットに解決できない（`git worktree add --orphan`。台帳の `git worktree add` が通らない）。
   - 理由が `gitdir file points to non-existent location` でない（`gitdir` が無い・空の登録や重複は `--expire` に関係なく外れ、パスが読めない）。
   - `index` が無い（`git worktree add --no-checkout` など。git は古さを確かめずに外す）。
   - `gitdir` が `/.git` で終わらない（壊れた登録）か、相対パス（`git worktree add --relative-paths`。フォルダが無いと実体のパスに直せない）。

@@ -981,6 +981,7 @@ prune_line() {
 # gitdir が無い・空の登録と、同じパスの重複を出さない。detached の HEAD がどのブランチ・リモート追跡ブランチ・タグからも
 # 辿れない登録が 1 つでも在れば、そのコミットへの最後の参照を消しうるので、リポごと見送って 1 を返す (残すなら
 # git branch <名前> <SHA>、要らなければ手で prune)。人が決めるまで毎時見送り続けるので、黙って止まらないよう 1 日 1 回知らせる。
+# 管理ディレクトリにサブモジュールの Git ディレクトリ (modules) を持つ登録も同じく見送る (ブランチの登録でも)。
 # 一覧・dry-run が失敗した回、読めない行や HEAD が在った回も、何が外れるか分からないので見送る。
 prune_safe() { # prune_safe <本体>
     local main="$1" dry common line name head wt out hit=0
@@ -999,6 +1000,14 @@ prune_safe() { # prune_safe <本体>
         head=""
         if prune_line "$line"; then
             name=$pl_name
+            # linked worktree で submodule update すると、サブモジュールの Git ディレクトリは worktrees/<名前>/modules/ にでき、
+            # そこにだけ在るコミットは prune で管理ディレクトリごと消える (git worktree add では戻らない)。ブランチの登録でも見送る。
+            if [ -e "$common/worktrees/$name/modules" ]; then
+                wt=$(sed 's#/\.git$##' "$common/worktrees/$name/gitdir" 2>/dev/null) || wt=""
+                log "keep  $main (prune 見送り: ${wt:-worktrees/$name} にサブモジュールの Git ディレクトリ (modules) が在る)"
+                hit=1
+                continue
+            fi
             # HEAD のファイルは reftable では置き石 (ref: refs/heads/.invalid) なので、git に解決させる。ブランチは対象外。
             if git -C "$main" symbolic-ref -q "worktrees/$name/HEAD" >/dev/null 2>&1; then continue; fi
             head=$(git -C "$main" rev-parse --verify -q "worktrees/$name/HEAD" 2>/dev/null) || head=""
@@ -1017,7 +1026,7 @@ prune_safe() { # prune_safe <本体>
     done <<<"$dry"
     [ "$hit" = 1 ] || return 0
     notify_daily "$STATE_ROOT/worktree-gc/prune-skipped-warned" \
-        "$main の git worktree prune を見送っています。detached の HEAD にだけ在るコミットか、読めない登録がある (ログに)"
+        "$main の git worktree prune を見送っています。detached の HEAD にだけ在るコミットか、サブモジュールの Git ディレクトリか、読めない登録がある (ログに)"
     return 1
 }
 if prune_safe "$REPO"; then run git -C "$REPO" worktree prune; fi
@@ -1079,8 +1088,15 @@ all_repos_prune() { # all_repos_prune <本体> <共通の .git>
             why="$wt が Orca の一覧に在る: Orca で消す"
         elif ref=$(git -C "$main" symbolic-ref -q "worktrees/$pl_name/HEAD" 2>/dev/null); then
             # --short は同名のタグが在ると heads/<名前> を返し、戻し方が detached で戻るので、完全な ref から作る。
+            # コミットの無いブランチ (git worktree add --orphan) は、台帳の git worktree add <パス> <ブランチ> が通らない。
             case "$ref" in
-                refs/heads/?*) how="cd $(printf %q "$main") && git worktree add $(printf %q "$wt") $(printf %q "${ref#refs/heads/}")" ;;
+                refs/heads/?*)
+                    if git -C "$main" rev-parse --verify -q "$ref^{commit}" >/dev/null 2>&1; then
+                        how="cd $(printf %q "$main") && git worktree add $(printf %q "$wt") $(printf %q "${ref#refs/heads/}")"
+                    else
+                        why="worktrees/$pl_name のブランチ ${ref#refs/heads/} にコミットが無い"
+                    fi
+                    ;;
                 *) why="worktrees/$pl_name の HEAD を読めない ($ref)" ;;
             esac
         elif ref=$(git -C "$main" rev-parse --verify -q "worktrees/$pl_name/HEAD" 2>/dev/null); then
@@ -1106,10 +1122,8 @@ all_repos_prune() { # all_repos_prune <本体> <共通の .git>
     [ ${#ar_names[@]} -gt 0 ] || return 0
     if [ "$all_mode" = on ]; then
         before=$(ls -A "$common/worktrees" 2>/dev/null || true)
-        if ! run git -C "$main" worktree prune --expire "$exp"; then
-            log "WARN: all_repos: prune 失敗 $main"
-            return 0
-        fi
+        # 失敗しても途中まで外れているかもしれないので、戻らずに、外れた分の台帳と検知へ進む。
+        run git -C "$main" worktree prune --expire "$exp" || log "WARN: all_repos: prune 失敗 $main"
     fi
     i=0
     while [ "$i" -lt ${#ar_names[@]} ]; do
@@ -1139,7 +1153,8 @@ all_repos_prune() { # all_repos_prune <本体> <共通の .git>
 in_orca() {
     local r
     r=$(real_path /bin/pwd "$1")
-    grep -qxF -e "$1" -e "${r:-$1}" <<<"$orca_paths"
+    # 大文字小文字は区別しない (区別しないファイルシステムで、Orca の行と git の登録の綴りが違いうる。残す側に広げるだけ)。
+    grep -qxiF -e "$1" -e "${r:-$1}" <<<"$orca_paths"
 }
 
 all_mode=$(rule_mode all_repos)
@@ -1160,12 +1175,14 @@ elif ! is_uint "$MIN_AGE_HOURS" || [ ${#MIN_AGE_HOURS} -gt 9 ] || [ $(($(date +%
 else
     # 回るリポの候補 (改行区切り): Orca の一覧の本体と GC_REPOS。orca コマンドが無ければ GC_REPOS だけ。
     # 本体はこのマシンの行 (hostId が local) だけ。別のホストの行のパスを git -C に渡すと、同じパスの無関係なリポを回る。
-    cands=$(jq -r '.[] | select(.isMainWorktree == true and .hostId == "local") | .path' <<<"${orca_list:-[]}") || cands=""
+    # 改行区切りで読むので、文字列でない・改行を含むパスの行は使わない (割れると、前半が別のリポの根として回りうる)。
+    cands=$(jq -r '.[] | select(.isMainWorktree == true and .hostId == "local") | .path
+        | select(type == "string" and (contains("\n") | not))' <<<"${orca_list:-[]}") || cands=""
     # Orca の一覧の全部の行のパスと、その実体の形 (改行区切り)。LIST から除く所と prune の見送りで使う (in_orca)。
     while IFS= read -r p; do
         case "$p" in /*) ;; *) continue ;; esac
         orca_paths+="$p"$'\n'"$(real_path /bin/pwd "$p")"$'\n'
-    done < <(jq -r '.[].path // empty' <<<"${orca_list:-[]}")
+    done < <(jq -r '.[].path | select(type == "string" and (contains("\n") | not))' <<<"${orca_list:-[]}")
     # 値の * などを展開させない (~ はもともと展開されない)。後ろの処理は glob を使うので、割ったらすぐ戻す。
     set -f
     # shellcheck disable=SC2086

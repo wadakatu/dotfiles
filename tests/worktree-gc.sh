@@ -1225,6 +1225,14 @@ check "symlink の祖先を通る無い対象も、実体パスで書いた無�
 check "無いパス同士で、別の名前には当たらない" eval '! mg "$T/real/gone-c"'
 # 絶対パスでない入力 (Orca の一覧の行など) で止まらない。上限つきで呼び、そのまま返ることを見る。
 check "相対パスはそのまま返す (止まらない)" test "$(perl -e 'alarm shift; exec @ARGV' 10 bash -c '. "$0"; real_path /bin/pwd zz-no-such-rel' "$lib")" = zz-no-such-rel
+# 無い対象は、大文字小文字を区別しないファイルシステムで綴りの違う行にも当てる (在る間は実体の綴りで当たるので、消えた後も守る)。
+printf '%s\n' "$T/real/Gone-D" "$T/real/X" >"$T/case-gone-keep"
+mc() { HOME="$T/home" CLEANUP_KEEP="$T/case-gone-keep" bash -c "$pre"'keep_load >/dev/null; keep_match "$@"' "$lib" "$@"; }
+check "無い対象は、大文字小文字だけ違う無いパスの行に当たる" mc "$T/real/gone-d/x"
+check "無い対象でも、別の名前には当たらない" eval '! mc "$T/real/gone-e"'
+if [ ! -d "$T/caseprobe" ]; then # 区別するファイルシステムでだけ: 在る対象の比べ方は変えない
+    check "在る対象は、大文字小文字の違う行に当たらない" eval '! mc "$T/real/x"'
+fi
 check "名前は前後の空白を除いて完全一致" m name-a
 check "名前は接頭辞では当たらない" nm name-ab
 check "末尾に改行の無い最後の行も読む" m last-name
@@ -1454,6 +1462,17 @@ touch -t 202001010000 "$T/repo/.git/worktrees/det/index"
 run_gc
 check "登録が残る" registered "$T/det"
 check "見送りと SHA がログに出る" logged "keep  $T/repo (prune 見送り: $T/det の detached HEAD $u がどの ref にも無い)"
+
+# linked worktree の中で submodule update すると、サブモジュールの Git ディレクトリは worktrees/<名前>/modules/ にでき、
+# そこにだけ在るコミットは prune で管理ディレクトリごと消える (git worktree add では戻らない)。ブランチの登録でも見送る。
+setup repo-prune-submodule-gitdir
+git -C "$T/repo" worktree add -q -b feat-m "$T/mw" origin/main
+mv "$T/mw" "$T/mw.moved"
+mkdir -p "$T/repo/.git/worktrees/mw/modules/x"
+run_gc
+check "登録が残る" held mw
+check "理由がログに出る" logged "keep  $T/repo (prune 見送り: $T/mw にサブモジュールの Git ディレクトリ (modules) が在る)"
+check "通知が 1 本" notified_once "prune"
 
 # ---- $REPO の prune: dry-run が失敗した回・読めない行が在った回は、何が外れるか分からないので prune しない ----
 fake_dry_run() { # fake_dry_run <fail|odd>: git worktree prune --dry-run だけを失敗させる / 読めない行を足す偽の git を前に差し込む
@@ -2364,6 +2383,45 @@ ar_gc on
 check "外れる (前提)" eval '! held2 g'
 (eval "$(row "$T/g" | cut -f5)") >/dev/null 2>&1
 check "台帳の戻し方で、元のブランチに付いて戻る" test "$(git -C "$T/g" symbolic-ref HEAD 2>/dev/null)" = refs/heads/g
+
+ar_case all-repos-submodule-gitdir # 管理ディレクトリにサブモジュールの Git ディレクトリが在る (prune_safe が見送る)
+mkdir -p "$T/r2/.git/worktrees/g/modules/x"
+ar_gc on
+check "外れない" held2 g
+check "理由がログに出る" logged "keep  $T/r2 (prune 見送り: $T/g にサブモジュールの Git ディレクトリ (modules) が在る)"
+
+ar_case all-repos-keep-list-case # 大文字小文字だけ違う行が、消えた登録を守る
+echo "$T/G" >"$KEEPLIST"
+ar_gc on
+check "外れない" held2 g
+check "理由がログに出る" logged "keep  $T/r2 (all_repos: prune 見送り: $T/g が「触らない」リスト)"
+
+ar_case all-repos-orca-path-newline # 改行を含む Orca のパスを割って、前半の別のリポを回らない
+new_repo "$T/r3"
+gone_wt "$T/r3" "$T/g3"
+jq --arg p "$T/r3"$'\n'"zz" '.result.worktrees += [{path: $p, hostId: "local", isMainWorktree: true}]' "$T/list.json" >"$T/list.tmp" && mv "$T/list.tmp" "$T/list.json"
+ar_gc on
+check "前半のリポは回らない" test -d "$T/r3/.git/worktrees/g3"
+check "基準のリポは回る (前提)" eval '! held2 g'
+
+ar_case all-repos-orphan-branch # --orphan のブランチはコミットに解決できず、台帳の git worktree add が通らない
+git -C "$T/r2" worktree add -q --orphan -b orph "$T/orph"
+mv "$T/orph" "$T/orph.moved"
+check "index が在る (前提: index の無い登録の見送りで残るのではない)" test -e "$T/r2/.git/worktrees/orph/index"
+touch -t "$OLD" "$T/r2/.git/worktrees/orph/index"
+ar_gc on
+check "外れない" held2 orph
+check "同じリポの基準の登録も外れない" held2 g
+check "理由がログに出る" logged "keep  $T/r2 (all_repos: prune 見送り: worktrees/orph のブランチ orph にコミットが無い"
+
+ar_case all-repos-prune-fails # 本番の prune が外した後に失敗を返しても、外れた分は台帳に書く
+mkdir -p "$T/bin"
+printf '#!/usr/bin/env bash\ncase " $* " in *" worktree prune --expire "*) %q "$@"; exit 1 ;; esac\nexec %q "$@"\n' "$(command -v git)" "$(command -v git)" >"$T/bin/git"
+chmod +x "$T/bin/git"
+ar_gc on PATH="$T/bin:$base/bin:$PATH"
+check "外れた (前提)" eval '! held2 g'
+check "台帳に worktree-prune" col_has "$T/g" 2 worktree-prune
+check "WARN が出る" logged "WARN: all_repos: prune 失敗 $T/r2"
 
 # 確認 (dry-run) の後、prune の前にフォルダが消えた、index の古い登録は、確認なしで外れる。防げないので、WARN と通知で知らせる。
 # 本番の prune (--dry-run の付かない呼び出し) の直前にだけ、そのフォルダを退ける偽の git を前に差し込む。

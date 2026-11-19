@@ -150,7 +150,7 @@ keep_load() {
 # keep_ancestors=1 なら、行が対象の中を指すとき (/a/wt/data の行と /a/wt) も当てる。対象を消すと、守りたい中身も一緒に消えるため。
 # 呼び側は `if keep_match …` で受ける (当たらないときの 1 で set -e が落ちないように)。
 keep_match() {
-    local t r e l x
+    local t r e l x u ents
     # keep_load を通っていなければ、何を守るか分からないので守る側に倒す。
     [ "$keep_loaded" = 1 ] || return 0
     for t in "$@"; do
@@ -159,13 +159,22 @@ keep_match() {
                 # まだ無い対象も、実在する祖先を実体パスに直した形で比べる (/ は空になるので、そのときは文字どおり)。
                 r=$(real_path /bin/pwd "$t")
                 [ -n "$r" ] || r=$t
+                u=$t ents=$keep_entries
+                # 無い対象は、対象の 2 つの形と行を ASCII の小文字に揃えて比べる。大文字小文字を区別しないファイルシステムでは、
+                # 在る間は実体の綴りで当たった行が、消えた後に綴りの違いで当たらなくなるため (残す側に広げるだけ)。
+                # shopt -s nocasematch は、return の経路で戻し忘れると後ろの [[ ]] と case に効くので使わない。
+                if [ ! -e "$t" ]; then
+                    u=$(printf '%s' "$t" | LC_ALL=C tr 'A-Z' 'a-z')
+                    r=$(printf '%s' "$r" | LC_ALL=C tr 'A-Z' 'a-z')
+                    ents=$(printf '%s' "$keep_entries" | LC_ALL=C tr 'A-Z' 'a-z')
+                fi
                 while IFS= read -r e; do
                     case "$e" in p:*) l=${e#p:} ;; *) continue ;; esac
-                    for x in "$t" "$r"; do
+                    for x in "$u" "$r"; do
                         if [[ "$x" == "$l" || "$x" == "$l"/* ]]; then return 0; fi
                         if [ "$keep_ancestors" = 1 ] && [[ "$l" == "$x"/* ]]; then return 0; fi
                     done
-                done <<<"$keep_entries"
+                done <<<"$ents"
                 ;;
             ?*) if grep -qxF -- "n:$t" <<<"$keep_entries"; then return 0; fi ;;
         esac
