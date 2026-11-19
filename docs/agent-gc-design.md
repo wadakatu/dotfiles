@@ -127,7 +127,7 @@ stdin から 1 セッション 1 行の JSON を受け取り、`reason` を足�
 |---|---|---|
 | 1 | 材料が読めない | `unreadable` |
 | 2 | `status != "idle"` | `status=<値>` |
-| 3 | `idle_sec < 閾値`。閾値は、`pressure >= 2` なら `IDLE_WARN_H`（6h）、そうでなければ `IDLE_H`（24h） | `idle <n>h` |
+| 3 | `idle_sec < 閾値`。閾値は、`pressure >= 2` なら `IDLE_WARN_H`（12h）、そうでなければ `IDLE_H`（24h） | `idle <n>h` |
 | 4 | Orca の応答が無い、または不完全 | `orca-unreachable` |
 | 5 | このペインのエージェントが Orca に無い | `not-in-orca` |
 | 6 | このペインのエージェントの `state != "done"` | `orca <state>` |

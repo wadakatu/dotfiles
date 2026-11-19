@@ -591,7 +591,7 @@ ready にするのは人。キューへの供給は `/issue-queue plan` と `/is
 
 `home/agent-gc.nix` の LaunchAgent が 10 分ごとに `home/scripts/agent-gc.sh scan --auto` を回す。巡回は worktree-gc と同じく
 origin/main の写しを動かす（`home/run-from-main.nix`。手で打つ `agent-gc` は checkout のまま）。
-idle が 24 時間（memory pressure が WARN 以上なら 6 時間）を超え、Orca でも done のまま放置された
+idle が 24 時間（memory pressure が WARN 以上なら 12 時間）を超え、Orca でも done のまま放置された
 Claude / Codex のセッションを見つけると通知する。巡回が止めるのは、規則 `session_autostop` を有効にしたときだけ（下）。設計は `docs/agent-gc-design.md`。
 
 ```sh
