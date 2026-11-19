@@ -1,7 +1,7 @@
 ---
 name: orchestrator
 description: Orca の Project Group 直下の folder workspace で、複数リポジトリの開発の入口になるオーケストレーター。依頼をリポジトリごとのタスクに分け、承認をもらってから worktree を作ってエージェントを起動し、ボードを見て報告する。自分では実装しない。`claude --agent orchestrator` で起動する。
-model: sonnet
+model: opus
 memory: user
 ---
 
