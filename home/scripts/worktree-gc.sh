@@ -1034,11 +1034,13 @@ if prune_safe "$REPO"; then run git -C "$REPO" worktree prune; fi
 # 当たる登録、読めない行が 1 つでも在るリポは、list でも on でも外さない (prune は登録を選べない)。パスと HEAD は prune の前に控え、
 # 外れたかは管理ディレクトリが消えたかで見る。
 # 期限は git を呼ぶたびに計算し直されない絶対時刻 (@<epoch 秒> +0000) にして、dry-run と prune に同じ値を渡す。
-# ponytail: dry-run の後にフォルダが消えた、index の古い登録は、同じ期限でも確認なしで prune に外されうる (台帳にも載らない)。
-# 閉じるなら、prune の後に消えた管理ディレクトリを全部見て、控えに無いものを WARN にする。
+# ponytail: dry-run の後にフォルダが消えた、index の古い登録は、同じ期限でも確認なしで prune に外される (prune は実行の時点で
+# git が「無い」を確かめ直すので、フォルダが戻った登録は外さない)。防げないので、prune の前後の管理ディレクトリを比べ、控えに無いものが
+# 消えたら WARN と 1 日 1 回の通知で知らせる。1 つずつ外す git worktree remove は、フォルダが戻っていると中身ごと消すので使わない。
 all_repos_prune() { # all_repos_prune <本体> <共通の .git>
-    local main="$1" common="$2" dry line why wt ref how i exp lost="その worktree の reflog・index・refs/worktree/"
-    exp="@$(($(date +%s) - MIN_AGE_HOURS * 3600)) +0000"
+    local main="$1" common="$2" dry line why wt ref how i exp out n before planned hit=0 lost="その worktree の reflog・index・refs/worktree/"
+    # 先頭ゼロを八進数に読まない (is_uint を通っているので数字だけ)。
+    exp="@$(($(date +%s) - 10#$MIN_AGE_HOURS * 3600)) +0000"
     # 外す登録の名前・パス・戻し方。パスにタブや改行が在っても割れないよう、添字を揃えた配列で持つ (bash 3.2 には連想配列が無い)。
     ar_names=() ar_wts=() ar_hows=()
     prune_safe "$main" || return 0
@@ -1057,13 +1059,16 @@ all_repos_prune() { # all_repos_prune <本体> <共通の .git>
             why="worktrees/$pl_name に index が無い (古さを git が確かめていない)"
         elif ! wt=$(sed 's#/\.git$##' "$common/worktrees/$pl_name/gitdir" 2>/dev/null) || [ "${wt#/}" = "$wt" ]; then
             why="worktrees/$pl_name の gitdir が絶対パスでない"
-        elif [ -e "$wt" ]; then
+        elif out=$(LC_ALL=C ls -d -- "$wt" 2>&1); then
             # 理由が言うのは「<パス>/.git が無い」だけ。フォルダが残っていれば、直すのに要る index と reflog を消さない
             # (台帳の git worktree add も、空でないフォルダには通らない)。
             why="$wt が在る (.git だけが無い)"
+        elif [ "${out%No such file or directory}" = "$out" ]; then
+            # 親を検索できない (Permission denied) なども [ -e ] は偽で、git も「無い」と読む。無いと確かめられたものだけ外す。
+            why="$wt が無いと確かめられない ($out)"
         elif keep_match "$wt"; then
             why="$wt が「触らない」リスト"
-        elif jq -e --arg p "$wt" 'any(.[]; .path == $p)' >/dev/null 2>&1 <<<"${orca_list:-[]}"; then
+        elif in_orca "$wt"; then
             # Orca がまだ持っている登録を git の側だけ外すと、Orca のカードがどうなるか分からない。
             why="$wt が Orca の一覧に在る: Orca で消す"
         elif ref=$(git -C "$main" symbolic-ref -q --short "worktrees/$pl_name/HEAD" 2>/dev/null); then
@@ -1083,9 +1088,12 @@ all_repos_prune() { # all_repos_prune <本体> <共通の .git>
     done <<<"$dry"
     # 空の配列の展開は bash 3.2 の set -u で落ちるので、空なら先に戻る。
     [ ${#ar_names[@]} -gt 0 ] || return 0
-    if [ "$all_mode" = on ] && ! run git -C "$main" worktree prune --expire "$exp"; then
-        log "WARN: all_repos: prune 失敗 $main"
-        return 0
+    if [ "$all_mode" = on ]; then
+        before=$(ls -A "$common/worktrees" 2>/dev/null || true)
+        if ! run git -C "$main" worktree prune --expire "$exp"; then
+            log "WARN: all_repos: prune 失敗 $main"
+            return 0
+        fi
     fi
     i=0
     while [ "$i" -lt ${#ar_names[@]} ]; do
@@ -1099,21 +1107,47 @@ all_repos_prune() { # all_repos_prune <本体> <共通の .git>
         fi
         i=$((i + 1))
     done
+    [ "$all_mode" = on ] && [ "$DRY_RUN" != 1 ] || return 0
+    planned=$(printf '%s\n' "${ar_names[@]}")
+    while IFS= read -r n; do
+        [ -n "$n" ] && [ ! -e "$common/worktrees/$n" ] || continue
+        if grep -qxF -- "$n" <<<"$planned"; then continue; fi
+        log "WARN: all_repos: 確かめていない登録が prune で外れた: $main の worktrees/$n (dry-run の後にフォルダが消えた。台帳に無い)"
+        hit=1
+    done <<<"$before"
+    [ "$hit" = 1 ] || return 0
+    notify_daily "$STATE_ROOT/worktree-gc/all-repos-unchecked-warned" "$main の git worktree prune で、確かめていない登録が外れた (ログに)"
+}
+
+# <パス> か、その実体の形が Orca の一覧 (orca_paths。下の節で作る) に在れば 0。
+in_orca() {
+    local r
+    r=$(real_path /bin/pwd "$1")
+    grep -qxF -e "$1" -e "${r:-$1}" <<<"$orca_paths"
 }
 
 all_mode=$(rule_mode all_repos)
+orca_paths=""
 # Orca に届かない回は、Orca の一覧の worktree を LIST から除けないので、この節ごと見送る。
 if [ "$all_mode" = off ]; then
     :
 elif [ "$orca_state" = unknown ]; then
     log "WARN: all_repos: Orca に届かず、Orca の一覧のリポと worktree が分からない。この節は見送る (次回に拾う)"
-elif [ "$orca_state" = ok ] && ! orca_list=$(orca worktree list --json 2>/dev/null | jq -ce '.result.worktrees | arrays'); then
-    log "WARN: all_repos: orca worktree list を取れない。この節は見送る (次回に拾う)"
+elif [ "$orca_state" = ok ] && ! orca_list=$(orca worktree list --json 2>/dev/null |
+    jq -ce 'select(.ok == true and .result.truncated == false) | .result.worktrees | arrays'); then
+    # 打ち切られた一覧を読むと、返らなかった Orca の登録を「一覧に無い」と読む (orca_ps と同じ条件)。
+    log "WARN: all_repos: orca worktree list を取れない、または打ち切られた。この節は見送る (次回に拾う)"
 elif ! is_uint "$MIN_AGE_HOURS" || ! repo_common=$(git -C "$REPO" rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
     log "WARN: all_repos: MIN_AGE_HOURS が整数でない、または $REPO の .git を引けない。この節は見送る"
 else
     # 回るリポの候補 (改行区切り): Orca の一覧の本体と GC_REPOS。orca コマンドが無ければ GC_REPOS だけ。
-    cands=$(jq -r '.[] | select(.isMainWorktree == true) | .path' <<<"${orca_list:-[]}") || cands=""
+    # 本体はこのマシンの行 (hostId が local) だけ。別のホストの行のパスを git -C に渡すと、同じパスの無関係なリポを回る。
+    cands=$(jq -r '.[] | select(.isMainWorktree == true and .hostId == "local") | .path' <<<"${orca_list:-[]}") || cands=""
+    # Orca の一覧の全部の行のパスと、その実体の形 (改行区切り)。LIST から除く所と prune の見送りで使う (in_orca)。
+    while IFS= read -r p; do
+        [ -n "$p" ] || continue
+        orca_paths+="$p"$'\n'"$(real_path /bin/pwd "$p")"$'\n'
+    done < <(jq -r '.[].path // empty' <<<"${orca_list:-[]}")
     # 値の * などを展開させない (~ はもともと展開されない)。後ろの処理は glob を使うので、割ったらすぐ戻す。
     set -f
     # shellcheck disable=SC2086
@@ -1145,7 +1179,7 @@ else
         # 本体・Orca の一覧に在るもの・scratch の節が見たもの・フォルダの無い登録 (下の prune が見る) のほかを出す。何も消さない。
         while IFS= read -r wt; do
             [ "$wt" != "$main" ] && [ -d "$wt" ] || continue
-            if jq -e --arg p "$wt" 'any(.[]; .path == $p)' >/dev/null 2>&1 <<<"${orca_list:-[]}"; then continue; fi
+            if in_orca "$wt"; then continue; fi
             case $'\n'"$scratch_seen" in *$'\n'"$wt"$'\n'*) continue ;; esac
             log "LIST  $wt (どの判定にも掛からない: 自動では消さない)"
         done < <(sed -n 's/^worktree //p' <<<"$list")
