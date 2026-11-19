@@ -20,7 +20,7 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 | worktree / コンテナ掃除 | Home Manager `launchd.agents`（1 時間ごと、`home/scripts/worktree-gc.sh`） |
 | PR の自動対応（conflict / CI 失敗 / 未対応のレビューにエージェントを起動）と、人の判断待ちのボード表示（質問は Needs decision、マージできる PR は In review に未読と「マージ可」） | Home Manager `launchd.agents`（ログイン時と 3 分ごと、`home/scripts/pr-dispatch.sh`）。止めるときは `~/Library/Application Support/pr-dispatch/BRAKE` を置く（再開と起動が止まり、ボードの更新は続く）。同じ場所の `config` に `adopt_prs=true` と `max_worktrees=<数>` を書くと、Orca に登録したリポの worktree の無い PR にも、対応が要るときに worktree を作る（1 回に 1 つ。無ければ作らない）。同じループが、自分がラベルを付けた自分の issue（キュー）に worktree を作って worker を起動する（下の「PR の自動対応と issue のキュー」） |
 | 再起動で止まった Claude の再開、Needs decision で会話が開いていないカードの開き直し（同じセッションには 1 回だけ。人が閉じたタブは開き直さない） | Home Manager `launchd.agents` の pr-dispatch が毎回の最初に呼ぶ（ログイン時と 3 分ごと、`home/scripts/agent-resume.sh`）＋ SessionStart hook `agents/claude/hooks/session-marker.sh`。再開したセッションに指示が入るまで、その worktree への PR の自動対応は待つ |
-| 放置された Claude / Codex のセッションの通知と、確かめたものの停止（Orca の端末に /exit） | Home Manager `launchd.agents`（10 分ごと、`home/scripts/agent-gc.sh`）＋ CLI `~/.local/bin/agent-gc`。設計は `docs/agent-gc-design.md` |
+| 放置された Claude / Codex のセッションの通知と、確かめたもの・規則で有効にした巡回の停止（Orca の端末に /exit） | Home Manager `launchd.agents`（10 分ごと、`home/scripts/agent-gc.sh`）＋ CLI `~/.local/bin/agent-gc`。設計は `docs/agent-gc-design.md` |
 | 指定したコンテナの異常終了（die / oom）と、137 で落ちたときの VM のカーネルログの記録 | Home Manager `launchd.agents`（常駐、`home/scripts/container-events.sh`） |
 | Claude Code の auto memory の整理（重複・陳腐化・共有への移動、昇格は 1 件ずつ PR） | Home Manager `launchd.agents`（毎日 04:30、`home/scripts/memory-maintenance.sh`）。設計は `docs/memory-maintenance-design.md` |
 | CLI パッケージ | nixpkgs `home.packages` |
@@ -520,7 +520,7 @@ IGNORED_OK="node_modules"             # 一緒に消えてよい無視される�
 
 消した worktree と、止めた・落とした compose プロジェクトは、ログとは別に台帳
 `~/Library/Application Support/cleanup-ledger/ledger.tsv`（タブ区切り・追記のみ）に 1 件 1 行で残す。
-列は時刻・種類（worktree-gc が書くのは `worktree` / `compose-down` / `worktree-remove-failed` / `compose-stop`、agent-gc は `session`）・対象・当たった規則・戻し方・戻らないもの。
+列は時刻・種類（worktree-gc が書くのは `worktree` / `compose-down` / `worktree-remove-failed` / `compose-stop`、agent-gc は `session`。規則が `list` の回の予定は `plan-…`）・対象・当たった規則・戻し方・戻らないもの。
 worktree の戻し方は `git worktree add -B <ブランチ> <パス> <SHA>`（detached は `--detach`）と、そこに居た
 セッションの `claude --resume <ID>`。戻し方の列は端末にそのまま貼って通るコマンドだけで、注記は先頭の
 `: <注記>; ` に置く（HEAD を取れなかった worktree は `: HEAD を取れなかったので戻し方なし` だけ）。戻らないものは ignore されたファイルの件数とパス（先頭 20 件）と、
@@ -592,7 +592,7 @@ ready にするのは人。キューへの供給は `/issue-queue plan` と `/is
 `home/agent-gc.nix` の LaunchAgent が 10 分ごとに `home/scripts/agent-gc.sh scan --auto` を回す。巡回は worktree-gc と同じく
 origin/main の写しを動かす（`home/run-from-main.nix`。手で打つ `agent-gc` は checkout のまま）。
 idle が 24 時間（memory pressure が WARN 以上なら 6 時間）を超え、Orca でも done のまま放置された
-Claude / Codex のセッションを見つけると通知する。自動では止めない。設計は `docs/agent-gc-design.md`。
+Claude / Codex のセッションを見つけると通知する。巡回が止めるのは、規則 `session_autostop` を有効にしたときだけ（下）。設計は `docs/agent-gc-design.md`。
 
 ```sh
 agent-gc list                  # 候補と、残した理由を一覧にする
@@ -612,6 +612,13 @@ tail -50 ~/Library/Logs/agent-gc.log
 （位置引数の指示や `--prefill` は、再開のときに次のターンとして実行されるので付けない）。Codex は ID を残さず `codex resume` の一覧から選ぶ。
 `/exit` を送っても待ち時間のうちに終わらなかったものも、規則に `(/exit 送信済み・終了は未確認)` を付けて台帳に残す。
 Claude の行の「戻らないもの」には、`--resume` で戻らない裏のコマンド・モニター・自分で間隔を決める `/loop` を書く（在ったかは分からない）。
+
+巡回の中で止めるのは、`~/.config/worktree-gc.env` の `RULE_session_autostop=off|list|on`（上の規則のスイッチと同じ。無ければ環境変数、未設定は off）。
+`list` は何も送らず、止める予定を台帳に `plan-session` で書く（候補の通知は今どおり）。`on` は `agent-gc stop --listed` と同じ確かめ方で `/exit` を送り、
+止めた回に「放置セッション <n> 本を止めた」の通知を 1 本出す（候補の通知は出さない）。`on` は同じプロセスに 2 度送らず（`autostop-sent.tsv`）、台帳に書けない回は 1 本も止めない。
+送る・台帳に書くのは LaunchAgent の `scan --auto` だけで、手で打つ `agent-gc scan` と `DRY_RUN=1` は `would stop` を出すだけ。
+有効にするときは、まず `list` で 1 日置いて `plan-session` の行を見る。止めてほしくないもの（予約タスクを持つセッションなど）は「触らない」リストに cwd を足す。
+`on` にした最初の巡回で、候補の全部が続けて止まる。やめるときは行を消すか `off` にする（rebuild 不要）。
 
 ## コンテナの異常終了の記録
 

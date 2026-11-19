@@ -1,8 +1,9 @@
 #!/bin/bash
-# 放置された Claude / Codex のセッションを見つけて知らせ、ユーザーが確かめたものだけを
-# Orca の端末に /exit を送って終わらせる。KILL はしない。設計は docs/agent-gc-design.md。
-#   agent-gc.sh scan --auto       launchd が 10 分ごとに origin/main の写しで回す。新しい候補があれば通知する
-#                                 (--auto は巡回の印。今は読まず、scan と同じに動く)
+# 放置された Claude / Codex のセッションを見つけて知らせ、Orca の端末に /exit を送って終わらせる。KILL はしない。
+# 止めるのは、ユーザーが stop を打ったときと、規則 session_autostop が on の巡回だけ。設計は docs/agent-gc-design.md。
+#   agent-gc.sh scan --auto       launchd が 10 分ごとに origin/main の写しで回す。新しい候補があれば通知し、
+#                                 RULE_session_autostop が list なら止める予定を台帳に書き、on なら stop と同じ手順で止める
+#   agent-gc scan                 --auto が無ければ、規則が list でも on でも would stop を出すだけ
 #   agent-gc list                 候補と残した理由を一覧にし、listed.tsv に書く
 #   agent-gc stop <pid>...        判定し直し、入力欄が空なら /exit を送る (DRY_RUN=1 で表示だけ)
 #   agent-gc stop --listed        最後に list で見せた候補を止める
@@ -256,10 +257,28 @@ sched() {
     done
 }
 
+# 規則 session_autostop の値 (off / list / on)。設定ファイル (worktree-gc と共有) はサブシェルで source し、規則の値だけを
+# 持ち出す (DRY_RUN や REPO を持ち込まない)。ファイルが無ければ環境変数を読む。構文エラーの在るファイルは、bash がエラーの
+# 前の行を読み込んだまま source を続ける (終了コードは最後のコマンドのもの) ので、-n で先に見る。読めない回と、共有ファイルを
+# 読めない回は off。
+autostop_mode() {
+    local cfg=${WORKTREE_GC_CONFIG:-$HOME/.config/worktree-gc.env} m
+    [ "$ledger_ok" = 1 ] || { echo off; return 0; }
+    # shellcheck source=/dev/null
+    m=$(if [ -f "$cfg" ]; then "$BASH" -n "$cfg" 2>/dev/null || exit 1; . "$cfg" >/dev/null 2>&1; fi; rule_mode session_autostop)
+    case $m in
+        off | list | on) echo "$m" ;;
+        *) log "WARN: $cfg を読めない。session_autostop は off として扱う"; echo off ;;
+    esac
+}
+
 scan() {
-    local rows cands n new seen alive
+    local rows cands n new seen alive mode auto=0 stopped=0 unconfirmed=0 sent k l m
     mkdir -p "$STATE_DIR"
     touch "$STATE_DIR/notified.tsv"
+    mode=$(autostop_mode)
+    # 送る・台帳に書くのは、LaunchAgent の巡回 (--auto) だけ。手で打つ scan と DRY_RUN=1 は would stop で止まる。
+    [ "${1:-}" = --auto ] && [ "${DRY_RUN:-0}" != 1 ] && auto=1
     rows=$(collect | judge | sched)
     cands=$(jq -r 'select(.reason == null) | .key' <<<"$rows")
     n=$(grep -c . <<<"$cands")
@@ -269,7 +288,10 @@ scan() {
     seen=$({ cat "$STATE_DIR/notified.tsv"; printf '%s\n' "$cands"; } | grep . | sort -u |
         while IFS= read -r k; do grep -qxF "$(cut -d: -f1-2 <<<"$k")" <<<"$alive" && echo "$k"; done)
     printf '%s\n' "$seen" | grep . >"$STATE_DIR/notified.tsv"
-    [ "$new" -gt 0 ] && notify "止める候補 $n 本（新規 $new）。agent-gc list で確かめて agent-gc stop --listed"
+    # on の巡回は自分で止めるので、候補の通知の代わりに、止めた本数の通知を出す (下)。
+    if [ "$new" -gt 0 ] && ! { [ "$mode" = on ] && [ "$auto" = 1 ]; }; then
+        notify "止める候補 $n 本（新規 $new）。agent-gc list で確かめて agent-gc stop --listed"
+    fi
 
     # 記録の形式が変わって 1 本も読めなくなったら、その日 1 回だけ知らせる
     if jq -e -s 'map(select(.agent == "claude")) | length > 0 and all(.readable == false)' <<<"$rows" >/dev/null &&
@@ -281,6 +303,27 @@ scan() {
     log "scan pressure=$(jq -rs '.[0].pressure // "-"' <<<"$rows") sessions=$(grep -c . <<<"$rows")" \
         "candidates=$n new=$new unreadable=$(jq -s 'map(select(.reason == "unreadable")) | length' <<<"$rows")" \
         "sched_unknown=$(jq -s 'map(select(.reason == "sched-unknown")) | length' <<<"$rows")"
+
+    [ "$mode" != off ] || return 0
+    if [ "$mode" = on ] && [ "$auto" = 1 ] && [ -f "$STATE_DIR/autostop-sent.tsv" ]; then
+        # 控えは生きているプロセスの分だけ残す。生死は ps で 1 本ずつ見る (collect の行は一時的に欠けることがあり、
+        # 欠けた回に消すと、次の回に同じプロセスへもう一度送る)。書けなければ、下の追記も通らないので送らない。
+        sent=$(while IFS= read -r k; do
+            l=$(lstart_of "${k%%:*}")
+            [ "${k%%:*}:${l// /_}" != "$k" ] || echo "$k"
+        done <"$STATE_DIR/autostop-sent.tsv")
+        printf '%s\n' "$sent" | grep . >"$STATE_DIR/autostop-sent.tsv" 2>/dev/null
+    fi
+    cands=$(jq -r 'select(.reason == null) | "\(.pid)\t\(.key)"' <<<"$rows")
+    [ -n "$cands" ] || return 0
+    # 手で打つ scan と DRY_RUN=1 は、stop の DRY_RUN と同じ所 (would stop) で止まる。
+    [ "$auto" = 1 ] || local DRY_RUN=1
+    stop_each "$mode" "$cands"
+    if [ "$auto" = 1 ] && [ "$mode" = on ] && [ $((stopped + unconfirmed)) -gt 0 ]; then
+        m=""
+        [ "$unconfirmed" = 0 ] || m="。終了を確認できない $unconfirmed 本"
+        notify "放置セッション $stopped 本を止めた$m。戻し方は cleanup-ledger"
+    fi
 }
 
 list() {
@@ -363,7 +406,7 @@ resume_args() {
 }
 
 stop() {
-    local targets rows row pid want reason term agent terms path sid restore lost key rule warned msg
+    local targets stopped=0 unconfirmed=0
     if [ "${1:-}" = --listed ]; then
         targets=$(cat "$STATE_DIR/listed.tsv" 2>/dev/null)
         [ -n "$targets" ] || { echo "listed.tsv が空です。先に agent-gc list を打ってください" >&2; return 1; }
@@ -371,6 +414,19 @@ stop() {
         [ $# -gt 0 ] || { echo "usage: agent-gc stop <pid>... | --listed" >&2; return 1; }
         targets=$(printf '%s\t\n' "$@")
     fi
+    stop_each manual "$targets"
+}
+
+# stop の本体。手で打つ stop (manual) と、scan の巡回 (規則 session_autostop の list / on) が同じ手順を通る。
+# <行> は 1 行 1 本の「pid<TAB>鍵」(鍵が空なら照合しない)。違うのは送る所だけ:
+#   manual: 送る。台帳に書けなくても次の 1 本へ進む。
+#   list:   送らずに、止める予定を台帳に書く (ledger_plan)。
+#   on:     始めに台帳に追記できるかを確かめ、自分が送ったプロセス (autostop-sent.tsv) には 2 度送らない。
+#           止めた後に台帳に書けなければ、戻し方をログに書いて、その回の残りは止めない。
+# 止めた本数は呼び側の stopped と unconfirmed (終了を確認できない) に足す。
+stop_each() { # stop_each <manual|list|on> <行>
+    local mode=$1 targets=$2 row pid want reason term agent terms path sid restore lost key rule warned msg
+    local sent_log="$STATE_DIR/autostop-sent.tsv"
     # 共有ファイルが無ければ、何を守るかも、止めたものをどこに残すかも分からないので 1 本も止めない。
     if [ "$ledger_ok" != 1 ]; then
         log "WARN: $(dirname "$self")/cleanup-ledger.sh を読めない。1 本も止めない"
@@ -397,6 +453,17 @@ stop() {
         fi
         return 1
     fi
+    # on の巡回は、止めた後に台帳へ書けないと戻し方が残らないので、送る前に追記できることを確かめる。
+    # 書けない回は 1 本も止めず、通知はその日 1 回だけ。
+    if [ "$mode" = on ] && [ "${DRY_RUN:-0}" != 1 ] && ! { mkdir -p "${CLEANUP_LEDGER%/*}" && : >>"$CLEANUP_LEDGER"; } 2>/dev/null; then
+        log "WARN: 台帳に書けない $CLEANUP_LEDGER。1 本も止めない"
+        warned="$STATE_DIR/ledger-unwritable-warned"
+        if [ "$(cat "$warned" 2>/dev/null)" != "$(date +%F)" ]; then
+            notify "台帳 $CLEANUP_LEDGER に書けないので、放置セッションを止めていません"
+            { mkdir -p "$STATE_DIR" && date +%F >"$warned"; } 2>/dev/null || log "WARN: 通知済みの印を書けない $warned"
+        fi
+        return 1
+    fi
     while IFS=$'\t' read -r pid want; do
         [ -n "$pid" ] || continue
         # 前の 1 本の終了待ちの間に再開されることがあるので、送る直前に 1 本ずつ取り直す
@@ -408,6 +475,9 @@ stop() {
         reason=$(jq -r '.reason // empty' <<<"$row")
         if [ -n "$reason" ]; then log "skip $agent pid=$pid: $reason"; continue; fi
         if [ -n "$want" ] && [ "$want" != "$(jq -r .key <<<"$row")" ]; then log "skip $agent pid=$pid: changed since list"; continue; fi
+        key=$(jq -r .key <<<"$row")
+        # 鍵から状態の時刻 (最後の欄) を落とした pid:開始時刻 が、同じプロセスの印。手で打つ stop は控えを見ない。
+        if [ "$mode" = on ] && grep -qxF -- "${key%:*}" "$sent_log" 2>/dev/null; then log "skip $agent pid=$pid: exit-sent"; continue; fi
         path=$(jq -r .path <<<"$row")
         # cwd が取れない (記録に cwd が無い、Codex の lsof が失敗した) と、リストに当たるか判定できない。
         # 材料が欠けたら止めない側に倒す (空の cwd は keep_match のどの行にも当たらず、そのまま止まってしまう)。
@@ -440,7 +510,6 @@ stop() {
         [ "$(jq -r '.pressure // 0' <<<"$row")" -ge 2 ] && rule="$rule (memory pressure WARN)"
         # 判定の後に始まったターンを拾うため、送る直前に (a) 記録の読み直し、(b) 入力欄の順に続けて確かめる。
         # (a) 判定のときと同じく idle で、状態の時刻も判定のときのまま (鍵の最後の欄。lstart にも : が入るので最後を取る)。
-        key=$(jq -r .key <<<"$row")
         if [ "$agent" = claude ]; then
             jq -e --arg ts "${key##*:}" '.status == "idle" and ((.statusUpdatedAt // .updatedAt) / 1000 | floor | tostring) == $ts' \
                 "$CLAUDE_SESSIONS/$pid.json" >/dev/null 2>&1
@@ -456,6 +525,16 @@ stop() {
         fi
         # (b) の後は外部コマンドを挟まずに送る。
         if [ "${DRY_RUN:-0}" = 1 ]; then echo "would stop $agent pid=$pid $path"; continue; fi
+        if [ "$mode" = list ]; then
+            ledger_plan "$key" session "$agent $path" "$rule" "$restore" "$lost" || log "WARN: 台帳に書けない $CLEANUP_LEDGER"
+            log "plan $agent pid=$pid path=$path"
+            continue
+        fi
+        # 控えは送る前に書く (後に書くと、書けない回に 10 分ごとの送り直しが残る)。書けなければ送らない。
+        # 送信が失敗したものも控えに残る (その先は手で打つ stop)。追記はシェルの組み込みで、外部コマンドを挟まない。
+        if [ "$mode" = on ] && ! { printf '%s\n' "${key%:*}" >>"$sent_log"; } 2>/dev/null; then
+            log "skip $agent pid=$pid: 控え $sent_log に書けない"; continue
+        fi
         orca terminal send --terminal "$term" --text /exit --enter --json >/dev/null 2>&1 || { log "failed $agent pid=$pid: send"; continue; }
         local lstart i
         lstart=$(jq -r .lstart <<<"$row")
@@ -467,19 +546,24 @@ stop() {
             log "failed $agent pid=$pid: still running after /exit"
             # /exit は届いていて、待ち時間の後で終わることがある。そのとき台帳に無いと戻し方が残らないので、印を付けて書く。
             rule="$rule (/exit 送信済み・終了は未確認)"
+            unconfirmed=$((unconfirmed + 1))
         else
             log "stopped $agent pid=$pid idle=$(jq -r '.idle_sec / 3600 | floor' <<<"$row")h path=$path"
+            stopped=$((stopped + 1))
         fi
-        # 書けなくても次の 1 本は続ける。
-        ledger_add session "$agent $path" "$rule" "$restore" "$lost" || log "WARN: 台帳に書けない $CLEANUP_LEDGER"
+        # 手で打つ stop は、書けなくても次の 1 本は続ける (打った人が画面で見る)。巡回は、戻し方をログに残して残りを止めない。
+        if ! ledger_add session "$agent $path" "$rule" "$restore" "$lost"; then
+            log "WARN: 台帳に書けない $CLEANUP_LEDGER"
+            if [ "$mode" = on ]; then log "WARN: 戻し方 $restore。この回の残りは止めない"; break; fi
+        fi
     done <<<"$targets"
 }
 
 case "${1:-}" in
-    scan) scan ;;
+    scan) shift; scan "$@" ;;
     list) list ;;
     stop) shift; stop "$@" ;;
     judge) judge ;;
     prompt-empty) prompt_empty "${2:-}" ;;
-    *) echo "usage: agent-gc {scan|list|stop <pid>...|stop --listed}" >&2; exit 2 ;;
+    *) echo "usage: agent-gc {scan [--auto]|list|stop <pid>...|stop --listed}" >&2; exit 2 ;;
 esac

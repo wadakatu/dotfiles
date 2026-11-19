@@ -4,6 +4,7 @@
 - v2（2026-11-02）: Codex の設計レビューで、KILL の経路に穴が多いと分かった（同じプロセスのまま別のセッションに切り替わる、子孫の範囲、印の競合、終了の確認）。
   止め方を「Orca の端末に `/exit` を送り、エージェント自身に終わってもらう」に変え、ユーザーの承認を得た。
 - v3（#187）: 自動で止める前の柵。巡回を origin/main の写しに替え、子孫のシェルと予約を作ったセッションを残し、送る直前に記録と入力欄を確かめ直し、台帳に戻らないものを書く。
+- v4（#188）: 巡回の中で止める。規則 `session_autostop`（`RULE_session_autostop=off|list|on`、既定 off）で有効にし、`stop` と同じ手順を通す（5.1）。
 
 材料の出典：
 
@@ -13,10 +14,10 @@
 
 ## 1. 意図と決まっていること
 
-メモリが逼迫する主な原因は、作業が終わったのに閉じていないセッションである（36 本・約 21GB のうち、24h 以上 idle が 12 本・6.6GB）。これを 10 分ごとに見つけて通知し、ユーザーが確かめたものだけを止める。
+メモリが逼迫する主な原因は、作業が終わったのに閉じていないセッションである（36 本・約 21GB のうち、24h 以上 idle が 12 本・6.6GB）。これを 10 分ごとに見つけて通知し、止める。
 
 - 判定と停止はルールで動くスクリプトが行う。AI は使わない。
-- 自動で行うのは、見つけることと知らせることまで。止めるのは、ユーザーが `agent-gc stop` を打ったときだけ。
+- 止めるのは、ユーザーが `agent-gc stop` を打ったときと、規則 `session_autostop` が `on` の巡回（`scan --auto`）だけ。規則は既定で off で、off の巡回は見つけて知らせるところまで。判断待ち・入力待ち・書きかけ・裏のコマンド・予約の在るものは、どちらの経路でも止めない（3 節・5 節）。
 - 止めるときは、Orca の端末に `/exit` を送る。KILL はしない。エージェントが普段どおりに終わるので、次の 3 つはエージェント自身が行う。
   - MCP などの子プロセスの片付け。
   - 会話記録の保存。
@@ -25,7 +26,8 @@
 
 非ゴール：
 
-- 自動で止めること。
+- KILL。`/exit` で終わらなければ、台帳に残して人が見る。
+- 1 回の巡回で止める本数の上限。止めたセッションのタブを閉じること（シェルが残る）。
 - Orca の外のセッション（端末が分からないので `/exit` を送れない）。herdr。
 - 孤児プロセスの掃除。実測では 0 本だった。
 
@@ -37,17 +39,21 @@ launchd（StartInterval 600）→ agent-gc-launcher scan --auto（origin/main �
   2. Claude と Codex のプロセスを集め、1 本ずつ材料を JSON 1 行にする（3.1）
   3. judge（純粋な jq）で、候補か、keep とその理由かを決める（3.2）
   4. sched で、候補の Claude のうち予約を作ったものを keep にする（3.3）
-  5. まだ知らせていない候補があれば通知する（4.1）
+  5. まだ知らせていない候補があれば通知する（4.1。規則が on の巡回では出さない）
   6. ログに 1 行書く
+  7. 規則 session_autostop が list / on なら、候補を stop の本体に渡す（5.1）
+       list: 送らずに、止める予定を台帳に plan-session で書く
+       on:   stop と同じ手順で /exit を送り、止めた本数を 1 本の通知で知らせる
 
-ユーザー: agent-gc list           … 候補と、残した理由を一覧にし、listed.tsv に書く
+ユーザー: agent-gc scan           … --auto が無いので、規則が list でも on でも would stop を出すだけ
+          agent-gc list           … 候補と、残した理由を一覧にし、listed.tsv に書く
           agent-gc stop <pid>...  … 判定し直し、入力欄が空なら /exit を送り、終わったかを確かめる
           agent-gc stop --listed  … listed.tsv の全件を、同じ手順で止める
 ```
 
 1 つのスクリプト `home/scripts/agent-gc.sh` にまとめる。言語は既存のジョブと同じ bash と jq。launchd は `/bin/bash`（3.2）で起動するので、連想配列は使わない。
 
-巡回は、worktree-gc・pr-dispatch と同じく `home/run-from-main.nix` の起動スクリプトで origin/main の写しを動かす（checkout がレビュー前のブランチに居ても、その版は無人で動かない）。起動スクリプトは引数をそのまま渡す。`--auto` は LaunchAgent からの巡回の印で、今の `scan` は読まない（`scan` と同じに動く）。手で打つ `agent-gc`（`~/.local/bin/agent-gc`）は checkout のまま。
+巡回は、worktree-gc・pr-dispatch と同じく `home/run-from-main.nix` の起動スクリプトで origin/main の写しを動かす（checkout がレビュー前のブランチに居ても、その版は無人で動かない）。起動スクリプトは引数をそのまま渡す。`--auto` は LaunchAgent からの巡回の印で、送る・台帳に書くのは `--auto` の付いた `scan` だけ（`DRY_RUN=1` のときは付いていても付いていないのと同じ）。手で打つ `agent-gc`（`~/.local/bin/agent-gc`）は checkout のままなので、ブランチの版を人やエージェントが `scan` で試しても、自動停止まで進まない。
 
 ## 3. 判定
 
@@ -220,6 +226,20 @@ DRY_RUN=1 agent-gc stop …  判定し直して、止める対象を表示する
 
 Orca のタブは閉じない。シェルが残るので、表示された `claude --resume <id>` か `codex resume <id>` で、そこから再開できる。
 
+### 5.1 巡回の中で止める（規則 `session_autostop`、#188）
+
+- スイッチ：`scan` の中で `${WORKTREE_GC_CONFIG:-$HOME/.config/worktree-gc.env}`（worktree-gc と共有）をサブシェルで source し、`rule_mode session_autostop` の値だけを持ち出す（`DRY_RUN` や `REPO` は持ち込まない）。ファイルが無ければ環境変数 `RULE_session_autostop` を読む。未設定・3 つのどれでもない値・構文エラーのあるファイル・`cleanup-ledger.sh` を読めない回は off。構文は先に `bash -n` で見る（bash はエラーの前の行を読み込んだまま source を続け、終了コードも最後のコマンドのものなので、source の結果では分からない）。
+- list と on は、`scan` の最後に候補の `pid<TAB>鍵` を stop の本体に渡す。判定のし直し・鍵の照合・「触らない」リスト・端末・記録と入力欄の確認は、`stop --listed` と同じコードを通る。違うのは送る所だけ。
+- `--auto` の無い `scan` と `DRY_RUN=1` の `scan --auto` は、規則が list でも on でも 5 節の 6 の `would stop` で止まる（台帳にも控えにも書かず、送らない）。
+- list：送る所で送らずに、台帳に `plan-session` を書く（`ledger_plan`。鍵は行の鍵、ほかの列は on と同じ）。同じ鍵は 1 度だけ。候補の通知は今どおり出す。
+- on：
+  - 送る前に、台帳に追記できることを確かめる（`mkdir -p` と空の追記）。できない回は 1 本も止めず、ログと 1 日 1 回の通知。
+  - 同じプロセスには 2 度送らない。送る直前（記録と入力欄の確認の後）に `pid:開始時刻` を `autostop-sent.tsv` へシェルの組み込みで追記し、書けなければ送らない。控えに在るものは `skip <pid>: exit-sent`。後に書く形だと、書けない回に 10 分ごとの送り直しが残る。送信に失敗したものも控えに残る（その先は手で打つ `stop`）。控えは、開始時刻が今も一致するプロセス（`ps` で 1 本ずつ見る）の分だけ残す。手で打つ `stop` は控えを見ない。
+  - 止めた後に台帳に書けなければ、戻し方をログに書き、その回の残りは止めない。
+  - 候補の通知は出さない（`on` の巡回のすべての回）。止めた回に 1 本だけ「放置セッション <n> 本を止めた。戻し方は cleanup-ledger」を出す。待ち時間のうちに終わらなかったものは n に数えず、「終了を確認できない <m> 本」を足す。
+  - 「触らない」リストが無い・読めない回は、`stop` と同じく 1 本も止めず、通知は 1 日 1 回。
+- 標準との差：Claude Code のバックグラウンドセッションは、待ちのまま誰も繋いでいない状態が約 1 時間続くと止まり、開くと自動で再開する（https://code.claude.com/docs/en/agent-view.md ）。ここで扱う端末のタブの対話セッションはその管理に載らず、再開は手動（台帳の戻し方。`claude --resume <ID>` はどのディレクトリからでも打てる。https://code.claude.com/docs/en/sessions.md ）。標準は未発火の予約やモニターの在るセッションを止めないが、ここでは会話記録の痕跡で粗く拾うだけ（3.3）。
+
 ## 6. 既存のジョブとの関係
 
 - **agent-resume**：
@@ -231,15 +251,16 @@ Orca のタブは閉じない。シェルが残るので、表示された `clau
 
 ## 7. 安全策
 
-- 自動では止めない。stop は止める直前に必ず判定し直し、鍵・端末を確かめ、送る直前に記録と入力欄を続けて確かめ直す。
+- 巡回が止めるのは、規則 `session_autostop` を `on` にしたときだけ（既定は off。5.1）。マージと有効化を分ける。stop も巡回も、止める直前に必ず判定し直し、鍵・端末を確かめ、送る直前に記録と入力欄を続けて確かめ直す。巡回は同じプロセスに 2 度送らず、台帳に書けない回は止めない。
 - 材料が欠けたら、keep に倒す。
 - KILL しない。`/exit` で終わらなければ、失敗としてログに残すだけにする。
 - 形式の変化を検知する：claude のプロセスがあるのに、読めた記録が 0 本なら、`WARN` をログに書き、その日 1 回だけ通知する。
 - 除外：「触らない」リスト（`~/.config/cleanup-keep`、worktree-gc と共有）と `EXCLUDE_RE`（パスの正規表現。既定は空）。どちらかに当たれば止めない。リストが無い回の stop は 1 本も止めない。
 - 多重実行のロックは置かない。
-  - scan は launchd が重ねて起動しない。
+  - scan は launchd が重ねて起動しない（`StartInterval` のジョブは、前の回が動いている間の起動を飛ばす。`man launchd.plist`）。
   - list と stop は人が打つ。
-  - 3 つが共有する状態は、`notified.tsv`（scan だけが書く）と `listed.tsv`（list だけが書く）だけ。
+  - 3 つが共有する状態は、`notified.tsv` と `autostop-sent.tsv`（scan だけが書く）と `listed.tsv`（list だけが書く）だけ。台帳は追記だけ。
+  - 人が打つ `stop` と on の巡回が同じ数十秒に重なると、同じセッションに 2 度 `/exit` が届きうる。排他は足さない。
 
 ## 8. 状態とログ
 
@@ -252,10 +273,12 @@ Orca のタブは閉じない。シェルが残るので、表示された `clau
 | `format-warned` | 形式の警告を出した日付 |
 | `keep-missing-warned` | 「触らない」リストが無い（読めない）と知らせた日付 |
 | `keep-unreadable-warned` | 「触らない」リストに読めない行があると知らせた日付 |
+| `autostop-sent.tsv` | on の巡回が `/exit` を送ったプロセス（`pid:開始時刻`）。生きているものの分だけ残す |
+| `ledger-unwritable-warned` | on の巡回で、台帳に書けないので止めなかったと知らせた日付 |
 
 置き場所の根は `STATE_ROOT`（cleanup-ledger.sh と同じ）。止めたものの台帳は共有の `cleanup-ledger/ledger.tsv` に書く。
 
-ログは `~/Library/Logs/agent-gc.log`。scan は毎回 1 行書く。stop は 1 件ごとに 1 行書き、端末にも出す。
+ログは `~/Library/Logs/agent-gc.log`。scan は毎回 1 行書く。stop と、規則が list / on の scan は 1 件ごとに 1 行書き（list は `plan <agent> pid=<pid>`）、端末にも出す。
 
 ```
 2026-11-02 22:30:00 scan pressure=2 sessions=36 candidates=15 new=3 unreadable=1 sched_unknown=0
@@ -270,6 +293,7 @@ Orca のタブは閉じない。シェルが残るので、表示された `clau
   - 値が欠けたときに keep になること。
   - Codex の候補。
 - `agent-gc.sh prompt-empty <agent>` に端末の末尾を流し、空・書きかけ・placeholder の別の文言・shell に戻った画面を照合する。
+- `scan --auto` の規則 `session_autostop`（#188）は、`auto-*` のケースで off・list・on・打ち間違い・設定ファイル（構文エラーを含む）・`DRY_RUN`・手で打つ `scan`・控えと台帳に書けない回・2 度送らないことを見る。設定ファイルは存在しないパスに向け、実物を読まない。
 
 ps・lsof・orca からの収集は macOS 専用で、形式も非公式なので、テストにしない。10 節の実機確認で代える。
 
