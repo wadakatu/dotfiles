@@ -258,14 +258,15 @@ sched() {
 }
 
 # 規則 session_autostop の値 (off / list / on)。設定ファイル (worktree-gc と共有) は別の bash で source し、規則の値だけを
-# 持ち出す (DRY_RUN や REPO を持ち込まない)。ファイルが無ければ環境変数を読む。worktree-gc と同じ set -euo pipefail で読み、
+# 持ち出す (DRY_RUN や REPO を持ち込まない)。ファイルが在るときはファイルの値だけを使い (環境変数は source の前に消す。
+# 行を消したのに環境に残った on で動かないように)、ファイルが無ければ環境変数を読む。worktree-gc と同じ set -euo pipefail で読み、
 # 途中で失敗する設定 (構文エラー・失敗する行・未設定の変数・最後が偽で終わる行) は off にする (bash の source は失敗した行の
 # 後も、その前の行を読み込んだまま続く。worktree-gc が止まる設定で、こちらだけ on で動かないように)。共有ファイルを読めない回も off。
 autostop_mode() {
     local cfg=${WORKTREE_GC_CONFIG:-$HOME/.config/worktree-gc.env} RULE_session_autostop=${RULE_session_autostop-}
     [ "$ledger_ok" = 1 ] || { echo off; return 0; }
     if [ -f "$cfg" ] && ! RULE_session_autostop=$("$BASH" -euo pipefail -c \
-        '. "$1" >/dev/null 2>&1; printf %s "${RULE_session_autostop-}"' _ "$cfg" 2>/dev/null); then
+        'unset RULE_session_autostop; . "$1" >/dev/null 2>&1; printf %s "${RULE_session_autostop-}"' _ "$cfg" 2>/dev/null); then
         log "WARN: $cfg を読めない。session_autostop は off として扱う"
         echo off
         return 0
@@ -307,7 +308,8 @@ scan() {
         "candidates=$n new=$new unreadable=$(jq -s 'map(select(.reason == "unreadable")) | length' <<<"$rows")" \
         "sched_unknown=$(jq -s 'map(select(.reason == "sched-unknown")) | length' <<<"$rows")"
 
-    [ "$mode" != off ] || return 0
+    # 止める処理に進むのは list と on だけ (空や想定外の値で、stop_each の手で打つ経路に落ちないように)。
+    case $mode in list | on) ;; *) return 0 ;; esac
     cands=$(jq -r 'select(.reason == null) | "\(.pid)\t\(.key)"' <<<"$rows")
     [ -n "$cands" ] || return 0
     # 手で打つ scan と DRY_RUN=1 は、stop の DRY_RUN と同じ所 (would stop) で止まる。
@@ -425,6 +427,7 @@ stop() {
 stop_each() { # stop_each <manual|list|on> <行>
     local mode=$1 targets=$2 row pid want reason term agent terms path sid restore lost key rule warned msg
     local sent_log="$STATE_DIR/autostop-sent.tsv"
+    case $mode in manual | list | on) ;; *) log "WARN: stop_each の mode '$mode' は使えない。1 本も止めない"; return 1 ;; esac
     # 共有ファイルが無ければ、何を守るかも、止めたものをどこに残すかも分からないので 1 本も止めない。
     if [ "$ledger_ok" != 1 ]; then
         log "WARN: $(dirname "$self")/cleanup-ledger.sh を読めない。1 本も止めない"
@@ -475,7 +478,8 @@ stop_each() { # stop_each <manual|list|on> <行>
         if [ -n "$want" ] && [ "$want" != "$(jq -r .key <<<"$row")" ]; then log "skip $agent pid=$pid: changed since list"; continue; fi
         key=$(jq -r .key <<<"$row")
         # 鍵から状態の時刻 (最後の欄) を落とした pid:開始時刻 が、同じプロセスの印。手で打つ stop は控えを見ない。
-        if [ "$mode" = on ] && [ -e "$sent_log" ]; then
+        # list も見る (on で送って終わらなかったものは、on に戻しても止めないので、予定にも載せない)。
+        if [ "$mode" != manual ] && [ -e "$sent_log" ]; then
             grep -qxF -- "${key%:*}" "$sent_log" 2>/dev/null
             case $? in
                 0) log "skip $agent pid=$pid: exit-sent"; continue ;;
@@ -514,6 +518,9 @@ stop_each() { # stop_each <manual|list|on> <行>
         [ -n "$sid" ] || restore=": 一覧から選ぶ; $restore"
         rule="idle $(jq -r '.idle_sec / 3600 | floor' <<<"$row")h >= $(jq -r '.threshold_h' <<<"$row")h"
         [ "$(jq -r '.pressure // 0' <<<"$row")" -ge 2 ] && rule="$rule (memory pressure WARN)"
+        # on の巡回は、送ってから台帳に書くまで最大 20 秒待つ。その間に巡回が止まっても戻し方が残るよう、先にログに書く。
+        # log は date を呼ぶので、(a)・(b) の確認より前に置く (確認の後は外部コマンドを挟まずに送る)。
+        if [ "$mode" = on ] && [ "${DRY_RUN:-0}" != 1 ]; then log "送る予定 $agent pid=$pid 戻し方 $restore"; fi
         # 判定の後に始まったターンを拾うため、送る直前に (a) 記録の読み直し、(b) 入力欄の順に続けて確かめる。
         # (a) 判定のときと同じく idle で、状態の時刻も判定のときのまま (鍵の最後の欄。lstart にも : が入るので最後を取る)。
         if [ "$agent" = claude ]; then

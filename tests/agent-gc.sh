@@ -705,6 +705,7 @@ check "通知が 1 本" notified_n 1
 check "通知に「止めた」" grep -qF '止めた' "$FAKE/notified"
 check "通知に stop --listed が無い" no grep -qF 'stop --listed' "$FAKE/notified"
 check "控えに 1 行" [ "$(grep -c . "$sentlog")" = 1 ]
+check "送る前にログに戻し方" grep -qF '送る予定 claude pid=101 戻し方 cd /w/a && claude --resume SID-1' "$LOG"
 
 reset "auto-manual-scan: --auto の無い scan は、on でも list でも would stop で止まる"
 proc 101 claude /w/a "" SID-1
@@ -737,6 +738,13 @@ auto on
 check "/exit を送らない" sent_none
 check "台帳に書かない" ledger_lines 0
 check "ログに理由" grep -qF 'pid=101: 控え' "$LOG"
+
+reset "auto-list-skips-sent: 送り済みのプロセスは list の予定にも載せない"
+proc 101 claude /w/a "" SID-1
+mkdir -p "$STATE_ROOT/agent-gc" && echo "101:${lstart// /_}" >"$sentlog"
+auto list
+check "plan-session を書かない" ledger_lines 0
+check "ログに exit-sent" grep -qF 'pid=101: exit-sent' "$LOG"
 
 reset "auto-on-sent-unreadable: 控えが在るのに読めなければ送らない"
 proc 101 claude /w/a "" SID-1
@@ -831,6 +839,18 @@ WORKTREE_GC_CONFIG="$base/cfg/worktree-gc.env" bash "$script" scan --auto >/dev/
 check "/exit を送らない" sent_none
 check "台帳に plan-session が 1 行 (DRY_RUN を持ち込まない)" [ "$(col 2)" = plan-session ]
 
+reset "auto-config-env-ignored: 設定ファイルが在るときは、環境変数の規則を使わない"
+proc 101 claude /w/a "" SID-1
+mkdir -p "$base/cfg"
+printf '%s\n' 'REPO=/x' >"$base/cfg/worktree-gc.env"
+WORKTREE_GC_CONFIG="$base/cfg/worktree-gc.env" RULE_session_autostop=on bash "$script" scan --auto >/dev/null 2>&1
+check "規則の行が無ければ off (送らない)" sent_none
+check "候補の通知が出る (off の経路)" grep -qF '止める候補 1 本' "$FAKE/notified"
+printf '%s\n' 'RULE_session_autostop=list' >"$base/cfg/worktree-gc.env"
+WORKTREE_GC_CONFIG="$base/cfg/worktree-gc.env" RULE_session_autostop=on bash "$script" scan --auto >/dev/null 2>&1
+check "ファイルが list なら list (送らない)" sent_none
+check "ファイルが list なら plan-session" [ "$(col 2)" = plan-session ]
+
 reset "auto-config-and-list: 途中の [ … ] && X=1 は失敗にならない (worktree-gc の set -e と同じ)"
 proc 101 claude /w/a "" SID-1
 mkdir -p "$base/cfg"
@@ -873,11 +893,24 @@ RULE_session_autostop=on bash "$base/alone-auto/agent-gc.sh" scan --auto >/dev/n
 check "/exit を送らない" sent_none
 check "候補の通知が出る (off の経路)" grep -qF '止める候補 1 本' "$FAKE/notified"
 
+reset "auto-mode-unexpected: 規則の値が list・on のどれでもなければ止める処理に進まない"
+mkdir -p "$base/norule"
+cp "$script" "$base/norule/agent-gc.sh"
+# 共有ファイルから rule_mode の定義だけを落とす (途中で切れた写し)。autostop_mode は空を返す。
+awk '/^rule_mode\(\) /{skip = 1} !skip {print} skip && /^}/{skip = 0}' "$(dirname "$script")/cleanup-ledger.sh" >"$base/norule/cleanup-ledger.sh"
+check "rule_mode を落とした" no grep -q '^rule_mode()' "$base/norule/cleanup-ledger.sh"
+proc 101 claude /w/a "" SID-1
+RULE_session_autostop=on bash "$base/norule/agent-gc.sh" scan --auto >/dev/null 2>&1
+check "/exit を送らない" sent_none
+check "台帳に書かない" ledger_lines 0
+check "scan は本体に入らない (本体の入口の守りに頼らない)" no grep -qF 'stop_each の mode' "$LOG"
+
 reset "manual-stop-unchanged: 控えに在るプロセスにも、手で打つ stop は送る"
 proc 101 claude /w/a "" SID-1
 mkdir -p "$STATE_ROOT/agent-gc" && echo "101:${lstart// /_}" >"$sentlog"
 bash "$script" stop 101 >/dev/null 2>&1
 check "/exit を送る" sent 101
+check "手で打つ stop のログには送る予定を書かない" no grep -qF '送る予定' "$LOG"
 
 [ "$fail" = 0 ] && echo "ok"
 exit "$fail"
