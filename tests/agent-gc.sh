@@ -14,9 +14,10 @@ fail=0
 
 # 状態は全部この下に置かせる。向け忘れると、実際の台帳・ログ・セッションの記録を読み書きする。
 # HOME は替えない (mise の shim の jq が設定を信頼しなくなり、動かなくなる)。
+# 設定ファイルは存在しないパスに向ける (scan が読む。向け忘れると実物の ~/.config/worktree-gc.env の規則で動く)。
 export STATE_ROOT="$base/root" CLEANUP_KEEP="$base/keep" CLAUDE_CONFIG_DIR="$base/claude" \
-    LOG="$base/agent-gc.log" FAKE="$base/fake"
-unset STATE_DIR EXCLUDE_RE DRY_RUN IDLE_H IDLE_WARN_H
+    LOG="$base/agent-gc.log" FAKE="$base/fake" WORKTREE_GC_CONFIG="$base/no-config/worktree-gc.env"
+unset STATE_DIR EXCLUDE_RE DRY_RUN IDLE_H IDLE_WARN_H RULE_session_autostop
 : >"$CLEANUP_KEEP"
 
 # 候補になる材料。各ケースはここから 1 か所だけ変える。
@@ -97,9 +98,10 @@ case "$*" in
     *) echo "n$FAKE/codex/.codex/sessions/2026/rollout-$p.jsonl" ;;
 esac
 EOF
+# worktree ps は 1 本ずつ別の worktree に置き、procs/<pid>/ws があればそれを workspaceStatus にする。
 # terminal list は、on_list があればそれを流してから返す (判定の後に状態が変わったセッションを作る)。
 # send は送った端末を控え、stuck の無いプロセスを終わらせる。終わったプロセスの sessions/<pid>.json は本物と同じく消す
-# (ID を /exit の前に控えていないと、戻し方から ID が落ちる)。
+# (ID を /exit の前に控えていないと、戻し方から ID が落ちる)。on_send があれば、送った後にそれを流す。
 cat >"$base/bin/orca" <<'EOF'
 #!/usr/bin/env bash
 term=""
@@ -107,9 +109,10 @@ for a in "$@"; do [ "${prev:-}" = --terminal ] && term=$a; prev=$a; done
 p=${term#h}
 case "$1 $2" in
     "worktree ps")
-        for d in "$FAKE"/procs/*; do [ -d "$d" ] && echo "${d##*/}"; done |
-            jq -R '{paneKey: ("p" + .), state: "done"}' |
-            jq -s '{result: {truncated: false, worktrees: [{workspaceStatus: "in-review", agents: .}]}}' ;;
+        for d in "$FAKE"/procs/*; do
+            [ -d "$d" ] && jq -n --arg p "p${d##*/}" --arg ws "$(cat "$d/ws" 2>/dev/null || echo in-review)" \
+                '{workspaceStatus: $ws, agents: [{paneKey: $p, state: "done"}]}'
+        done | jq -s '{result: {truncated: false, worktrees: .}}' ;;
     "terminal list")
         [ ! -f "$FAKE/on_list" ] || bash "$FAKE/on_list"
         for d in "$FAKE"/procs/*; do [ -d "$d" ] && jq -n --arg h "h${d##*/}" --arg a "$(cat "$d/comm")" '{handle: $h, agentIdentity: $a}'; done |
@@ -124,6 +127,7 @@ case "$1 $2" in
     "terminal send")
         echo "$term" >>"$FAKE/sent"
         [ -f "$FAKE/procs/$p/stuck" ] || { touch "$FAKE/procs/$p/exited"; rm -f "$CLAUDE_CONFIG_DIR/sessions/$p.json"; }
+        [ ! -f "$FAKE/on_send" ] || bash "$FAKE/on_send"
         echo '{"ok":true}' ;;
     *) exit 1 ;;
 esac
@@ -658,6 +662,196 @@ check "/exit を送らない" sent_none
 # 「リストが無い」の経路でも送らないので、止めた理由をログの文面で見分ける。
 check "ログに理由" grep -qF 'cleanup-ledger.sh を読めない' "$LOG"
 check "judge は今どおり" [ "$(jq -c . <<<"$base_row" | bash "$base/alone/agent-gc.sh" judge | jq -r '.reason // "null"')" = null ]
+
+# ---- scan --auto: 巡回の中で止める (RULE_session_autostop) ----
+# 「送らない」ケースは、規則が効いていた (off のまま素通りしていない) 証拠も 1 つ見る。
+sentlog="$STATE_ROOT/agent-gc/autostop-sent.tsv"
+no() { ! "$@"; }
+sent_n() { [ "$(grep -c . "$FAKE/sent")" = "$1" ]; }
+notified_n() { [ "$(cat "$FAKE/notified" 2>/dev/null | grep -c .)" = "$1" ]; }
+auto() { RULE_session_autostop=$1 bash "$script" scan --auto >/dev/null 2>&1; } # auto <規則の値>
+
+reset "auto-off: 規則が未設定なら送らない"
+proc 101 claude /w/a "" SID-1
+bash "$script" scan --auto >/dev/null 2>&1
+check "/exit を送らない" sent_none
+check "台帳は空" ledger_lines 0
+check "候補の通知が 1 本" notified_n 1
+check "候補の通知の文面" grep -qF '止める候補 1 本' "$FAKE/notified"
+
+reset "auto-list-plans: list は送らず、止める予定を台帳に書く"
+proc 101 claude /w/a "--model opus --prefill https://example.test/p /some-command https://example.test/c" SID-1
+auto list
+check "/exit を送らない" sent_none
+check "台帳に 1 行" ledger_lines 1
+check "種類は plan-session" [ "$(col 2)" = plan-session ]
+check "対象は on と同じ" [ "$(col 3)" = "claude /w/a" ]
+check_restore "戻し方は許可した引数と --resume ID" "$(printf '%s\n' cd /w/a claude --model opus --resume SID-1)"
+check "--prefill も位置引数も戻し方に入らない" absent 'prefill|some-command|example\.test'
+check "戻らないものに /loop" grep -qF '/loop' <<<"$(col 6)"
+check "候補の通知は今どおり" grep -qF '止める候補 1 本' "$FAKE/notified"
+auto list
+check "もう 1 回流しても 1 行" ledger_lines 1
+check "2 回目も送らない" sent_none
+
+reset "auto-on-stops: on は /exit を送り、台帳に残して 1 本知らせる"
+proc 101 claude /w/a "" SID-1
+auto on
+check "/exit を 1 回" sent_n 1
+check "送った先" sent 101
+check "台帳に 1 行" ledger_lines 1
+check "種類は session" [ "$(col 2)" = session ]
+check "通知が 1 本" notified_n 1
+check "通知に「止めた」" grep -qF '止めた' "$FAKE/notified"
+check "通知に stop --listed が無い" no grep -qF 'stop --listed' "$FAKE/notified"
+check "控えに 1 行" [ "$(grep -c . "$sentlog")" = 1 ]
+auto on
+check "終わったプロセスの控えは次の回に消える" [ ! -s "$sentlog" ]
+
+reset "auto-manual-scan: --auto の無い scan は、on でも list でも would stop で止まる"
+proc 101 claude /w/a "" SID-1
+out=$(RULE_session_autostop=on bash "$script" scan 2>/dev/null)
+check "/exit を送らない" sent_none
+check "would stop が出る" grep -qF 'would stop claude pid=101 /w/a' <<<"$out"
+check "台帳は空" ledger_lines 0
+check "控えは空" [ ! -s "$sentlog" ]
+out=$(RULE_session_autostop=list bash "$script" scan 2>/dev/null)
+check "list でも would stop が出る" grep -qF 'would stop claude pid=101 /w/a' <<<"$out"
+check "list でも plan-session を書かない" ledger_lines 0
+check "予定の控えも書かない" [ ! -s "$STATE_ROOT/cleanup-ledger/planned" ]
+
+reset "auto-on-not-twice: /exit の後も終わらないプロセスに 2 度送らない"
+proc 101 claude /w/a "" SID-1
+touch "$FAKE/procs/101/stuck"
+auto on
+auto on
+check "送信は 1 回" sent_n 1
+check "台帳は 1 行" ledger_lines 1
+check "規則に終了は未確認" grep -qF '終了は未確認' <<<"$(col 4)"
+check "通知は 1 本" notified_n 1
+check "通知に終了を確認できない 1 本" grep -qF '終了を確認できない 1 本' "$FAKE/notified"
+check "2 回目のログに exit-sent" grep -qF 'pid=101: exit-sent' "$LOG"
+
+reset "auto-on-sent-unwritable: 控えに書けなければ送らない"
+proc 101 claude /w/a "" SID-1
+mkdir -p "$STATE_ROOT/agent-gc" && : >"$sentlog" && chmod 444 "$sentlog"
+auto on
+check "/exit を送らない" sent_none
+check "台帳に書かない" ledger_lines 0
+check "ログに理由" grep -qF 'pid=101: 控え' "$LOG"
+
+reset "auto-on-ledger-unwritable: 台帳に追記できない回は 1 本も送らない"
+proc 101 claude /w/a "" SID-1
+mkdir -p "$STATE_ROOT" && : >"$STATE_ROOT/cleanup-ledger" # 置き場所がファイルなので、mkdir -p も追記も通らない
+auto on
+auto on
+check "/exit を送らない" sent_none
+check "ログに理由" grep -qF '台帳に書けない' "$LOG"
+check "通知は 1 日 1 回" notified_n 1
+check "通知は台帳の知らせ" grep -qF '台帳' "$FAKE/notified"
+
+reset "auto-on-ledger-fails-after-send: 送った後に台帳に書けなければ、戻し方をログに書いて残りは止めない"
+proc 101 claude /w/a "" SID-1
+proc 102 claude /w/b "" SID-2
+echo 'chmod 444 "$STATE_ROOT/cleanup-ledger/ledger.tsv"' >"$FAKE/on_send"
+auto on
+check "1 本目だけ送る" sent_n 1
+check "1 本目の戻し方がログに出る" grep -qF -- '--resume SID-1' "$LOG"
+check "2 本目には送らない" not_sent 102
+
+reset "auto-on-keep-missing: 「触らない」リストが無ければ送らない"
+proc 101 claude /w/a "" SID-1
+rm -f "$CLEANUP_KEEP"
+auto on
+auto on
+check "/exit を送らない" sent_none
+check "台帳に書かない" ledger_lines 0
+check "通知は 1 日 1 回" notified_n 1
+check "通知はリストの知らせ" grep -qF '「触らない」リスト' "$FAKE/notified"
+
+reset "auto-on-input-not-empty: 入力欄に書きかけがあれば送らない"
+proc 101 claude /w/a "" SID-1
+echo '["❯ あとでこれを", "────"]' >"$FAKE/procs/101/tail"
+auto on
+check "/exit を送らない" sent_none
+check "ログに input not empty" grep -qF 'pid=101: input not empty' "$LOG"
+
+auto_kept() { # auto_kept <理由>: 101 は残し、並べた候補の 102 は止める
+    proc 102 claude /w/b "" SID-2
+    auto on
+    check "101 には送らない" not_sent 101
+    check "102 は止める (規則が効いている)" sent 102
+    check "list の残すものに $1" grep -qF "$(printf '101\tclaude\t100h\t%s' "$1")" <<<"$(bash "$script" list 2>/dev/null)"
+}
+
+reset "auto-on-needs-decision: needs-decision の worktree は送らない"
+proc 101 claude /w/a "" SID-1
+echo needs-decision >"$FAKE/procs/101/ws"
+auto_kept needs-decision
+
+reset "auto-on-waiting: 記録が waiting なら送らない"
+proc 101 claude /w/a "" SID-1
+f="$CLAUDE_CONFIG_DIR/sessions/101.json"
+jq '.status = "waiting"' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
+auto_kept status=waiting
+
+reset "auto-on-bg-shell: 子孫にシェルが居れば送らない"
+proc 101 claude /w/a "" SID-1
+child 300 101 zsh
+auto_kept bg-shell
+
+reset "auto-on-scheduled: 予約を作ったセッションは送らない"
+proc 101 claude /w/a "" SID-1
+tx SID-1 '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"CronCreate","input":{}}]}}'
+auto_kept scheduled
+
+reset "auto-typo: 3 つのどれでもない値は off と同じ"
+proc 101 claude /w/a "" SID-1
+auto yes
+check "/exit を送らない" sent_none
+check "台帳に書かない" ledger_lines 0
+check "候補の通知が出る (off の経路)" grep -qF '止める候補 1 本' "$FAKE/notified"
+check "ログに WARN" grep -qF 'RULE_session_autostop=yes' "$LOG"
+
+reset "auto-config-file: 設定ファイルの規則だけを読み、ほかの変数は持ち込まない"
+proc 101 claude /w/a "" SID-1
+mkdir -p "$base/cfg"
+printf '%s\n' 'RULE_session_autostop=list' 'DRY_RUN=1' 'REPO=/x' >"$base/cfg/worktree-gc.env"
+WORKTREE_GC_CONFIG="$base/cfg/worktree-gc.env" bash "$script" scan --auto >/dev/null 2>&1
+check "/exit を送らない" sent_none
+check "台帳に plan-session が 1 行 (DRY_RUN を持ち込まない)" [ "$(col 2)" = plan-session ]
+
+reset "auto-config-error: 設定ファイルに構文エラーがあれば off と同じ"
+proc 101 claude /w/a "" SID-1
+mkdir -p "$base/cfg"
+# 規則の行をエラーの前に置く (bash は構文エラーの前の行を読み込んだまま、source を続ける)。
+printf '%s\n' 'RULE_session_autostop=on' 'if then fi' >"$base/cfg/worktree-gc.env"
+WORKTREE_GC_CONFIG="$base/cfg/worktree-gc.env" bash "$script" scan --auto >/dev/null 2>&1
+check "/exit を送らない" sent_none
+check "台帳に書かない" ledger_lines 0
+check "候補の通知が出る (off の経路)" grep -qF '止める候補 1 本' "$FAKE/notified"
+
+reset "auto-dry-run: DRY_RUN=1 の scan --auto は would stop で止まる"
+proc 101 claude /w/a "" SID-1
+out=$(DRY_RUN=1 RULE_session_autostop=on bash "$script" scan --auto 2>/dev/null)
+check "/exit を送らない" sent_none
+check "台帳は空" ledger_lines 0
+check "控えは空" [ ! -s "$sentlog" ]
+check "would stop が出る" grep -qF 'would stop claude pid=101 /w/a' <<<"$out"
+
+reset "auto-ledger-lib-missing: 共有ファイルを読めない写しは on でも送らない"
+mkdir -p "$base/alone-auto"
+cp "$script" "$base/alone-auto/agent-gc.sh"
+proc 101 claude /w/a "" SID-1
+RULE_session_autostop=on bash "$base/alone-auto/agent-gc.sh" scan --auto >/dev/null 2>&1
+check "/exit を送らない" sent_none
+check "候補の通知が出る (off の経路)" grep -qF '止める候補 1 本' "$FAKE/notified"
+
+reset "manual-stop-unchanged: 控えに在るプロセスにも、手で打つ stop は送る"
+proc 101 claude /w/a "" SID-1
+mkdir -p "$STATE_ROOT/agent-gc" && echo "101:${lstart// /_}" >"$sentlog"
+bash "$script" stop 101 >/dev/null 2>&1
+check "/exit を送る" sent 101
 
 [ "$fail" = 0 ] && echo "ok"
 exit "$fail"
