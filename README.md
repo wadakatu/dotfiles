@@ -49,7 +49,7 @@ Nix由来のパッケージと設定は `flake.lock` で固定する。Homebrew 
 │   │   ├── usage-report.py # 直近 N 日のトークン消費を API 定価換算で集計 (python3 で直接実行)
 │   │   ├── friction-report.py # N 日間の空振り・摩擦 (拒否、日本語を含まない応答、Bash の失敗、compaction など) を数える
 │   │   │                   # 設定を変える前後の比較用。--until で期間を固定、--self-check で判定の自己チェック
-│   │   ├── agents/       # エージェント定義: orchestrator
+│   │   ├── agents/       # エージェント定義: orchestrator Explore
 │   │   ├── skills/       # Claude Code だけ: catch-up issue-queue issue-worker review-pr-comments
 │   │   └── hooks/        # branch-guard.sh question-guard.sh session-marker.sh herdr-agent-state.sh
 │   └── codex/
