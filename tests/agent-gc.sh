@@ -738,7 +738,8 @@ proc 101 claude /w/a "" SID-1
 touch "$FAKE/send_fail"
 auto on
 check "台帳に 1 行" ledger_lines 1
-check "規則に送信エラーの印" grep -qF '/exit の送信がエラー・届いたかは不明' <<<"$(col 4)"
+check "規則に送信エラーの印" grep -qF '(/exit の送信がエラー・終了は未確認)' <<<"$(col 4)"
+check "規則に送信済みと書かない" no grep -qF '送信済み' <<<"$(col 4)"
 check "通知に終了を確認できない 1 本" grep -qF '終了を確認できない 1 本' "$FAKE/notified"
 auto on
 check "次の巡回は送らない" sent_n 1
@@ -885,6 +886,24 @@ proc 101 claude /w/a "" SID-1
 mkdir -p "$base/cfg"
 printf '%s\n' 'RULE_session_autostop=on' "CLEANUP_KEEP=$CLEANUP_KEEP" >"$base/cfg/worktree-gc.env"
 WORKTREE_GC_CONFIG="$base/cfg/worktree-gc.env" bash "$script" scan --auto >/dev/null 2>&1
+check "/exit を送る" sent 101
+
+reset "auto-config-keep-emptied: 設定ファイルが CLEANUP_KEEP を空にして既定に戻すなら、環境のリストと比べて off"
+proc 101 claude /w/a "" SID-1
+mkdir -p "$base/cfg"
+: >"$base/tmp-keep" # agent-gc はこのリストを読める (送らない理由が「リストが無い」にならないように)
+printf '%s\n' 'RULE_session_autostop=on' 'CLEANUP_KEEP=' >"$base/cfg/worktree-gc.env"
+WORKTREE_GC_CONFIG="$base/cfg/worktree-gc.env" CLEANUP_KEEP="$base/tmp-keep" bash "$script" scan --auto >/dev/null 2>&1
+check "/exit を送らない" sent_none
+check "ログに WARN" grep -qF "「触らない」リスト $base/tmp-keep と違う" "$LOG"
+check "候補の通知が出る (off の経路)" grep -qF '止める候補 1 本' "$FAKE/notified"
+
+reset "auto-config-keep-untouched: 設定ファイルが CLEANUP_KEEP に触れなければ、環境のリストのまま on"
+proc 101 claude /w/a "" SID-1
+mkdir -p "$base/cfg"
+: >"$base/tmp-keep"
+printf '%s\n' 'RULE_session_autostop=on' >"$base/cfg/worktree-gc.env"
+WORKTREE_GC_CONFIG="$base/cfg/worktree-gc.env" CLEANUP_KEEP="$base/tmp-keep" bash "$script" scan --auto >/dev/null 2>&1
 check "/exit を送る" sent 101
 
 config_unreadable() { # config_unreadable <説明> <設定のパスを作るコマンド>: 環境が on でも off
