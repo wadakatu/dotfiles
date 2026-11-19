@@ -102,6 +102,7 @@ EOF
 # terminal list は、on_list があればそれを流してから返す (判定の後に状態が変わったセッションを作る)。
 # send は送った端末を控え、stuck の無いプロセスを終わらせる。終わったプロセスの sessions/<pid>.json は本物と同じく消す
 # (ID を /exit の前に控えていないと、戻し方から ID が落ちる)。on_send があれば、送った後にそれを流す。
+# send_fail があれば、送った端末を控えてから、プロセスを終わらせずに失敗を返す。
 cat >"$base/bin/orca" <<'EOF'
 #!/usr/bin/env bash
 term=""
@@ -126,6 +127,7 @@ case "$1 $2" in
         jq -n --argjson t "$tail" '{result: {terminal: {source: "screen", draft: "", tail: $t}}}' ;;
     "terminal send")
         echo "$term" >>"$FAKE/sent"
+        [ ! -f "$FAKE/send_fail" ] || exit 1
         [ -f "$FAKE/procs/$p/stuck" ] || { touch "$FAKE/procs/$p/exited"; rm -f "$CLAUDE_CONFIG_DIR/sessions/$p.json"; }
         [ ! -f "$FAKE/on_send" ] || bash "$FAKE/on_send"
         echo '{"ok":true}' ;;
@@ -731,6 +733,24 @@ check "通知は 1 本" notified_n 1
 check "通知に終了を確認できない 1 本" grep -qF '終了を確認できない 1 本' "$FAKE/notified"
 check "2 回目のログに exit-sent" grep -qF 'pid=101: exit-sent' "$LOG"
 
+reset "auto-on-send-error: on の送信がエラーでも、台帳に印を付けて残し、通知に数える"
+proc 101 claude /w/a "" SID-1
+touch "$FAKE/send_fail"
+auto on
+check "台帳に 1 行" ledger_lines 1
+check "規則に送信エラーの印" grep -qF '/exit の送信がエラー・届いたかは不明' <<<"$(col 4)"
+check "通知に終了を確認できない 1 本" grep -qF '終了を確認できない 1 本' "$FAKE/notified"
+auto on
+check "次の巡回は送らない" sent_n 1
+check "次の巡回のログに exit-sent" grep -qF 'pid=101: exit-sent' "$LOG"
+
+reset "manual-send-error: 手で打つ stop の送信エラーは、今のまま台帳に書かない"
+proc 101 claude /w/a "" SID-1
+touch "$FAKE/send_fail"
+bash "$script" stop 101 >/dev/null 2>&1
+check "台帳に書かない" ledger_lines 0
+check "ログに failed send" grep -qF 'pid=101: send' "$LOG"
+
 reset "auto-on-sent-unwritable: 控えに書けなければ送らない"
 proc 101 claude /w/a "" SID-1
 mkdir -p "$STATE_ROOT/agent-gc" && : >"$sentlog" && chmod 444 "$sentlog"
@@ -850,6 +870,36 @@ printf '%s\n' 'RULE_session_autostop=list' >"$base/cfg/worktree-gc.env"
 WORKTREE_GC_CONFIG="$base/cfg/worktree-gc.env" RULE_session_autostop=on bash "$script" scan --auto >/dev/null 2>&1
 check "ファイルが list なら list (送らない)" sent_none
 check "ファイルが list なら plan-session" [ "$(col 2)" = plan-session ]
+
+reset "auto-config-keep-moved: 設定ファイルが「触らない」リストの場所を変えていれば off"
+proc 101 claude /w/a "" SID-1
+mkdir -p "$base/cfg"
+printf '%s\n' 'RULE_session_autostop=on' "CLEANUP_KEEP=$base/other-keep" >"$base/cfg/worktree-gc.env"
+WORKTREE_GC_CONFIG="$base/cfg/worktree-gc.env" bash "$script" scan --auto >/dev/null 2>&1
+check "/exit を送らない" sent_none
+check "ログに WARN" grep -qF "CLEANUP_KEEP=$base/other-keep" "$LOG"
+check "候補の通知が出る (off の経路)" grep -qF '止める候補 1 本' "$FAKE/notified"
+
+reset "auto-config-keep-same: 設定ファイルの CLEANUP_KEEP が同じ場所なら on のまま"
+proc 101 claude /w/a "" SID-1
+mkdir -p "$base/cfg"
+printf '%s\n' 'RULE_session_autostop=on' "CLEANUP_KEEP=$CLEANUP_KEEP" >"$base/cfg/worktree-gc.env"
+WORKTREE_GC_CONFIG="$base/cfg/worktree-gc.env" bash "$script" scan --auto >/dev/null 2>&1
+check "/exit を送る" sent 101
+
+config_unreadable() { # config_unreadable <説明> <設定のパスを作るコマンド>: 環境が on でも off
+    reset "auto-config-unreadable: 設定のパスが$1なら、環境変数に戻らず off"
+    proc 101 claude /w/a "" SID-1
+    rm -rf "$base/cfg"
+    mkdir -p "$base/cfg"
+    eval "$2"
+    WORKTREE_GC_CONFIG="$base/cfg/worktree-gc.env" RULE_session_autostop=on bash "$script" scan --auto >/dev/null 2>&1
+    check "/exit を送らない" sent_none
+    check "ログに WARN" grep -qF '読めない。session_autostop は off' "$LOG"
+    rm -rf "$base/cfg" # 後ろのケースは $base/cfg/worktree-gc.env をファイルとして書く
+}
+config_unreadable "リンク先の無い symlink" 'ln -s "$base/cfg/gone.env" "$base/cfg/worktree-gc.env"'
+config_unreadable "ディレクトリ" 'mkdir "$base/cfg/worktree-gc.env"'
 
 reset "auto-config-and-list: 途中の [ … ] && X=1 は失敗にならない (worktree-gc の set -e と同じ)"
 proc 101 claude /w/a "" SID-1
