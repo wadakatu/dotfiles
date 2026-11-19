@@ -616,6 +616,7 @@ Claude の行の「戻らないもの」には、`--resume` で戻らない裏�
 巡回の中で止めるのは、`~/.config/worktree-gc.env` の `RULE_session_autostop=off|list|on`（上の規則のスイッチと同じ。無ければ環境変数、未設定は off）。
 `list` は何も送らず、止める予定を台帳に `plan-session` で書く（候補の通知は今どおり）。`on` は `agent-gc stop --listed` と同じ確かめ方で `/exit` を送り、
 止めた回に「放置セッション <n> 本を止めた」の通知を 1 本出す（候補の通知は出さない）。`on` は同じプロセスに 2 度送らず（`autostop-sent.tsv`）、台帳に書けない回は 1 本も止めない。
+`CLEANUP_KEEP` を変えるなら、両方のジョブに同じ値が渡るようにする（`worktree-gc.env` だけで変えると、自動停止は動かない。ログに WARN）。
 送る・台帳に書くのは LaunchAgent の `scan --auto` だけで、手で打つ `agent-gc scan` と `DRY_RUN=1` は `would stop` を出すだけ。
 有効にするときは、まず `list` で 1 日置いて `plan-session` の行を見る。止めてほしくないもの（予約タスクを持つセッションなど）は「触らない」リストに cwd を足す。
 `on` にした最初の巡回で、候補の全部が続けて止まる。やめるときは行を消すか `off` にする（rebuild 不要）。

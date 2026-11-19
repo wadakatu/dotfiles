@@ -262,14 +262,26 @@ sched() {
 # 行を消したのに環境に残った on で動かないように)、ファイルが無ければ環境変数を読む。worktree-gc と同じ set -euo pipefail で読み、
 # 途中で失敗する設定 (構文エラー・失敗する行・未設定の変数・最後が偽で終わる行) は off にする (bash の source は失敗した行の
 # 後も、その前の行を読み込んだまま続く。worktree-gc が止まる設定で、こちらだけ on で動かないように)。共有ファイルを読めない回も off。
+# パスに何か在れば (リンク先の無い symlink・ディレクトリも) ファイルとして読み、読めなければ off (環境変数に戻らない)。
+# 「触らない」リストの場所 (CLEANUP_KEEP) も持ち帰る。worktree-gc は設定ファイルを読んでから共有ファイルを読むので、
+# 設定ファイルの CLEANUP_KEEP がそちらでは効く。こちらが別のリストを読んでいるなら、守るものが食い違うので off にする
+# (リストは合わせにいかない。手で打つ stop は今のまま)。値はタブで区切って持ち帰る。
 autostop_mode() {
-    local cfg=${WORKTREE_GC_CONFIG:-$HOME/.config/worktree-gc.env} RULE_session_autostop=${RULE_session_autostop-}
+    local cfg=${WORKTREE_GC_CONFIG:-$HOME/.config/worktree-gc.env} RULE_session_autostop=${RULE_session_autostop-} out keep
     [ "$ledger_ok" = 1 ] || { echo off; return 0; }
-    if [ -f "$cfg" ] && ! RULE_session_autostop=$("$BASH" -euo pipefail -c \
-        'unset RULE_session_autostop; . "$1" >/dev/null 2>&1; printf %s "${RULE_session_autostop-}"' _ "$cfg" 2>/dev/null); then
-        log "WARN: $cfg を読めない。session_autostop は off として扱う"
-        echo off
-        return 0
+    if [ -e "$cfg" ] || [ -L "$cfg" ]; then
+        if ! out=$("$BASH" -euo pipefail -c 'unset RULE_session_autostop CLEANUP_KEEP; . "$1" >/dev/null 2>&1
+            printf "%s\t%s" "${RULE_session_autostop-}" "${CLEANUP_KEEP-}"' _ "$cfg" 2>/dev/null); then
+            log "WARN: $cfg を読めない。session_autostop は off として扱う"
+            echo off
+            return 0
+        fi
+        RULE_session_autostop=${out%%$'\t'*} keep=${out#*$'\t'}
+        if [ -n "$keep" ] && [ "$keep" != "$CLEANUP_KEEP" ]; then
+            log "WARN: $cfg の CLEANUP_KEEP=$keep が agent-gc の「触らない」リスト $CLEANUP_KEEP と違う。session_autostop は off として扱う"
+            echo off
+            return 0
+        fi
     fi
     rule_mode session_autostop
 }
@@ -548,7 +560,12 @@ stop_each() { # stop_each <manual|list|on> <行>
         if [ "$mode" = on ] && ! { printf '%s\n' "${key%:*}" >>"$sent_log"; } 2>/dev/null; then
             log "skip $agent pid=$pid: 控え $sent_log に書けない"; continue
         fi
-        orca terminal send --terminal "$term" --text /exit --enter --json >/dev/null 2>&1 || { log "failed $agent pid=$pid: send"; continue; }
+        if ! orca terminal send --terminal "$term" --text /exit --enter --json >/dev/null 2>&1; then
+            log "failed $agent pid=$pid: send"
+            # 巡回は控えに印を残したので、以後は exit-sent で飛ばす。届いていれば終わるので、終了を待って台帳と通知に載せる。
+            [ "$mode" = on ] || continue
+            rule="$rule (/exit の送信がエラー・届いたかは不明)"
+        fi
         local lstart i
         lstart=$(jq -r .lstart <<<"$row")
         for i in $(seq 20); do
