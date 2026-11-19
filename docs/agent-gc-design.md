@@ -93,7 +93,7 @@ launchd（StartInterval 600）→ agent-gc-launcher scan --auto（origin/main �
   - 末尾が `task_complete` でないものがある：`status=busy`。
 - 承認待ちは実測できていない。ただし、承認待ちは `task_complete` の前なので、`busy` に入る。
 - 書き込みは、キューに積んでから遅れて行われる。そのため、ディスクの末尾が今の状態とずれることはありうる。
-  - それでも、閾値（6h 以上）と比べれば、そのずれは無視できる。
+  - それでも、閾値（12h 以上）と比べれば、そのずれは無視できる。
   - 止める直前には、端末の入力欄が空であることも確かめる（5 節）。
 
 **Orca**
@@ -302,7 +302,7 @@ ps・lsof・orca からの収集は macOS 専用で、形式も非公式なの�
 
 1. 実装して、`bash tests/agent-gc.sh` と `nix flake check` を通す。新しい .nix は `git add` する。
 2. 手元で `home/scripts/agent-gc.sh list` を打ち、今日の実測と見比べる。
-   - 6h 閾値で、十数本が候補になる。
+   - memory pressure が WARN 以上なら 12h、そうでなければ 24h を境に候補が分かれる（導入時は閾値が 6h で、十数本が候補になった）。
    - working が古いまま残る 2 本と、needs-decision のものは keep になる。
 3. ユーザーが選んだ 1 本で、`DRY_RUN=1 … stop <pid>` を打ってから `… stop <pid>` を打ち、次を確かめる。
    - `/exit` で終わり、再開の案内が出るか。
