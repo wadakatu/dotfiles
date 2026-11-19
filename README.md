@@ -522,7 +522,7 @@ IGNORED_OK="node_modules"             # 一緒に消えてよい無視される�
 規則 `all_repos`（`RULE_all_repos`）は、上の節が見ない worktree を一覧に出し、フォルダの無い登録を外す。回るのは Orca の一覧の本体（`orca worktree list` の `isMainWorktree` で、`hostId` が `local` の行だけ。
 `orca` コマンドが無ければこの分は無い）と `GC_REPOS` のリポ。同じリポ（`git rev-parse --path-format=absolute --git-common-dir` が同じ。symlink・末尾の `/`・linked worktree のパスで書いても同じ）は 1 回だけ回り、
 `$REPO` と同じリポは回らない。読めないパスと、作業ツリーの中のフォルダ（`git rev-parse --show-cdup` が空でない。`.git` の中のフォルダはそのリポとして回る）は `WARN: all_repos: <パス> …` を出して飛ばす。`GC_REPOS` は空白で割り、`*` も `~` も展開しない（空白を含むパスは書けない。`$HOME/…` で書く）。
-Orca に届かない回と、`orca worktree list` が取れない・打ち切られた（`ok` でない、`truncated`）回は節ごと見送る。「Orca の一覧に在る」は、行のパスとその実体パスの両方で、大文字小文字を区別せずに比べる。パスが文字列でない・改行を含む行は使わない。どちらも空なら `all_repos: 回るリポが無い` を出す。`off` では回らない。`REPO` が無い回も動かない。リポを自動では探さない。
+Orca に届かない回と、`orca worktree list` が取れない・打ち切られた（`ok` でない、`truncated`、`worktrees` に object でない要素が在る）回は節ごと見送る。「Orca の一覧に在る」は、行のパスとその実体パスの両方で、大文字小文字を区別せずに比べる。パスが文字列でない・改行を含む行は使わない。どちらも空なら `all_repos: 回るリポが無い` を出す。`off` では回らない。`REPO` が無い回も動かない。リポを自動では探さない。
 `git worktree list --porcelain` の 1 行目の本体が、候補と同じ共通の `.git` を指さないリポ（本体のパスに改行が在る、など）は `WARN` を出して飛ばす。
 
 - 一覧（`list` と `on`）: 本体・Orca の一覧に在るもの・規則 `scratch_worktrees` が見たもの・フォルダの無い登録を除いた linked worktree（`.claude/worktrees/` の下も）を
@@ -541,12 +541,12 @@ Orca に届かない回と、`orca worktree list` が取れない・打ち切ら
   - HEAD のブランチが `refs/heads/` の下でない、または読めない。
   - フォルダが残っている（理由が言うのは `<パス>/.git` が無いことだけ。直すのに要る index と reflog を消さない）か、無いと確かめられない
     （`LC_ALL=C ls -d` の失敗が `No such file or directory` でない。親を検索できないときなど）。
-  - パスか、prune が消す管理ディレクトリ（`<共通の .git>/worktrees/<名前>`。本体を書いた行も当たる）が「触らない」リストに当たる。パスが Orca の一覧に当たる（Orca がまだ持つ登録は Orca で消す）。
+  - パスか、prune が消す管理ディレクトリ（`<共通の .git>/worktrees/<名前>`。本体を書いた行も当たる）が「触らない」リストに当たる。パスが Orca の一覧に当たる（Orca がまだ持つ登録は Orca で消す）。パスが `~/.herdr/worktrees/` の下（herdr で消す。上の自動削除しない決まりと同じ）。
 
   `MIN_AGE_HOURS` が整数でない・9 桁を超える・期限が 1970 年より前（git は負の時刻を今に近く読む）なら、節ごと見送る。
 - `list` では `PLAN  <パス> (all_repos: フォルダが無い)` と台帳の `plan-prune`（鍵は `all_repos <本体> <パス>`）。`on` では `git worktree prune --expire …` を流し、
   管理ディレクトリ（`<共通の .git>/worktrees/<名前>`）が消えた登録ごとに台帳の `worktree-prune` を書く。戻し方は `cd <本体> && git worktree add <パス> <ブランチ>`
-  （detached は `git worktree add --detach <パス> <SHA>`）、戻らないものは reflog・index・`refs/worktree/`。
+  （detached は `git worktree add --detach <パス> <SHA>`）、戻らないものは reflog・index・`refs/worktree/`・worktree 固有の設定（`config.worktree`）・sparse-checkout の定義。
   dry-run の後にフォルダが消えた、`index` の古い登録は、確認なしで prune に外される（防げない。1 つずつ外す `git worktree remove` は、フォルダが戻っていると中身ごと消すので使わない）。
   prune の前後の管理ディレクトリを比べ、確かめていない登録が消えたら `WARN: all_repos: 確かめていない登録が prune で外れた: …` を出し、通知を 1 日 1 回出す。
 

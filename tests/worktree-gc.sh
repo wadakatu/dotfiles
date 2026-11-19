@@ -2095,6 +2095,7 @@ ar_gc on
 check "登録が外れる" eval '! held2 g'
 check "台帳は worktree-prune の 1 行" eval 'rows 1 && kind_rows worktree-prune 1'
 check "規則" col_has "$T/g" 4 "all_repos: フォルダが無い"
+check "戻らないものに worktree 固有の設定" col_has "$T/g" 6 "worktree 固有の設定 (config.worktree)・sparse-checkout の定義"
 check "ログに pruned の行" logged "pruned $T/g"
 check "通知に 1 件" notified_once "worktree-prune 1 件"
 check "戻し方が貼って通る" restores_parse
@@ -2337,6 +2338,23 @@ ar_gc on
 check "外れない" held2 g
 check "LIST が出ない" lists 0
 check "理由がログに出る" logged "WARN: all_repos: orca worktree list を取れない、または打ち切られた"
+
+ar_case all-repos-orca-non-object # 一覧の途中に object でない要素が在ると、jq の .[].path はそこで止まり、後ろの行を「一覧に無い」と読む
+git -C "$T/r2" worktree add -q -b manual "$T/manual" origin/main
+orca_add "$T/g"
+jq '.result.worktrees |= [.[0], "broken", .[1:][]]' "$T/list.json" >"$T/list.tmp" && mv "$T/list.tmp" "$T/list.json"
+ar_gc on GC_REPOS="$T/r2" # 本体の候補の jq も止まるので、GC_REPOS で回らせる
+check "外れない" held2 g
+check "LIST が出ない" lists 0
+check "理由がログに出る" logged "WARN: all_repos: orca worktree list を取れない、または打ち切られた"
+
+ar_case all-repos-herdr # herdr の下の登録は herdr が workspace の状態を持つので、フォルダが無くても git の側だけ外さない (mark_stale と同じ)
+mkdir -p "$T/.herdr/worktrees"
+gone_wt "$T/r2" "$T/.herdr/worktrees/hw"
+ar_gc on HOME="$T"
+check "外れない" held2 hw
+check "同じリポの基準の登録も外れない" held2 g
+check "理由がログに出る" logged "keep  $T/r2 (all_repos: prune 見送り: $T/.herdr/worktrees/hw が herdr の下: herdr で消す)"
 
 ar_case all-repos-orca-other-host # 別のホストの本体の行は、同じパスのローカルのリポを回る根拠にしない
 git -C "$T/r2" worktree add -q -b manual "$T/manual" origin/main

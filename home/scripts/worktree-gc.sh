@@ -176,15 +176,14 @@ stack_volumes() {
 # ただし ~/.herdr/worktrees/ 配下は herdr が自前で workspace 状態を持っており、
 # `git worktree remove` を直接叩くとその状態と食い違う。herdr は Nix 管理外で
 # 自己更新するため launchd から CLI を叩くのも壊れやすい。ここは候補として
-# ログに出すだけに留め、削除はユーザーが herdr 経由で行う。
+# ログに出すだけに留め、削除はユーザーが herdr 経由で行う。all_repos の prune も同じ理由で見送る。
+in_herdr() { case "$1" in "$HOME/.herdr/worktrees/"*) return 0 ;; esac; return 1; }
 mark_stale() { # mark_stale <worktree> <理由> [<本体> (既定は $REPO)]
     local wt="$1" why="$2"
-    case "$wt" in
-        "$HOME/.herdr/worktrees/"*)
-            log "keep  $wt ($why / herdr 管理下のため自動削除しない → herdr worktree remove --workspace <ID> --force)"
-            return 0
-            ;;
-    esac
+    if in_herdr "$wt"; then
+        log "keep  $wt ($why / herdr 管理下のため自動削除しない → herdr worktree remove --workspace <ID> --force)"
+        return 0
+    fi
     log "STALE $wt ($why$(ignored_note "$wt"))"
     # 規則は台帳に書くので、同じ添字で並べて持つ (bash 3.2 には連想配列が無い)。
     removable+=("$wt")
@@ -1064,7 +1063,7 @@ if prune_safe "$REPO"; then run git -C "$REPO" worktree prune; fi
 # git が「無い」を確かめ直すので、フォルダが戻った登録は外さない)。防げないので、prune の前後の管理ディレクトリを比べ、控えに無いものが
 # 消えたら WARN と 1 日 1 回の通知で知らせる。1 つずつ外す git worktree remove は、フォルダが戻っていると中身ごと消すので使わない。
 all_repos_prune() { # all_repos_prune <本体> <共通の .git>
-    local main="$1" common="$2" dry line why wt ref how i exp out mark n before planned hit=0 lost="その worktree の reflog・index・refs/worktree/"
+    local main="$1" common="$2" dry line why wt ref how i exp out mark n before planned hit=0 lost="その worktree の reflog・index・refs/worktree/・worktree 固有の設定 (config.worktree)・sparse-checkout の定義"
     # 先頭ゼロを八進数に読まない (is_uint を通っているので数字だけ)。
     exp="@$(($(date +%s) - 10#$MIN_AGE_HOURS * 3600)) +0000"
     # 外す登録の名前・パス・戻し方。パスにタブや改行が在っても割れないよう、添字を揃えた配列で持つ (bash 3.2 には連想配列が無い)。
@@ -1109,6 +1108,8 @@ all_repos_prune() { # all_repos_prune <本体> <共通の .git>
         elif in_orca "$wt"; then
             # Orca がまだ持っている登録を git の側だけ外すと、Orca のカードがどうなるか分からない。
             why="$wt が Orca の一覧に在る: Orca で消す"
+        elif in_herdr "$wt"; then
+            why="$wt が herdr の下: herdr で消す"
         elif ref=$(git -C "$main" symbolic-ref -q "worktrees/$pl_name/HEAD" 2>/dev/null); then
             # --short は同名のタグが在ると heads/<名前> を返し、戻し方が detached で戻るので、完全な ref から作る。
             # コミットの無いブランチ (git worktree add --orphan) は、台帳の git worktree add <パス> <ブランチ> が通らない。
@@ -1188,8 +1189,9 @@ if [ "$all_mode" = off ]; then
 elif [ "$orca_state" = unknown ]; then
     log "WARN: all_repos: Orca に届かず、Orca の一覧のリポと worktree が分からない。この節は見送る (次回に拾う)"
 elif [ "$orca_state" = ok ] && ! orca_list=$(orca worktree list --json 2>/dev/null |
-    jq -ce 'select(.ok == true and .result.truncated == false) | .result.worktrees | arrays'); then
+    jq -ce 'select(.ok == true and .result.truncated == false) | .result.worktrees | arrays | select(all(.[]; type == "object"))'); then
     # 打ち切られた一覧を読むと、返らなかった Orca の登録を「一覧に無い」と読む (orca_ps と同じ条件)。
+    # object でない要素が在ると、後ろの jq の .[].path がそこで止まり、残りの行が出ない (process substitution なので失敗も見えない)。
     log "WARN: all_repos: orca worktree list を取れない、または打ち切られた。この節は見送る (次回に拾う)"
 # 期限 (今 - MIN_AGE_HOURS 時間) が計算できない値も見送る: 桁が多いと算術があふれ、1970 年より前の負の時刻は git が今に近く読む。
 elif ! is_uint "$MIN_AGE_HOURS" || [ ${#MIN_AGE_HOURS} -gt 9 ] || [ $(($(date +%s) - 10#$MIN_AGE_HOURS * 3600)) -le 0 ] ||
