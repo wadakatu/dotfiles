@@ -1030,12 +1030,19 @@ if prune_safe "$REPO"; then run git -C "$REPO" worktree prune; fi
 # <本体> のフォルダの無い登録を外す (list は予定を書くだけ)。外すのは prune --dry-run -v --expire の行の登録で、prune が実際に外すものと
 # 同じ集合。--expire が比べるのは worktrees/<名前>/index の mtime で、index の無い登録と、gitdir が無い・読めない・空の登録は
 # --expire に関係なく外れる (https://github.com/git/git/blob/v2.54.0/worktree.c#L1001-L1008)。そういう登録 (古さを git が
-# 確かめていない、パスが読めず「触らない」リストに照らせない)、パスが「触らない」リストに当たる登録、読めない行が 1 つでも在るリポは、
-# list でも on でも外さない (prune は登録を選べない)。パスと HEAD は prune の前に控え、外れたかは管理ディレクトリが消えたかで見る。
+# 確かめていない、パスが読めず「触らない」リストに照らせない)、フォルダが残っている登録、パスが「触らない」リストか Orca の一覧に
+# 当たる登録、読めない行が 1 つでも在るリポは、list でも on でも外さない (prune は登録を選べない)。パスと HEAD は prune の前に控え、
+# 外れたかは管理ディレクトリが消えたかで見る。
+# 期限は git を呼ぶたびに計算し直されない絶対時刻 (@<epoch 秒> +0000) にして、dry-run と prune に同じ値を渡す。
+# ponytail: dry-run の後にフォルダが消えた、index の古い登録は、同じ期限でも確認なしで prune に外されうる (台帳にも載らない)。
+# 閉じるなら、prune の後に消えた管理ディレクトリを全部見て、控えに無いものを WARN にする。
 all_repos_prune() { # all_repos_prune <本体> <共通の .git>
-    local main="$1" common="$2" dry line why wt ref how todo="" lost="その worktree の reflog・index・refs/worktree/"
+    local main="$1" common="$2" dry line why wt ref how i exp lost="その worktree の reflog・index・refs/worktree/"
+    exp="@$(($(date +%s) - MIN_AGE_HOURS * 3600)) +0000"
+    # 外す登録の名前・パス・戻し方。パスにタブや改行が在っても割れないよう、添字を揃えた配列で持つ (bash 3.2 には連想配列が無い)。
+    ar_names=() ar_wts=() ar_hows=()
     prune_safe "$main" || return 0
-    if ! dry=$(LC_ALL=C git -C "$main" worktree prune --dry-run -v --expire "${MIN_AGE_HOURS}.hours.ago" 2>&1); then
+    if ! dry=$(LC_ALL=C git -C "$main" worktree prune --dry-run -v --expire "$exp" 2>&1); then
         log "keep  $main (all_repos: prune 見送り: git worktree prune --dry-run --expire が失敗)"
         return 0
     fi
@@ -1050,8 +1057,15 @@ all_repos_prune() { # all_repos_prune <本体> <共通の .git>
             why="worktrees/$pl_name に index が無い (古さを git が確かめていない)"
         elif ! wt=$(sed 's#/\.git$##' "$common/worktrees/$pl_name/gitdir" 2>/dev/null) || [ "${wt#/}" = "$wt" ]; then
             why="worktrees/$pl_name の gitdir が絶対パスでない"
+        elif [ -e "$wt" ]; then
+            # 理由が言うのは「<パス>/.git が無い」だけ。フォルダが残っていれば、直すのに要る index と reflog を消さない
+            # (台帳の git worktree add も、空でないフォルダには通らない)。
+            why="$wt が在る (.git だけが無い)"
         elif keep_match "$wt"; then
             why="$wt が「触らない」リスト"
+        elif jq -e --arg p "$wt" 'any(.[]; .path == $p)' >/dev/null 2>&1 <<<"${orca_list:-[]}"; then
+            # Orca がまだ持っている登録を git の側だけ外すと、Orca のカードがどうなるか分からない。
+            why="$wt が Orca の一覧に在る: Orca で消す"
         elif ref=$(git -C "$main" symbolic-ref -q --short "worktrees/$pl_name/HEAD" 2>/dev/null); then
             how="cd $(printf %q "$main") && git worktree add $(printf %q "$wt") $(printf %q "$ref")"
         elif ref=$(git -C "$main" rev-parse --verify -q "worktrees/$pl_name/HEAD" 2>/dev/null); then
@@ -1063,22 +1077,28 @@ all_repos_prune() { # all_repos_prune <本体> <共通の .git>
             log "keep  $main (all_repos: prune 見送り: $why)"
             return 0
         fi
-        todo+="$pl_name"$'\t'"$wt"$'\t'"$how"$'\n'
+        ar_names+=("$pl_name")
+        ar_wts+=("$wt")
+        ar_hows+=("$how")
     done <<<"$dry"
-    [ -n "$todo" ] || return 0
-    if [ "$all_mode" = on ] && ! run git -C "$main" worktree prune --expire "${MIN_AGE_HOURS}.hours.ago"; then
+    # 空の配列の展開は bash 3.2 の set -u で落ちるので、空なら先に戻る。
+    [ ${#ar_names[@]} -gt 0 ] || return 0
+    if [ "$all_mode" = on ] && ! run git -C "$main" worktree prune --expire "$exp"; then
         log "WARN: all_repos: prune 失敗 $main"
         return 0
     fi
-    while IFS=$'\t' read -r line wt how; do
+    i=0
+    while [ "$i" -lt ${#ar_names[@]} ]; do
+        wt=${ar_wts[$i]} how=${ar_hows[$i]}
         if [ "$all_mode" = list ]; then
             ledger_plan "all_repos $main $wt" prune "$wt" "all_repos: フォルダが無い" "$how" "$lost" || log "WARN: 台帳に予定を書けない $CLEANUP_LEDGER"
             log "PLAN  $wt (all_repos: フォルダが無い)"
-        elif [ ! -e "$common/worktrees/$line" ]; then
+        elif [ ! -e "$common/worktrees/${ar_names[$i]}" ]; then
             log "pruned $wt"
             record worktree-prune "$wt" "all_repos: フォルダが無い" "$how" "$lost"
         fi
-    done <<<"${todo%$'\n'}"
+        i=$((i + 1))
+    done
 }
 
 all_mode=$(rule_mode all_repos)
@@ -1106,6 +1126,12 @@ else
         # 同じリポかは共通の .git で比べる (symlink・末尾の /・linked worktree のパスも同じ値になる)。失敗を「worktree 0 本」と読まない。
         if ! common=$(git -C "$p" rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
             log "WARN: all_repos: $p を git のリポとして読めない (存在しない、またはリポでない)。飛ばす"
+            continue
+        fi
+        # リポの中のフォルダも git -C は親を探して成功するので、指定していない親を回さないよう、リポの根でなければ飛ばす
+        # (--show-cdup は、本体の根・linked worktree の根・bare リポで空)。
+        if [ -n "$(git -C "$p" rev-parse --show-cdup 2>/dev/null)" ]; then
+            log "WARN: all_repos: $p はリポの根でない (リポの中のフォルダ)。飛ばす"
             continue
         fi
         # $REPO は上の $REPO の節と prune が見ている。

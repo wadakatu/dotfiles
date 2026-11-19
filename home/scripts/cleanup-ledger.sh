@@ -69,6 +69,22 @@ keep_entries="" keep_loaded=0 keep_error=""
 # agent-gc はセッションを止めるだけで中身は消えないので、source した後で 0 にする。
 keep_ancestors=1
 
+# <絶対パス> の、実在する最も近い祖先を <pwd のコマンド> -P (/bin/pwd か組み込みの pwd) で実体パスに直し、残りの要素をそのまま繋いで出す。
+# まだ無いパス (消えた worktree の登録など) も、symlink を通る祖先 (/tmp → /private/tmp) を実体の形で比べるため。/ は空を出す。
+real_path() { # real_path <pwd のコマンド> <絶対パス>
+    local p=$2 rest="" r
+    while [ "${p%/}" != "$p" ]; do p=${p%/}; done
+    while [ -n "$p" ]; do
+        if r=$(cd "$p" 2>/dev/null && "$1" -P); then
+            printf '%s%s' "${r%/}" "$rest"
+            return 0
+        fi
+        rest="/${p##*/}$rest"
+        p=${p%/*}
+    done
+    printf '%s' "$rest"
+}
+
 # リストを読む。読めなければ 1。途中でファイルが消えても判定が変わらないよう、1 回の実行で 1 度だけ呼ぶ。
 # 読めた回は行数を、読めない行がある回はその行番号を (中身は出さない) 呼び側の log に出す。
 # 実体パスは /bin/pwd -P で取る。bash 組み込みの pwd -P は打った綴りのまま返すので、大文字小文字を区別しない
@@ -104,10 +120,9 @@ keep_load() {
                 while [ "${l%/}" != "$l" ]; do l=${l%/}; done
                 keep_entries+="p:$l"$'\n'
                 # /tmp と /private/tmp のように、同じ場所を別の名前で書いても当たるよう実体パスでも持つ。
-                # まだ無いパスは実体に直せないので、文字どおりの形だけで比べる。
+                # まだ無いパスは、実在する最も近い祖先を実体に直し、残りを繋いだ形で持つ。
                 for f in /bin/pwd pwd; do
-                    r=$(cd "${l:-/}" 2>/dev/null && "$f" -P) || r=""
-                    while [ "${r%/}" != "$r" ]; do r=${r%/}; done
+                    r=$(real_path "$f" "$l")
                     # 3 つの形のうち同じものは 1 つにする。
                     case $'\n'"$keep_entries" in *$'\n'"p:$r"$'\n'*) continue ;; esac
                     if [ -n "$r" ]; then keep_entries+="p:$r"$'\n'; fi
@@ -139,7 +154,9 @@ keep_match() {
     for t in "$@"; do
         case "$t" in
             /*)
-                r=$(cd "$t" 2>/dev/null && /bin/pwd -P) || r=$t
+                # まだ無い対象も、実在する祖先を実体パスに直した形で比べる (/ は空になるので、そのときは文字どおり)。
+                r=$(real_path /bin/pwd "$t")
+                [ -n "$r" ] || r=$t
                 while IFS= read -r e; do
                     case "$e" in p:*) l=${e#p:} ;; *) continue ;; esac
                     for x in "$t" "$r"; do

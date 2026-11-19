@@ -9,6 +9,10 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 script="$root/home/scripts/worktree-gc.sh"
 # 呼び出し元の FF_CHECKOUTS は引き継がない (本物の git を使うので、export されていると一時ディレクトリの外の checkout が進む)。
 unset FF_CHECKOUTS
+# GC_REPOS と規則のスイッチ (RULE_*) も継がない (export されていると、規則 all_repos の on のケースが一時ディレクトリの外のリポを prune する)。
+# 各ケースは run_gc に明示した値だけで流れる。
+unset GC_REPOS
+for v in $(compgen -v RULE_); do unset "$v"; done
 base=$(mktemp -d)
 base=$(cd "$base" && pwd -P) # macOS の /var → /private/var。lsof は実パスで返す
 export GIT_CONFIG_GLOBAL="$base/gitconfig" GIT_CONFIG_NOSYSTEM=1 # 手元の hook や署名の設定を巻き込まない
@@ -1213,6 +1217,12 @@ check "~other/x は名前の行で / を含むので読めない" env CLEANUP_KE
 check "~ は HOME に展開する" m "$T/home/w/sub"
 check "実体パスの対象に、symlink を通る行が当たる" m "$T/real/x"
 check "無いパスの行は文字どおりで比べる" m "$T/gone/y"
+# まだ無いパスも、実在する最も近い祖先を実体パスに直して比べる (消えた worktree の登録は /private/tmp/… でも、行は /tmp/… と書きうる)。
+printf '%s\n' "$T/link/gone-a" "$T/real/gone-b" >"$T/gone-keep"
+mg() { HOME="$T/home" CLEANUP_KEEP="$T/gone-keep" bash -c "$pre"'keep_load >/dev/null; keep_match "$@"' "$lib" "$@"; }
+check "symlink の祖先を通る無いパスの行が、実体パスの無い対象を守る" mg "$T/real/gone-a/x"
+check "symlink の祖先を通る無い対象も、実体パスで書いた無いパスの行に当たる" mg "$T/link/gone-b"
+check "無いパス同士で、別の名前には当たらない" eval '! mg "$T/real/gone-c"'
 check "名前は前後の空白を除いて完全一致" m name-a
 check "名前は接頭辞では当たらない" nm name-ab
 check "末尾に改行の無い最後の行も読む" m last-name
@@ -2214,6 +2224,73 @@ ar_gc on
 check "on でも外れない" held2 bro
 check "同じリポの基準の登録も外れない" held2 g
 check "理由がログに出る" logged "keep  $T/r2 (all_repos: prune 見送り: worktrees/bro: invalid gitdir file)"
+
+setup all-repos-gc-repos-subdir # リポの中のフォルダを書いても、親のリポは回らない (git -C は親を探して成功する)
+new_repo "$T/r2"
+gone_wt "$T/r2" "$T/g"
+mkdir "$T/r2/sub"
+orca_mains
+ar_gc on GC_REPOS="$T/r2/sub"
+check "WARN が 1 行" test "$(grep -cF "WARN: all_repos: $T/r2/sub " "$T/log")" = 1
+check "そのリポの登録は外れない" held2 g
+
+ar_case all-repos-folder-left # フォルダは残り、.git だけが無い登録。git の理由は「フォルダが無い」と同じ
+git -C "$T/r2" worktree add -q -b left "$T/left" origin/main
+rm "$T/left/.git"
+touch -t "$OLD" "$T/r2/.git/worktrees/left/index"
+check "git の prune が同じ理由で外す (前提)" eval 'LC_ALL=C git -C "$T/r2" worktree prune --dry-run -v 2>&1 | grep -qxF "Removing worktrees/left: gitdir file points to non-existent location"'
+ar_gc on
+check "on でも外れない" held2 left
+check "同じリポの基準の登録も外れない" held2 g
+check "理由がログに出る" logged "keep  $T/r2 (all_repos: prune 見送り: $T/left が在る"
+
+ar_case all-repos-keep-list-symlink # 「触らない」リストの行が symlink を通り、消えた登録は親のフォルダごと無い
+mkdir -p "$T/sp/sub"
+gone_wt "$T/r2" "$T/sp/sub/k"
+mv "$T/sp" "$T/sp.moved"
+ln -s "$T" "$T/tl"
+echo "$T/tl/sp/sub/k" >"$KEEPLIST"
+ar_gc on
+check "そのリポは prune しない" held2 k
+check "同じリポの基準の登録も外れない" held2 g
+check "理由がログに出る" logged "keep  $T/r2 (all_repos: prune 見送り: $T/sp/sub/k が「触らない」リスト)"
+
+ar_case all-repos-tab-path # 親のフォルダ名にタブ。台帳の対象と戻し方がずれない
+tp="$T/t	b"
+mkdir "$tp"
+gone_wt "$T/r2" "$tp/tw"
+ar_gc on
+check "登録が外れる" eval '! held2 tw'
+check "対象の列 (タブは空白に) と規則" col_has "$T/t b/tw" 4 "all_repos: フォルダが無い"
+check "戻し方はそのパスとブランチ" col_has "$T/t b/tw" 5 "cd $T/r2 && git worktree add $(printf %q "$tp/tw") tw"
+check "基準の登録の行もずれない" col_has "$T/g" 5 "cd $T/r2 && git worktree add $T/g g"
+check "戻し方が貼って通る" restores_parse
+
+ar_case all-repos-orca-listed # フォルダの無い登録が Orca の一覧に在る ($ORCA_ROOT の外なので Orca の節は見ない)
+jq -n --arg m "$T/r2" --arg g "$T/g" '{result: {worktrees: [{path: $m, isMainWorktree: true}, {path: $g, isMainWorktree: false}]}}' >"$T/list.json"
+ar_gc on
+check "外れない" held2 g
+check "理由がログに出る" logged "keep  $T/r2 (all_repos: prune 見送り: $T/g が Orca の一覧に在る"
+ar_gc list
+check "list でも plan-prune を書かない" kind_rows plan-prune 0
+
+ar_case all-repos-relative-gitdir # git worktree add --relative-paths (git 2.48 から) の登録は、フォルダが無いと実体のパスに直せない
+if git -C "$T/r2" worktree add -q --relative-paths -b rel "$T/rel" origin/main 2>/dev/null; then
+    mv "$T/rel" "$T/rel.moved"
+    touch -t "$OLD" "$T/r2/.git/worktrees/rel/index"
+    check "gitdir が相対パス (前提)" eval '! grep -q "^/" "$T/r2/.git/worktrees/rel/gitdir"'
+    ar_gc on
+    check "外れない" held2 rel
+    check "同じリポの基準の登録も外れない" held2 g
+    check "理由がログに出る" logged "keep  $T/r2 (all_repos: prune 見送り: worktrees/rel の gitdir が絶対パスでない)"
+else
+    echo "skip [$CASE] git が --relative-paths に対応していない"
+fi
+
+ar_case all-repos-min-age-not-int
+ar_gc on MIN_AGE_HOURS=abc
+check "外れない" held2 g
+check "理由がログに出る" logged "WARN: all_repos: MIN_AGE_HOURS が整数でない"
 
 for f in "$base"/*/log; do grep -q '^exit=0$' "$f" || { echo "FAIL [$(basename "$(dirname "$f")")] exit が 0 でない"; fail=1; }; done
 [ "$fail" = 0 ] && echo "ok: worktree-gc"
