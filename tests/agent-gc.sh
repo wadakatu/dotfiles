@@ -32,7 +32,8 @@ judge() { # judge <説明> <期待する reason (候補なら null)> <jq で bas
 
 judge "候補" null '.'
 judge "Codex も同じ規則" null '.agent = "codex"'
-judge "pressure WARN なら 6h で候補" null '.idle_sec = 25200 | .pressure = 2'
+judge "pressure WARN なら 13h で候補" null '.idle_sec = 46800 | .pressure = 2'
+judge "pressure WARN でも 7h は残す" "idle 7h" '.idle_sec = 25200 | .pressure = 2'
 judge "pressure NORMAL なら 7h は残す" "idle 7h" '.idle_sec = 25200'
 judge "読めない" unreadable '.readable = false'
 judge "readable が無い" unreadable 'del(.readable)'

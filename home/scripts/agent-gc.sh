@@ -13,7 +13,7 @@ set -u
 export LC_ALL=C
 
 IDLE_H=${IDLE_H:-24}           # この時間 idle なら候補
-IDLE_WARN_H=${IDLE_WARN_H:-6}  # memory pressure が WARN 以上のときの閾値
+IDLE_WARN_H=${IDLE_WARN_H:-12} # memory pressure が WARN 以上のときの閾値
 EXCLUDE_RE=${EXCLUDE_RE:-}     # 候補にしないパスの正規表現 (「触らない」リストとどちらかに当たれば候補にしない)
 # 状態の根は cleanup-ledger.sh と同じ STATE_ROOT。テストはこの 1 つを一時ディレクトリに向ける。
 STATE_DIR=${STATE_DIR:-"${STATE_ROOT:-$HOME/Library/Application Support}/agent-gc"}
