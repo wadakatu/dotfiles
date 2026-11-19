@@ -264,20 +264,21 @@ sched() {
 # 後も、その前の行を読み込んだまま続く。worktree-gc が止まる設定で、こちらだけ on で動かないように)。共有ファイルを読めない回も off。
 # パスに何か在れば (リンク先の無い symlink・ディレクトリも) ファイルとして読み、読めなければ off (環境変数に戻らない)。
 # 「触らない」リストの場所 (CLEANUP_KEEP) も持ち帰る。worktree-gc は設定ファイルを読んでから共有ファイルを読むので、
-# 設定ファイルの CLEANUP_KEEP がそちらでは効く。こちらが別のリストを読んでいるなら、守るものが食い違うので off にする
-# (リストは合わせにいかない。手で打つ stop は今のまま)。値はタブで区切って持ち帰る。
+# 子でも同じ順で両方を source し (共有ファイルは代入と関数の定義だけ)、worktree-gc が使うパスを決めさせる (既定の場所を
+# ここに書き写さない)。こちらが別のリストを読んでいるなら、守るものが食い違うので off にする (リストは合わせにいかない。
+# 手で打つ stop は今のまま)。値はタブで区切って持ち帰る。
 autostop_mode() {
     local cfg=${WORKTREE_GC_CONFIG:-$HOME/.config/worktree-gc.env} RULE_session_autostop=${RULE_session_autostop-} out keep
     [ "$ledger_ok" = 1 ] || { echo off; return 0; }
     if [ -e "$cfg" ] || [ -L "$cfg" ]; then
-        if ! out=$("$BASH" -euo pipefail -c 'unset RULE_session_autostop CLEANUP_KEEP; . "$1" >/dev/null 2>&1
-            printf "%s\t%s" "${RULE_session_autostop-}" "${CLEANUP_KEEP-}"' _ "$cfg" 2>/dev/null); then
+        if ! out=$("$BASH" -euo pipefail -c 'unset RULE_session_autostop; . "$1" >/dev/null 2>&1; . "$2"
+            printf "%s\t%s" "${RULE_session_autostop-}" "$CLEANUP_KEEP"' _ "$cfg" "$(dirname "$self")/cleanup-ledger.sh" 2>/dev/null); then
             log "WARN: $cfg を読めない。session_autostop は off として扱う"
             echo off
             return 0
         fi
         RULE_session_autostop=${out%%$'\t'*} keep=${out#*$'\t'}
-        if [ -n "$keep" ] && [ "$keep" != "$CLEANUP_KEEP" ]; then
+        if [ "$keep" != "$CLEANUP_KEEP" ]; then
             log "WARN: $cfg の CLEANUP_KEEP=$keep が agent-gc の「触らない」リスト $CLEANUP_KEEP と違う。session_autostop は off として扱う"
             echo off
             return 0
@@ -437,7 +438,7 @@ stop() {
 # pid が使い回されても開始時刻が違うので当たらない。
 # ponytail: 控えは止めた 1 本につき 1 行増える (年に数千行)。大きくなったら、生きているプロセスの分だけ残す。
 stop_each() { # stop_each <manual|list|on> <行>
-    local mode=$1 targets=$2 row pid want reason term agent terms path sid restore lost key rule warned msg
+    local mode=$1 targets=$2 row pid want reason term agent terms path sid restore lost key rule warned msg send_err
     local sent_log="$STATE_DIR/autostop-sent.tsv"
     case $mode in manual | list | on) ;; *) log "WARN: stop_each の mode '$mode' は使えない。1 本も止めない"; return 1 ;; esac
     # 共有ファイルが無ければ、何を守るかも、止めたものをどこに残すかも分からないので 1 本も止めない。
@@ -560,11 +561,13 @@ stop_each() { # stop_each <manual|list|on> <行>
         if [ "$mode" = on ] && ! { printf '%s\n' "${key%:*}" >>"$sent_log"; } 2>/dev/null; then
             log "skip $agent pid=$pid: 控え $sent_log に書けない"; continue
         fi
+        send_err=0
         if ! orca terminal send --terminal "$term" --text /exit --enter --json >/dev/null 2>&1; then
             log "failed $agent pid=$pid: send"
             # 巡回は控えに印を残したので、以後は exit-sent で飛ばす。届いていれば終わるので、終了を待って台帳と通知に載せる。
+            # 終わったら届いていたので、止めた行のまま書く。印は終わらなかったときの規則にだけ使う。
             [ "$mode" = on ] || continue
-            rule="$rule (/exit の送信がエラー・届いたかは不明)"
+            send_err=1
         fi
         local lstart i
         lstart=$(jq -r .lstart <<<"$row")
@@ -575,7 +578,7 @@ stop_each() { # stop_each <manual|list|on> <行>
         if [ "$(lstart_of "$pid")" = "$lstart" ]; then
             log "failed $agent pid=$pid: still running after /exit"
             # /exit は届いていて、待ち時間の後で終わることがある。そのとき台帳に無いと戻し方が残らないので、印を付けて書く。
-            rule="$rule (/exit 送信済み・終了は未確認)"
+            if [ "$send_err" = 1 ]; then rule="$rule (/exit の送信がエラー・終了は未確認)"; else rule="$rule (/exit 送信済み・終了は未確認)"; fi
             unconfirmed=$((unconfirmed + 1))
         else
             log "stopped $agent pid=$pid idle=$(jq -r '.idle_sec / 3600 | floor' <<<"$row")h path=$path"
