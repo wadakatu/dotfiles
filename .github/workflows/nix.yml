@@ -65,3 +65,30 @@ jobs:
       - uses: DeterminateSystems/determinate-nix-action@v3
       - name: build darwin system
         run: nix build .#darwinConfigurations.{work,personal}.system --no-link --show-trace
+
+  # ── launchd と同じ macOS 標準の /bin/bash 3.2 でテスト ──────
+  # launchd のジョブは home/run-from-main.nix から /bin/bash で動くが、check の bash は 5。
+  # テストは中で `bash` を PATH から呼ぶので、PATH の先頭に /bin/bash を差して中まで 3.2 にする。
+  # nix を入れないのは、launchd と同じく macOS 標準の道具だけで動くかも見るため。
+  test-bash32:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - name: put /bin/bash first on PATH
+        run: |
+          mkdir -p "$RUNNER_TEMP/bash32"
+          ln -s /bin/bash "$RUNNER_TEMP/bash32/bash"
+          echo "$RUNNER_TEMP/bash32" >>"$GITHUB_PATH"
+      - name: check tools
+        run: |
+          bash --version | head -1 | grep -F 'version 3.2'
+          command -v jq git perl
+      - name: tests
+        run: |
+          failed=
+          for t in tests/*.sh; do
+            echo "::group::$t"
+            if [ "$t" = tests/branch-guard.sh ]; then sh "$t"; else bash "$t"; fi || failed="$failed $t"
+            echo "::endgroup::"
+          done
+          [ -z "$failed" ] || { echo "::error::failed:$failed"; exit 1; }
