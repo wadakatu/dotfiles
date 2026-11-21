@@ -69,9 +69,12 @@ jobs:
   # ── launchd と同じ macOS 標準の /bin/bash 3.2 でテスト ──────
   # launchd のジョブは home/run-from-main.nix から /bin/bash で動くが、check の bash は 5。
   # テストは中で `bash` を PATH から呼ぶので、PATH の先頭に /bin/bash を差して中まで 3.2 にする。
-  # nix を入れないのは、launchd と同じく macOS 標準の道具だけで動くかも見るため。
+  # 固定するのは bash だけ。jq・git・perl は runner の Homebrew 版を使う (launchd でも nix の profile 版で、macOS 標準版ではない)。
   test-bash32:
     runs-on: macos-26
+    # nix も FlakeHub も使わないので、ワークフロー全体の id-token: write を渡さない。
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - name: put /bin/bash first on PATH
@@ -82,7 +85,8 @@ jobs:
       - name: check tools
         run: |
           bash --version | head -1 | grep -F 'version 3.2'
-          command -v jq git perl
+          # command -v は名前を並べると 1 つ見つかれば成功するので、1 つずつ見る。
+          for c in jq git perl; do command -v "$c" || { echo "::error::missing: $c"; exit 1; }; done
       - name: tests
         run: |
           failed=
