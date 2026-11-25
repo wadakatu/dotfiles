@@ -46,6 +46,9 @@ jobs:
       # skill・rule・LaunchAgent のスクリプトが読む場所を作るスクリプトなので、失敗しても前の版が残ることを CI で見張る。
       - name: live-sync script
         run: bash tests/live-sync.sh
+      # Claude の Bash ツールの PATH を書き換える hook なので、開発シェルの bin を上書きしないことを CI で見張る。
+      - name: mise-shims-first hook
+        run: bash tests/mise-shims-first.sh
       # 2 つのスクリプトが同じ worktree にエージェントを同時に起動しないことと、残ったロックで止まり続けないことを CI で見張る。
       - name: dispatch-lock
         run: bash tests/dispatch-lock.sh
